@@ -1,0 +1,6 @@
+lc(reg1)
+lc(reg2)
+move(reg2, reg1)
+lc(reg3)
+sub(reg3, reg4)
+nop()

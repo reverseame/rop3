@@ -1,0 +1,35 @@
+# You can specify your own operations in either one YAML or several ones. Some examples:
+
+nop:
+  # ret
+  - # each operations can be composed of several sets
+    - mnemonic: ret
+
+  - # another set
+    - mnemonic: retf
+
+neg:
+  # neg dst
+  - # just one set
+    - mnemonic: neg
+      op1: dst
+
+dummy:
+  # xor dst, dst
+  # add dst, src (src = 0xFFFFFFFF)
+  - # one shet composed of two instructions
+    - mnemonic: xor
+      op1: dst
+      op2: dst
+    - mnemonic: add
+      op1: dst
+      op2:
+        reg: src
+        value: 0xFFFFFFFF
+
+imm:
+  -
+    - mnemonic: in
+      op1: dst
+      op2:
+        value: 3

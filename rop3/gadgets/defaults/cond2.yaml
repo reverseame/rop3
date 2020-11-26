@@ -1,0 +1,48 @@
+# Second step of ROP conditional jump
+cond2:
+  # pop dst
+  # and src, dst
+  # add esp, src
+  -
+    - mnemonic: pop
+      op1: dst
+    - mnemonic: and
+      op1: src
+      op2: dst
+    - mnemonic: add
+      op1: esp
+      op2: src
+
+  # pop dst
+  # and src, dst
+  # add src, esp
+  # mov esp, src
+  -
+    - mnemonic: pop
+      op1: dst
+    - mnemonic: and
+      op1: src
+      op2: dst
+    - mnemonic: add
+      op1: src
+      op2: esp
+    - mnemonic: mov
+      op1: esp
+      op2: src
+
+  # pop dst
+  # and src, dst
+  # add src, esp
+  # xchg esp, src
+  -
+    - mnemonic: pop
+      op1: dst
+    - mnemonic: and
+      op1: src
+      op2: dst
+    - mnemonic: add
+      op1: src
+      op2: esp
+    - mnemonic: xchg
+      op1: esp
+      op2: src

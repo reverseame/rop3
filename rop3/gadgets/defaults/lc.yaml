@@ -1,0 +1,10 @@
+# Load constant
+lc:
+  # pop dst
+  -
+    - mnemonic: pop
+      op1: dst
+
+  # popad
+  -
+    - mnemonic: popad

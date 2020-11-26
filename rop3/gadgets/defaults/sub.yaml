@@ -1,0 +1,15 @@
+# Sub values
+sub:
+  # sub dst, src
+  -
+    - mnemonic: sub
+      op1: dst
+      op2: src
+
+  # clc
+  # sbb dst, src
+  -
+    - mnemonic: clc
+    - mnemonic: sbb
+      op1: dst
+      op2: src

@@ -1,0 +1,14 @@
+# NOT value
+not:
+  # not dst
+  -
+    - mnemonic: not
+      op1: dst
+
+  # xor dst, src (dst = 0xFFFFFFFF)
+  -
+    - mnemonic: xor
+      op1:
+        reg: dst
+        value: 0xFFFFFFFF
+      op2: src
