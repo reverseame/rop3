@@ -33,3 +33,19 @@ imm:
       op1: dst
       op2:
         value: 3
+
+
+adc:
+  # adc dst
+  - # just one set
+    - mnemonic: adc
+      allow_promotion: True
+      op1: dst
+      op2: src
+
+leave:
+  # leave
+  - # move esp, ebp
+    - mnemonic: leave
+      op1_implicit: True
+      op2_implicit: True

@@ -119,3 +119,9 @@ move:
     - mnemonic: sub
       op1: dst
       op2: src
+
+  # leave
+  - # move esp, ebp
+    - mnemonic: leave
+      op1_implicit: True
+      op2_implicit: True

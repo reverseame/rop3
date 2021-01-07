@@ -28,7 +28,7 @@ HEADER = '\
                 888                 \n\
                 888\n\
 \n\
-                A tool of RME Research Group at DisCo UZ\
+                A tool of RME-DisCo Research Group at University of Zaragoza\
 '
 
 def show_version():
@@ -38,7 +38,8 @@ def show_version():
     print('Author:  {0} <{1}>'.format(AUTHOR, EMAIL))
 
 def format_gadget(gad):
-    return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
+    #return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
+    return '[{0} @ {1:#x}]: {2}'.format(gad['file'], gad['vaddr'], gad['gadget'])
 
 def format_op_gadget(gad):
     ret = format_gadget(gad)
@@ -104,3 +105,23 @@ def delete_duplicate_gadgets(gadgets):
         unique_gadgets += [gadget]
 
     return unique_gadgets
+
+def is_x64_qword_reg(reg):
+    return reg in ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
+
+def promote_x64_qword_reg(reg):
+    to_change = {
+        'eax': 'rax',
+        'ecx': 'rcx',
+        'edx': 'rdx',
+        'ebx': 'rbx',
+        'esp': 'rsp',
+        'ebp': 'rbp',
+        'esi': 'rsi',
+        'edi': 'rdi'
+    }
+
+    try:
+        return to_change[reg]
+    except KeyError:
+        return reg

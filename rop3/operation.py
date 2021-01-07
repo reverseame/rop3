@@ -29,12 +29,19 @@ class Operation:
                     gadget['values'] = value
                     result = chain.is_equal(decodes)
                     if result:
+                        (dst_chain, src_chain, allow_promotion) = result
                         dst = self.template.dst
                         src = self.template.src
                         if not dst:
-                            dst = result[1]
+                            dst = dst_chain
+                            if allow_promotion:
+                                if utils.is_x64_qword_reg(dst):
+                                    dst = [dst, utils.promote_x64_qword_reg(dst)]
                         if not src:
-                            src = result[2]
+                            src = src_chain
+                            if allow_promotion:
+                                if utils.is_x64_qword_reg(src):
+                                    src = [src, utils.promote_x64_qword_reg(src)]
                         gadget['op'] = self.template.op_str
                         gadget['dst'] = dst
                         gadget['src'] = src

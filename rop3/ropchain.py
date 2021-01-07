@@ -25,7 +25,7 @@ class RopChain:
         except ParseError as exc:
             debug.error('\'{0}\': {1}'.format(self.file_path, str(exc)))
         except IOError:
-            debug.error('\'{0}\': Unalbe to read file'.format(self.file_path))
+            debug.error('\'{0}\': Unable to read file'.format(self.file_path))
 
     def _read_file(self):
         with open(self.file_path, 'r') as f:
@@ -76,7 +76,8 @@ class Tree:
         chains = self._construct_chains(state)
 
         for chain in chains:
-            ret += [self._construct_ropchain(chain, gadgets)]
+            temp = self._construct_ropchain(chain, gadgets)
+            ret += [temp]
 
         return ret
 
@@ -87,11 +88,14 @@ class Tree:
             temp = []
             for gad in gads:
                 if gad['op'] == op['op']:
-                    if op['dst'] and gad['src']:
+                    if op['dst'] and op['src']:
                         if (chain[op['dst']] == gad['dst']) and (chain[op['src']] == gad['src']):
                             temp += [gad]
                     elif op['dst']:
-                        if (chain[op['dst']] == gad['dst']):
+                        if type(gad['dst']) == list:
+                            if chain[op['dst']] in gad['dst']:
+                                temp += [gad]
+                        elif chain[op['dst']] == gad['dst']:
                             temp += [gad]
                     elif op['src']:
                         if (chain[op['src']] == gad['src']):
@@ -183,7 +187,8 @@ class Tree:
         for i, op in enumerate(self.ops):
             dst = op['dst'] if op['dst'] in regs else ''
             src = op['src'] if op['src'] in regs else ''
-            gads += [operation.Operation(op['op'], dst=dst, src=src).get_gadgets(gadgets)]
+            temp = operation.Operation(op['op'], dst=dst, src=src)
+            gads += [temp.get_gadgets(gadgets)]
             state = self.__update_state(state, op, gads[i])
 
         return state, gads
@@ -250,12 +255,17 @@ class Tree:
         ret = []
 
         for gad in gadgets:
-            comb = ()
-            comb += (gad['dst'],)
-            comb += (gad['src'],)
-
-            if comb not in ret:
-                ret += [comb]
+            if (type(gad['dst']) == str) and (type(gad['src']) == str):
+                comb = (gad['dst'], gad['src'])
+                # We're working with mask, filter explicit values (int)
+                if comb not in ret and not any([x for x in comb if type(x) == int]):
+                    ret += [comb]
+            elif (type(gad['dst']) == list) and (type(gad['src']) == str):
+                for item in gad['dst']:
+                    comb = (item, gad['src'])
+                    # We're working with mask, filter explicit values (int)
+                    if comb not in ret and not any([x for x in comb if type(x) == int]):
+                        ret += [comb]
 
         return ret
 

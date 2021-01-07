@@ -26,7 +26,6 @@ def main():
                     print('Ropchain {0:n}'.format(i+1))
                     print('=' * 80)
                     for item in chain:
-                        print(item['op'])
                         print(utils.format_op_ropchain(item['op']))
                         for gad in item['gads']:
                             print('\t{0}'.format(utils.format_op_gadget(gad)))

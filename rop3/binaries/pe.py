@@ -23,7 +23,7 @@ class PE:
         elif self._pe.FILE_HEADER.Machine == IMAGE_FILE_MACHINE_AMD64:
             return capstone.CS_ARCH_X86, capstone.CS_MODE_64
         else:
-            raise binary.BinaryException('Unssuported machine CPU type in COFF File Header')
+            raise binary.BinaryException('Unsupported machine CPU type in COFF File Header')
 
     def get_entry_point(self):
         return self._pe.OPTIONAL_HEADER.ImageBase + self._pe.OPTIONAL_HEADER.AddressOfEntryPoint

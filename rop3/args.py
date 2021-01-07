@@ -20,6 +20,7 @@ def parse_args(arguments):
     parser.add_argument('--op', type=str, metavar='<op>', help='search for operation. Available: {{{0}}}'.format(ops))
     parser.add_argument('--dst', type=str, metavar='<reg/imm>', default='', help='specify a destination reg/imm to operation')
     parser.add_argument('--src', type=str, metavar='<reg/imm>', default='', help='specify a source reg/imm to operation')
+    # TODO
     # parser.add_argument('--fit', action='store_true', help='search smallest operation gadgets based in number of bytes')
     parser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with rop chains')
 

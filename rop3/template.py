@@ -76,6 +76,12 @@ class Chain():
         src = ''
 
         for ins, decode in zip(self.chain, decodes):
+            # HACK
+            if ins.op1_implicit:
+                dst = self.get_implicit(decode, 1)
+            if ins.op2_implicit:
+                src = self.get_implicit(decode, 0)
+
             for my_operand, operand in zip(ins.operands, decode.operands):
                 if my_operand.is_generic():
                     if my_operand.is_reg() or my_operand.is_mem():
@@ -84,26 +90,36 @@ class Chain():
                                 dst = decode.reg_name(operand.value.reg)
                             elif operand.type == x86_const.X86_OP_IMM:
                                 dst = operand.value.imm
+                            elif operand.type == x86_const.X86_OP_MEM:
+                                dst = decode.reg_name(operand.value.mem.base)
                         elif my_operand.is_src() and not src:
                             if operand.type == x86_const.X86_OP_REG:
                                 src = decode.reg_name(operand.value.reg)
                             elif operand.type == x86_const.X86_OP_IMM:
                                 src = operand.value.imm
+                            elif operand.type == x86_const.X86_OP_MEM:
+                                src = decode.reg_name(operand.value.mem.base)
 
         chain = []
+        # HACK
+        allow_promotion = False
 
         for ins in self.chain:
             new_ins = copy.deepcopy(ins)
             new_ins.set_dst(dst)
             new_ins.set_src(src)
+            allow_promotion = allow_promotion or new_ins.allow_promotion
             chain += [new_ins]
 
         for ins, decode in zip(chain, decodes):
             for my_operand, operand in zip(ins.operands, decode.operands):
-                if my_operand.is_reg() or my_operand.is_mem():
-                    if type(my_operand.reg) == int and operand.reg:
+                if my_operand.is_reg():
+                    if (type(my_operand.reg) == int) and operand.reg:
                         continue
-                    if my_operand.reg  != decode.reg_name(operand.value.reg):
+                    if my_operand.reg != decode.reg_name(operand.value.reg):
+                        return False
+                elif my_operand.is_mem():
+                    if my_operand.reg != decode.reg_name(operand.value.mem.base):
                         return False
                 elif my_operand.is_imm():
                     if my_operand.imm != operand.value.imm:
@@ -111,6 +127,7 @@ class Chain():
                 else:
                     return False
 
+        '''
         for found_ins, ins in zip(chain, self.chain):
             if len(found_ins.operands) == 2:
                 if (ins.operands[0].is_reg() or ins.operands[0].is_mem()) and\
@@ -118,8 +135,14 @@ class Chain():
                     if ins.operands[0].reg != ins.operands[1].reg:
                         if found_ins.operands[0].reg == found_ins.operands[1].reg:
                             return False
+        '''
+        return dst, src, allow_promotion
 
-        return True, dst, src
+    def get_implicit(self, decode, index):
+        if len(decode.regs_write) > index:
+            return decode.reg_name(decode.regs_write[index])
+
+        return ''
 
     def get_values(self):
         ret = []
@@ -132,6 +155,11 @@ class Chain():
 class Instruction:
     def __init__(self, ins, dst, src):
         self.mnemonic = ins['mnemonic']
+        # Some operations work on 32 bit registers as if they were 64 bit.
+        # So we can allow register promotion (v.g: from 'adc esi, eax' to 'adc rsi, rax')
+        self.allow_promotion = ins['allow_promotion'] if 'allow_promotion' in ins else False
+        self.op1_implicit = ins['op1_implicit'] if 'op1_implicit' in ins else False
+        self.op2_implicit = ins['op2_implicit'] if 'op2_implicit' in ins else False
         self.operands = self._parse_operands(ins, dst, src)
 
     def __str__(self):
@@ -203,17 +231,17 @@ class Instruction:
 
                 return False
 
-            if my_operand.is_reg() and operand.type == x86_const.X86_OP_REG:
+            if my_operand.is_reg() and (operand.type == x86_const.X86_OP_REG):
                 if not my_operand.is_generic():
                     if my_operand.reg != decode.reg_name(operand.value.reg):
                         return False
 
-            if my_operand.is_mem() and operand.type == x86_const.X86_OP_MEM:
+            if my_operand.is_mem() and (operand.type == x86_const.X86_OP_MEM):
                 if not my_operand.is_generic():
                     if my_operand.reg != decode.reg_name(operand.value.mem.base):
                         return False
 
-            if my_operand.is_imm() and operand.type == x86_const.X86_OP_IMM:
+            if my_operand.is_imm() and (operand.type == x86_const.X86_OP_IMM):
                 if my_operand.imm != operand.value.imm:
                     return False
 
@@ -226,6 +254,11 @@ class Instruction:
             ret += [operand.get_value()]
 
         return [i for i in ret if i]
+
+    def promote(self):
+        if self.allow_promotion:
+            for operand in self.operands:
+                operand.promote()
 
     def set_dst(self, dst):
         for op in self.operands:
@@ -277,6 +310,9 @@ class Operand:
             return x86_const.X86_OP_MEM
 
         raise InstructionError('Operand unrecognized: {0}'.format(op))
+
+    def is_equal(self, reg):
+        import pdb; pdb.set_trace()
 
     def is_reg(self):
         return self.type == x86_const.X86_OP_REG

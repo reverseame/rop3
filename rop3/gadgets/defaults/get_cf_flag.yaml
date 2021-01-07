@@ -1,0 +1,16 @@
+# Add values
+cf:
+  -
+    - mnemonic: adc
+      allow_promotion: True
+      op1: dst
+      op2: dst
+  -
+    - mnemonic: sbb
+      op1: dst
+      op2: dst
+    - mnemonic: lc
+      op1: src
+    - mnemonic: and
+      op1: dst
+      op2: src
