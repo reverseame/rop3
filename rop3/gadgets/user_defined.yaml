@@ -8,12 +8,6 @@ nop:
   - # another set
     - mnemonic: retf
 
-neg:
-  # neg dst
-  - # just one set
-    - mnemonic: neg
-      op1: dst
-
 dummy:
   # xor dst, dst
   # add dst, src (src = 0xFFFFFFFF)
@@ -34,11 +28,18 @@ imm:
       op2:
         value: 3
 
-
 adc:
   # adc dst
   - # just one set
     - mnemonic: adc
+      allow_promotion: True
+      op1: dst
+      op2: src
+
+sbb:
+  # sbb dst, src
+  - # just one set
+    - mnemonic: sbb
       allow_promotion: True
       op1: dst
       op2: src
@@ -49,3 +50,9 @@ leave:
     - mnemonic: leave
       op1_implicit: True
       op2_implicit: True
+
+rcl:
+  - # rcl dst, src
+    - mnemonic: rcl
+      op1: dst
+      op2: src

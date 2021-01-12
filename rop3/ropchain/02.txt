@@ -1,6 +1,0 @@
-lc(reg1)
-move(reg1, rax)
-lc(reg2)
-lc(reg3)
-lc(reg4)
-lc(reg5)

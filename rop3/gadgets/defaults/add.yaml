@@ -13,3 +13,8 @@ add:
     - mnemonic: adc
       op1: dst
       op2: src
+
+#  # inc dst
+#  -
+#    - mnemonic: inc
+#      op1: dst

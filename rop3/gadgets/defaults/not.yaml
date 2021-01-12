@@ -8,7 +8,7 @@ not:
   # xor dst, src (dst = 0xFFFFFFFF)
   -
     - mnemonic: xor
-      op1:
-        reg: dst
+      op1: dst
+      op2:
+        reg: src
         value: 0xFFFFFFFF
-      op2: src

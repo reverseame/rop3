@@ -1,5 +1,5 @@
-# Load value
-store:
+# Store value
+st:
   # mov [dst], src
   -
     - mnemonic: mov

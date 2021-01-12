@@ -1,0 +1,3 @@
+xor(reg1, reg1)
+sub(reg1, reg2)
+mov(reg2, reg1)

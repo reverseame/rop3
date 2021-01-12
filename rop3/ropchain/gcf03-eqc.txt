@@ -1,0 +1,4 @@
+lc(reg1)
+sub(reg3, reg4)
+neg(reg3)
+rcl(reg2, reg1)
