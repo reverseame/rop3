@@ -28,7 +28,7 @@ HEADER = '\
                 888                 \n\
                 888\n\
 \n\
-                A tool of RME-DisCo Research Group at University of Zaragoza\
+                A tool of RME, a part of the DisCo research group from University of Zaragoza\
 '
 
 def show_version():
@@ -38,8 +38,7 @@ def show_version():
     print('Author:  {0} <{1}>'.format(AUTHOR, EMAIL))
 
 def format_gadget(gad):
-    #return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
-    return '[{0} @ {1:#x}]: {2}'.format(gad['file'], gad['vaddr'], gad['gadget'])
+    return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
 
 def format_op_gadget(gad):
     ret = format_gadget(gad)
@@ -83,7 +82,7 @@ def get_op_files():
     return [file for file in glob.glob(os.path.join(GADGET_FOLDER, '**', '*.yaml'), recursive=True) if os.path.isfile(file)]
 
 def read_yaml(file):
-    with open(file, 'r') as f:        
+    with open(file, 'r') as f:
         return yaml.safe_load(f.read())
 
 def delete_duplicate_gadgets(gadgets):

@@ -120,7 +120,8 @@ class Tree:
 
         for comb in combinations:
             if self._is_valid_comb(state, comb):
-                ret += [comb]
+                if comb not in ret:
+                    ret += [comb]
 
         return ret
 
