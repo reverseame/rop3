@@ -1,3 +1,20 @@
+'''
+This file is part of rop3 (https://github.com/reverseame/rop3).
+
+rop3 is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+rop3 is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with rop3. If not, see <https://www.gnu.org/licenses/>.
+'''
+
 import os
 import glob
 import yaml
@@ -6,12 +23,9 @@ import __main__
 GADGET_FOLDER = os.path.join(os.path.dirname(__file__), 'gadgets')
 
 MAJOR = 0
-MINOR = 1
+MINOR = 9
 PATCH = 0
 VERSION = '{0}.{1}.{2}'.format(MAJOR, MINOR, PATCH)
-
-AUTHOR = 'Daniel Uroz'
-EMAIL = 'duroz@unizar.es'
 
 TOOL_NAME = os.path.basename(os.path.realpath(__main__.__file__))
 
@@ -28,14 +42,14 @@ HEADER = '\
                 888                 \n\
                 888\n\
 \n\
-                A tool of RME, a part of the DisCo research group from University of Zaragoza\
+                A tool of RME-DisCo Research Group from University of Zaragoza\n\
+                                    <https://reversea.me/>\
 '
 
 def show_version():
     print(HEADER)
     print()
     print('Version: {0} v{1}'.format(TOOL_NAME, VERSION))
-    print('Author:  {0} <{1}>'.format(AUTHOR, EMAIL))
 
 def format_gadget(gad):
     return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
