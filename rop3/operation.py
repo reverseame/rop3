@@ -37,11 +37,18 @@ class Operation:
                             if allow_promotion:
                                 if utils.is_x64_qword_reg(dst):
                                     dst = [dst, utils.promote_x64_qword_reg(dst)]
+                        elif allow_promotion:
+                            if utils.is_x64_qword_reg(dst):
+                                dst = [dst, utils.promote_x64_qword_reg(dst)]
+
                         if not src:
                             src = src_chain
                             if allow_promotion:
                                 if utils.is_x64_qword_reg(src):
                                     src = [src, utils.promote_x64_qword_reg(src)]
+                        elif allow_promotion:
+                            if utils.is_x64_qword_reg(src):
+                                src = [src, utils.promote_x64_qword_reg(src)]
                         gadget['op'] = self.template.op_str
                         gadget['dst'] = dst
                         gadget['src'] = src

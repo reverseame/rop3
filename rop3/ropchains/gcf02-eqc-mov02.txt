@@ -1,0 +1,6 @@
+lc(reg1)
+sub(reg3, reg4)
+neg(reg3)
+sbb(reg2, reg1)
+mov(reg5, reg2)
+neg(reg5)

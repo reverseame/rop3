@@ -2,7 +2,6 @@ import os
 import re
 import copy
 import itertools
-import collections
 
 import rop3.binary as binary
 import rop3.debug as debug
@@ -89,7 +88,17 @@ class Tree:
             for gad in gads:
                 if gad['op'] == op['op']:
                     if op['dst'] and op['src']:
-                        if (chain[op['dst']] == gad['dst']) and (chain[op['src']] == gad['src']):
+                        if type(gad['dst']) == list:
+                            equal_dst = chain[op['dst']] in gad['dst']
+                        else:
+                            equal_dst = chain[op['dst']] == gad['dst']
+
+                        if type(gad['src']) == list:
+                            equal_src = chain[op['src']] in gad['src']
+                        else:
+                            equal_src = chain[op['src']] == gad['src']
+
+                        if equal_dst and equal_src:
                             temp += [gad]
                     elif op['dst']:
                         if type(gad['dst']) == list:
@@ -98,7 +107,10 @@ class Tree:
                         elif chain[op['dst']] == gad['dst']:
                             temp += [gad]
                     elif op['src']:
-                        if (chain[op['src']] == gad['src']):
+                        if type(gad['src']) == list:
+                            if chain[op['src']] in gad['src']:
+                                temp += [gad]
+                        elif (chain[op['src']] == gad['src']):
                             temp += [gad]
                     else:
                         temp += [gad]
@@ -176,7 +188,7 @@ class Tree:
                         temp = ret[reg]
                         ret[reg] = list(set(temp + values))
                     else:
-                        ret[reg] = values
+                        ret[reg] = list(set(values))
         return ret
 
     def _get_candidates(self, binaries):
@@ -267,7 +279,19 @@ class Tree:
                     # We're working with mask, filter explicit values (int)
                     if comb not in ret and not any([x for x in comb if type(x) == int]):
                         ret += [comb]
-
+            elif (type(gad['dst']) == list) and (type(gad['src']) == list):
+                for item1 in gad['dst']:
+                    for item2 in gad['src']:
+                        comb = (item1, item2)
+                        # We're working with mask, filter explicit values (int)
+                        if comb not in ret and not any([x for x in comb if type(x) == int]):
+                            ret += [comb]
+            elif (type(gad['dst']) == str) and (type(gad['src']) == list):
+                for item in gad['src']:
+                    comb = (gad['dst'], item)
+                    # We're working with mask, filter explicit values (int)
+                    if comb not in ret and not any([x for x in comb if type(x) == int]):
+                        ret += [comb]
         return ret
 
     def __get_comb(self, op):

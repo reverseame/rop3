@@ -1,0 +1,4 @@
+lc(reg1)
+neg(reg2)
+mov(reg3, reg2)
+and(reg3, reg1)

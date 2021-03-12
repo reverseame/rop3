@@ -32,7 +32,7 @@ adc:
   # adc dst
   - # just one set
     - mnemonic: adc
-      allow_promotion: True
+      # allow_promotion: True
       op1: dst
       op2: src
 
@@ -40,7 +40,7 @@ sbb:
   # sbb dst, src
   - # just one set
     - mnemonic: sbb
-      allow_promotion: True
+      # allow_promotion: True
       op1: dst
       op2: src
 

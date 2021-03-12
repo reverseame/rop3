@@ -22,7 +22,7 @@ class TemplateOp:
             ret += '{0} || '.format(str(ins))
 
         return ret[:-4]
-    
+
     def __len__(self):
         return len(self.op)
 
@@ -127,15 +127,6 @@ class Chain():
                 else:
                     return False
 
-        '''
-        for found_ins, ins in zip(chain, self.chain):
-            if len(found_ins.operands) == 2:
-                if (ins.operands[0].is_reg() or ins.operands[0].is_mem()) and\
-                        (ins.operands[1].is_reg() or ins.operands[1].is_mem()):
-                    if ins.operands[0].reg != ins.operands[1].reg:
-                        if found_ins.operands[0].reg == found_ins.operands[1].reg:
-                            return False
-        '''
         return dst, src, allow_promotion
 
     def get_implicit(self, decode, index):
@@ -169,7 +160,7 @@ class Instruction:
             ret += ' {0},'.format(str(op))
 
         return ret.replace('  ', ' ')[:-1]
- 
+
     def _parse_operands(self, ins, dst, src):
         ret = []
 
@@ -311,9 +302,6 @@ class Operand:
 
         raise InstructionError('Operand unrecognized: {0}'.format(op))
 
-    def is_equal(self, reg):
-        import pdb; pdb.set_trace()
-
     def is_reg(self):
         return self.type == x86_const.X86_OP_REG
 
@@ -365,7 +353,7 @@ class Operand:
             pass
 
         return False
-    
+
     def is_src(self):
         try:
             return self.reg == 'src'

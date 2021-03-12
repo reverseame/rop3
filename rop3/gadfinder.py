@@ -10,7 +10,7 @@ import rop3.operation as operation
 DEPTH = 5
 
 # Flags when searching gadgets
-SKIP_DUPLICATES = 1
+KEEP_DUPLICATES = 1
 NO_JOP = 2
 NO_RETF = 4
 
@@ -103,7 +103,7 @@ class Finder:
         return self.flags & NO_RETF
 
     def _skip_duplicates(self):
-        return self.flags & SKIP_DUPLICATES
+        return self.flags & KEEP_DUPLICATES
 
     def _search_gadgets(self, file, base=''):
         ret = []

@@ -1,0 +1,3 @@
+lc(reg1)
+mov(reg3, reg1)
+add(esp, reg3)
