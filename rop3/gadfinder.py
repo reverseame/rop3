@@ -15,101 +15,119 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import re
-import capstone
-
-import rop3.debug as debug
-import rop3.utils as utils
-import rop3.binary as binary
-import rop3.operation as operation
-
-# Default depth engine
+''' Default depth engine '''
 DEPTH = 5
 
-# Flags when searching gadgets
+''' Flags when searching gadgets '''
+DEFAULT = 0
 KEEP_DUPLICATES = 1
 NO_JOP = 2
 NO_RETF = 4
 
-class Finder:
+import re
+import capstone
+
+import rop3.utils as utils
+import rop3.binary
+import rop3.operation as operation
+
+class GadFinder:
     '''
     Class to search gadgets in a binary
     '''
-    def __init__(self, depth=DEPTH, flags=0):
+    def __init__(self, depth=DEPTH, flags=DEFAULT):
         self.depth = depth
         self.flags = flags
-        self.gad_terminations = self._set_terminations()
 
-    def find(self, filename, base=''):
-        gadgets = []
-
-        try:
-            gadgets = self._search_gadgets(filename, base)
-            gadgets = self._clean_gadgets(gadgets)
-            if not self._skip_duplicates():
-                gadgets = utils.delete_duplicate_gadgets(gadgets)
-            gadgets = self._alpha_sortgadgets(gadgets)
-        except binary.BinaryException as exc:
-            debug.warning(str(exc))
+    def find(self, filename, base=None, badchars=None):
+        binary = rop3.binary.Binary(filename, base)
+        
+        gadgets = self._search_gadgets(binary, badchars)
+        gadgets = self._alphasort_gadgets(gadgets)
+        if not self._keep_duplicates():
+            gadgets = self._summarize_gadgets(gadgets)
 
         return gadgets
 
-    def find_iter(self, filename, base=''):
-        for file in filename:
-            yield self.find(file, base)
+    def findall(self, files, base=None, badchars=None):
+        gadgets = []
 
-    def find_all(self, filename):
+        for filename, base in zip(files, base):
+            gadgets.extend(self.find(filename, base, badchars))
+        
+        return gadgets
+
+    def find_op(self, filename, op, dst=None, src=None, base=None, badchars=None):
+        gadgets = self.find(filename, base, badchars)
+
+        op = operation.Operation(op, dst, src)
+        
+        return op.filter_gadgets(gadgets)
+
+    def _search_gadgets(self, binary, badchars):
         ret = []
 
-        for file in filename:
-            ret += self.find(file)
+        sections = binary.get_exec_sections()
+        arch = binary.get_arch()
+        mode = binary.get_arch_mode()
+        gad_terminations = self._gad_terminations(arch)
+
+        md = capstone.Cs(arch, mode)
+
+        for termination in gad_terminations:
+            for section in sections:
+                sec_opcodes = section['opcodes']
+                sec_vaddr = section['vaddr']
+                ''' Iterate all references to gadget termination '''
+                for match in re.finditer(termination['bytes'], sec_opcodes):
+                    ref = match.end()
+                    ''' Search backwards from reference '''
+                    for depth in range(len(termination['bytes']), self.depth + 1):
+                        ''' Virtual address inside section '''
+                        vaddr = sec_vaddr + ref - depth
+                        if self._is_valid_address(vaddr, badchars, mode):
+                            bytes_ = sec_opcodes[ref - depth:ref]
+                            decodes = list(md.disasm_lite(bytes_, vaddr))
+                            if self._is_valid_gadget(arch, decodes):
+                                gadget = ' ; '.join([f'{mnemonic} {op_str}' if op_str else mnemonic for _, _, mnemonic, op_str in decodes])
+                                ret.append({'filename': binary.filename, 'arch': arch, 'mode': mode, 'vaddr': vaddr, 'gadget': gadget, 'bytes': bytes_})
 
         return ret
 
-    def find_op(self, filename, op, dst='', src=''):
-        op = operation.Operation(op, dst=dst, src=src)
-
-        gadgets = self.find_all(filename)
-
-        return op.get_gadgets(gadgets)
-
-    def find_op_iter(self, filename, op, dst='', src='', base=''):
-        op = operation.Operation(op, dst=dst, src=src)
-
-        for gadgets in self.find_iter(filename, base):
-            yield op.get_gadgets(gadgets)
-
-    def _set_terminations(self):
+    def _gad_terminations(self, arch):
         ret = []
 
-        ret += self._add_rop_gadgets()
-        ret += self._add_jop_gadgets()
+        if arch == capstone.CS_ARCH_X86:
+            ret.extend(self._add_rop_gadgets_x86())
+            ret.extend(self._add_jop_gadgets_x86())
 
         return ret
 
-    def _add_rop_gadgets(self):
-        ret = [
-            {'bytes': b'\xc3'},               # ret
-            {'bytes': b'\xc2[\x00-\xff]{2}'}  # ret <imm>
-        ]
+    def _add_rop_gadgets_x86(self):
+        ret = []
+
+        ret.extend([
+            {'bytes': b'\xc3'},                     # ret
+            {'bytes': b'\xc2[\x00-\xff]{2}'}        # ret <imm>
+        ])
         if not self._noretf():
-            ret += [
-                {'bytes': b'\xcb'},                # retf
-                {'bytes': b'\xca[\x00-\xff]{2}'}   # retf <imm>
-            ]
+            ret.extend([
+                {'bytes': b'\xcb'},                 # retf
+                {'bytes': b'\xca[\x00-\xff]{2}'}    # retf <imm>
+            ])
 
         return ret
 
-    def _add_jop_gadgets(self):
+    def _add_jop_gadgets_x86(self):
         ret = []
 
         if not self._nojop():
-            ret += [
+            ret.extend([
                 {'bytes': b'\xff[\x20\x21\x22\x23\x26\x27]{1}'},        # jmp  [reg]
                 {'bytes': b'\xff[\xe0\xe1\xe2\xe3\xe4\xe6\xe7]{1}'},    # jmp  [reg]
                 {'bytes': b'\xff[\x10\x11\x12\x13\x16\x17]{1}'},        # jmp  [reg]
                 {'bytes': b'\xff[\xd0\xd1\xd2\xd3\xd4\xd6\xd7]{1}'}     # call [reg]
-            ]
+            ])
 
         return ret
 
@@ -118,89 +136,76 @@ class Finder:
 
     def _noretf(self):
         return self.flags & NO_RETF
-
-    def _skip_duplicates(self):
+    
+    def _keep_duplicates(self):
         return self.flags & KEEP_DUPLICATES
 
-    def _search_gadgets(self, file, base=''):
-        ret = []
+    def _is_valid_gadget(self, arch, decodes):
+        ''' Invalid instructions and, thus, not decoded '''
+        if not decodes:
+            return False
 
-        binfile = binary.Binary(file, base)
+        if arch == capstone.CS_ARCH_X86:
+            return self._is_valid_gadget_x86(decodes)
 
-        filename = binfile.get_file_name()
-        sections = binfile.get_exec_sections()
-        arch = binfile.get_arch()
-        mode = binfile.get_arch_mode()
+        return False
 
-        md = capstone.Cs(arch, mode)
-
-        for termination in self.gad_terminations:
-            for section in sections:
-                opcodes = section['opcodes']
-                vaddr = section['vaddr']
-                """All references to gadget termination"""
-                all_ref = [m.end() for m in re.finditer(termination['bytes'], opcodes)]
-                for ref in all_ref:
-                    """Search backwards from reference"""
-                    for depth in range(1, self.depth + 1):
-                        bytes_ = opcodes[ref - depth:ref]
-                        """Virtual address inside section"""
-                        addr = vaddr + ref - depth
-                        decodes = md.disasm(bytes_, addr)
-                        gadget = ''
-                        for decode in decodes:
-                            gadget += '{0} {1} ; '.format(decode.mnemonic, decode.op_str).replace('  ', ' ')
-                        if len(gadget) > 0:
-                            gadget = gadget[:-3]
-                            ret += [{'file': filename, 'arch': arch, 'mode': mode, 'vaddr': addr, 'gadget': gadget, 'bytes': bytes_, 'values': []}]
-
-        return ret
-
-    def _clean_gadgets(self, gadgets):
-        """
+    def _is_valid_gadget_x86(self, decodes):
+        '''
         Deletes x86 gadgets without a valid termination (e.g: '\xc3' in '\x89\xc3' is
         'mov ebx, eax' and not 'ret'), multibranched gadgets with multiple terminations
         in a single gadget and retf-terminated gadgets or jop gadgets if desired
 
-        @param gadgets: a list of gadgets
+        @param decodes: disassembler decodes
 
-        @returns a cleaned list of gadgets
-        """
-        new = []
-        br = ['ret', 'retf', 'jmp', 'call']
+        @returns True if valid gadget, False otherwise
+        '''
+        terminations = ['ret', 'retf', 'jmp', 'call']
 
-        for gadget in gadgets:
-            insts = gadget['gadget'].split(' ; ')
-            """Valid gadget termination"""
-            end = insts[-1].split(' ')[0]
-            if end not in br:
-                continue
-            if self._noretf() and end == 'retf':
-                continue
-            if self._nojop() and (end in ['jmp', 'call']):
-                continue
-            if self._is_multibr(insts, br):
-                continue
-            new += [gadget]
+        ''' Decode is the (address, size, mnemonic, op_str) tuple '''
+        end_mnemonic = decodes[-1][2]
+        if end_mnemonic not in terminations:
+            return False
+        if self._noretf() and end_mnemonic == 'retf':
+            return False
+        if self._nojop() and (end_mnemonic in ['jmp', 'call']):
+            return False
+        ''' Multibranch gadgets '''
+        if [ins for ins in decodes[:-1] if ins[2] in terminations]:
+            return False
 
-        return new
+        return True
 
-    def _is_multibr(self, insts, br):
-        """
-        Check if there are more than one terminations in a single gadget
+    def _is_valid_address(self, vaddr, badchars, arch_mode):
+        if not badchars:
+            return True
 
-        @param insts: a list with gadget's instructions
-        @param br: possible terminations
+        vaddr = utils.pack_addr(vaddr, arch_mode)
+        
+        return not any([bytes([int(badchar, 0)]) in vaddr for badchar in badchars])
 
-        @returns True if multibranched, False otherwise
-        """
+    def _summarize_gadgets(self, gadgets):
+        '''
+        @param gadgets: MUST to be alphabetically sorted
+
+        @returns a new list without duplicates, and counts how many times
+        each gadget appears in the list
+        '''
+        ret = []
+        already_seen = set()
         count = 0
 
-        for inst in insts:
-            if inst.split()[0] in br:
+        for gadget in gadgets:
+            if gadget['gadget'] in already_seen:
                 count += 1
+            else:
+                count = 1
+                already_seen.add(gadget['gadget'])
+                ret.append(gadget)
 
-        return count > 1
+            ret[-1]['count'] = count
 
-    def _alpha_sortgadgets(self, gadgets):
+        return ret
+
+    def _alphasort_gadgets(self, gadgets):
         return sorted(gadgets, key=lambda gadget: gadget['gadget'])

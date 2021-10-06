@@ -1,2 +1,0 @@
-lc(reg1)
-add(rsp, reg1)

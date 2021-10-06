@@ -1,2 +1,0 @@
-sub(reg1, reg2)
-neg(reg1)

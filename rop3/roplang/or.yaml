@@ -1,0 +1,7 @@
+# OR
+or:
+  # or dst, src
+  -
+    - mnemonic: or
+      op1: dst
+      op2: src

@@ -1,5 +1,0 @@
-# neg value
-neg:
-  -
-    - mnemonic: neg
-      op1: dst

@@ -16,16 +16,14 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
-import glob
-import yaml
+import struct
 import __main__
+import capstone
 
-GADGET_FOLDER = os.path.join(os.path.dirname(__file__), 'gadgets')
-
-MAJOR = 0
-MINOR = 9
+MAJOR = 1
+MINOR = 0
 PATCH = 0
-VERSION = '{0}.{1}.{2}'.format(MAJOR, MINOR, PATCH)
+VERSION = f'{MAJOR}.{MINOR}.{PATCH}'
 
 TOOL_NAME = os.path.basename(os.path.realpath(__main__.__file__))
 
@@ -46,95 +44,113 @@ HEADER = '\
                                     <https://reversea.me/>\
 '
 
+WARNING_COLOR = '\033[93m'
+END_COLOR = '\033[0m'
+
 def show_version():
     print(HEADER)
     print()
     print('Version: {0} v{1}'.format(TOOL_NAME, VERSION))
 
-def format_gadget(gad):
-    return '[{0} @ {1:#x}]: {2}'.format(os.path.basename(gad['file']), gad['vaddr'], gad['gadget'])
+def print_ropchains(ropchains, silent=False, nosides=False):
+    if nosides:
+        ropchains = filter_nosides(ropchains)
 
-def format_op_gadget(gad):
-    ret = format_gadget(gad)
+    for i, ropchain in enumerate(ropchains, start=1):
+        print('=' * 80)
+        print(f'Ropchain {i}')
+        print('=' * 80)
+        for op in ropchain:
+            print(op['op']['data'], end='')
+            reg_string = ''
+            if op['op']['dst'] and (op['op']['dst'] != op['op'][op['op']['dst']]): reg_string += f'{op["op"]["dst"]}={op["op"][op["op"]["dst"]]}'
+            if op['op']['src'] and (op['op']['src'] != op['op'][op['op']['src']]): reg_string += f', {op["op"]["src"]}={op["op"][op["op"]["src"]]}'
+            if reg_string:
+                print(f': {reg_string}')
+            else:
+                print()
+            for gadget in op['gadgets']:
+                string = format_gadget(gadget, silent)
+                if string: print(f'\t{string}')
 
-    str_values = ''
-    values = gad['values']
+def print_gadget(gadget, silent=False, nosides=False):
+    string = format_gadget(gadget, silent, nosides)
+    if string: print(string)
 
-    for value in values:
-        for key in value.keys():
-            str_values += '{0} = {1}'.format(key, hex(value[key]))
+def format_gadget(gadget, silent=False, nosides=False):
+    if ('sides' in gadget) and (gadget['sides'] and nosides):
+        return ''
 
-        ret = '{0} ({1})'.format(ret, str_values)
+    string = f'[{os.path.basename(gadget["filename"])} @ {pretty_addr(gadget["vaddr"], gadget["mode"])}]: {gadget["gadget"]}'
+
+    if 'count' in gadget and gadget['count'] > 1:
+        string += f' (x{gadget["count"]})'
+
+    if not silent:
+        if 'sides' in gadget:
+            string += pretty_side_effects(gadget)
+
+    return string
+
+def pretty_side_effects(gadget):
+    if not gadget['sides']:
+        return ''
+
+    string = ''
+    list_sides = []
+
+    for regs in gadget['sides']['regs']:
+        for reg in regs:
+            if reg in ['esp', 'rsp']:
+                list_sides.append(reg)
+            if reg == gadget['dst']:
+                list_sides.append(f'dst={reg}')
+            if reg == gadget['src']:
+                list_sides.append(f'src={reg}')
+
+    if list_sides:
+        string = warning_text(f' (modifies {", ".join(sorted(set(list_sides)))})')
+
+    return string
+
+def filter_nosides(ropchains):
+    ret = []
+
+    for ropchain in ropchains:
+        new_ropchain = []
+        for op in ropchain:
+            new_op = {}
+            new_gads = [gad for gad in op['gadgets'] if not pretty_side_effects(gad)]
+            if new_gads:
+                new_op['op'] = op['op']
+                new_op['gadgets'] = new_gads
+                new_ropchain.append(new_op)
+            else:
+                break
+        else:
+            ret.append(new_ropchain)
 
     return ret
 
-def format_op_ropchain(op):
-    ret = op['data']
-    ret += ' ['
+def warning_text(text):
+    return f'{WARNING_COLOR}{text}{END_COLOR}'
 
-    if op['dst']:
-        ret += '{0}: {1}'.format(op['dst'], op[op['dst']])
-    if op['src']:
-        ret += ', {0}: {1}'.format(op['src'], op[op['src']])
+def pretty_addr(addr, mode=capstone.CS_MODE_64):
+    if mode == capstone.CS_MODE_32:
+        padding = 8
+    elif mode == capstone.CS_MODE_64:
+        padding = 16
 
-    ret += ']'
+    return f'{int(addr):#0{padding}x}'
 
-    return ret
+def pack_addr(addr, mode=capstone.CS_MODE_64):
+    if mode == capstone.CS_MODE_32:
+        formater = '<I'
+    elif mode == capstone.CS_MODE_64:
+        formater = '<Q'
 
-def get_ops():
-    ret = {}
+    return struct.pack(formater, addr)
 
-    files = get_op_files()
-
-    for file in files:
-        # Merge dicts
-        ret = {**ret, **read_yaml(file)}
-
-    return ret
-
-def get_op_files():
-    return [file for file in glob.glob(os.path.join(GADGET_FOLDER, '**', '*.yaml'), recursive=True) if os.path.isfile(file)]
-
-def read_yaml(file):
-    with open(file, 'r') as f:
-        return yaml.safe_load(f.read())
-
-def delete_duplicate_gadgets(gadgets):
-    '''
-    Deletes all duplicated gadgets
-
-    @param gadgets: a list of gadgets
-
-    @returns a gadgets list without repeated elements
-    '''
-    gadgets_content_set = set()
-    unique_gadgets = []
-
-    for gadget in gadgets:
-        gad = gadget['gadget']
-        if gad in gadgets_content_set:
-            continue
-        gadgets_content_set.add(gad)
-        unique_gadgets += [gadget]
-
-    return unique_gadgets
-
-def is_x64_qword_reg(reg):
-    return reg in ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
-
-def promote_x64_qword_reg(reg):
-    to_change = {
-        'eax': 'rax',
-        'ecx': 'rcx',
-        'edx': 'rdx',
-        'ebx': 'rbx',
-        'esp': 'rsp',
-        'ebp': 'rbp',
-        'esi': 'rsi',
-        'edi': 'rdi'
-    }
-
-    try:
-        return to_change[reg]
-    except KeyError:
-        return reg
+def read_file(filename, flags='r'):
+    with open(filename, flags) as f:
+        return f.read()

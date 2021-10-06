@@ -33,61 +33,61 @@ Now, you can install dependencies in [requirements.txt](requirements.txt):
 ## Usage
 
 ```
-usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--nojop] [--noretf]
-               [--binary <file> [<file> ...]] [--base <ImageBase>]
-               [--badchar <hex> [<hex> ...]] [--ins <mnemonic>] [--op <op>]
-               [--dst <reg/imm>] [--src <reg/imm>] [--ropchain <file>]
+usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--nojop] [--noretf] [--nosides] [--silent]
+               [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--base <hex> [<hex> ...]]
+               [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>]
 
-This tool allows you to search for gadgets, operations, and ROP chains using a
-backtracking algorithm in a tree-like structure
+This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm
+in a tree-like structure
 
 optional arguments:
   -h, --help            show this help message and exit
   -v, --version         display rop3.py's version and exit
   --depth <bytes>       depth for search engine (default to 5 bytes)
-  --all                 disables the removal of duplicate gadgets
-  --nojop               disables JOP gadgets
-  --noretf              disables gadgets terminated in a far return (retf)
+  --all                 show the same gadget in different addresses
+  --nojop               do not search for JOP gadgets
+  --noretf              do not search for gadgets terminated in a far return (retf)
+  --nosides             eliminate gadgets with side-effects
+  --silent              eliminate side-effects warnings
   --binary <file> [<file> ...]
                         specify a list of binary path files to analyze
-  --base <ImageBase>    specify a ImageBase address to relocate binary files (it may
-                        take a while)
   --badchar <hex> [<hex> ...]
                         specify a list of chars to avoid in gadget address
-  --ins <mnemonic>      search for instruction mnemonic
-  --op <op>             search for operation. Available: add, and, eqc, gfc, jmp,
-                        lc, ld, lsd, ltc, mov, neg, not, or, spa, sps, st, sub, xor
-  --dst <reg/imm>       specify a destination reg/imm to instruction/operation
-  --src <reg/imm>       specify a source reg/imm to instruction/operation
-  --ropchain <file>     plain text file with rop chains
+  --base <hex> [<hex> ...]
+                        specify a base address to relocate binary files (it may take a while). When you
+                        specify more than one base address, you need to provide one address for each
+                        binary
+  --op <op>             search for operation. Available: add, and, eqc, gcf, jmp, lc, ld, lsd, ltc,
+                        mov, neg, not, or, spa, sps, st, sub, xor
+  --dst <reg>           specify a destination register for the operation
+  --src <reg>           specify a source register for the operation
+  --ropchain <file>     plain text file with a ROP chain
 ```
 
 In the work that we presented in [15th IEEE Workshop on Offensive Technologies (WOOT21)](https://www.ieee-security.org/TC/SP2021/SPW2021/WOOT21/), we used rop3 to evaluate the executional power of Return Oriented Programming in a [subset of most common Windows DLLs](https://drive.google.com/file/d/1gOxUolzrw-xlaW6K-fhzZ7Z-sqxiaZeZ/view?usp=sharing>). Check the [paper](https://drive.google.com/file/d/1sPOmjqTmUfgm0iSSYJCvUAHfC10TNBAn/view) for further details.
 
-```
-$ python3 rop3.py --nojop --noretf --binary ~/dlls/win10x64/kernel32.dll --op mov --dst eax
-[kernel32.dll @ 0x180007874]: mov eax, ebx ; ret
-[kernel32.dll @ 0x180023dc2]: mov eax, ecx ; pop rbp ; ret
-[kernel32.dll @ 0x180002258]: mov eax, ecx ; ret
-[kernel32.dll @ 0x180003988]: mov eax, edx ; ret
-[kernel32.dll @ 0x180003987]: mov eax, r10d ; ret
-[kernel32.dll @ 0x180007873]: mov eax, r11d ; ret
-[kernel32.dll @ 0x180006064]: mov eax, r8d ; ret
-[kernel32.dll @ 0x180002257]: mov eax, r9d ; ret
-[kernel32.dll @ 0x18000234d]: xchg eax, ebp ; ret
-[kernel32.dll @ 0x18002ed9d]: xchg eax, ebp ; ret 0x1589
-[kernel32.dll @ 0x180067d26]: xchg eax, ebp ; ret 0x1deb
-[kernel32.dll @ 0x180014af2]: xchg eax, ebp ; ret 0xc283
-[kernel32.dll @ 0x1800275ec]: xchg eax, ebp ; ret 0xe1e8
-[kernel32.dll @ 0x18004bddf]: xchg eax, ebp ; ret 3
-[kernel32.dll @ 0x180027849]: xchg eax, ebx ; ret
-[kernel32.dll @ 0x180049aa9]: xchg eax, edx ; ret
-[kernel32.dll @ 0x18005d83a]: xchg eax, edx ; ret 1
-[kernel32.dll @ 0x18000222d]: xchg eax, esi ; ret
-[kernel32.dll @ 0x18001dcf7]: xchg eax, esi ; ret 0x1389
-[kernel32.dll @ 0x18000223a]: xchg eax, esi ; ret 0xfa83
-[kernel32.dll @ 0x18001f642]: xchg eax, esp ; ret
-[kernel32.dll @ 0x180011564]: xchg eax, esp ; ret 0xf741
+```Shell
+$ python3 rop3.py --nojop --noretf --binary ~/dlls/win10x86/SHELL32.dll --op mov --dst eax --src ecx            
+[SHELL32.dll @ 0x69b8a61b]: mov eax, ecx ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x698dc8c8]: mov eax, ecx ; pop ebx ; leave ; ret (x5) (modifies esp)
+[SHELL32.dll @ 0x6991a2b1]: mov eax, ecx ; pop ebx ; ret (x4) (modifies esp)
+[SHELL32.dll @ 0x6995e30b]: mov eax, ecx ; pop edi ; ret (x2) (modifies esp)
+[SHELL32.dll @ 0x69c3c483]: mov eax, ecx ; pop esi ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x699670c1]: mov eax, ecx ; pop esi ; pop ebp ; ret (modifies esp)
+[SHELL32.dll @ 0x6992d289]: mov eax, ecx ; pop esi ; ret (x11) (modifies esp)
+[SHELL32.dll @ 0x698a474c]: mov eax, ecx ; ret (x97)
+[SHELL32.dll @ 0x6991ea9b]: xchg eax, ecx ; add al, 0 ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x698b4804]: xchg eax, ecx ; add dword ptr fs:[eax], eax ; ret
+[SHELL32.dll @ 0x69b0eae2]: xchg eax, ecx ; in eax, 0xff ; leave ; ret (modifies dst=eax, esp)
+[SHELL32.dll @ 0x69c8eb40]: xchg eax, ecx ; int 0xff ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x69b2eade]: xchg eax, ecx ; jecxz 0x69b2eae0 ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x698965e0]: xchg eax, ecx ; mov al, 0x1c ; outsb dx, byte ptr [esi] ; ret
+[SHELL32.dll @ 0x698dea7e]: xchg eax, ecx ; or byte ptr [eax], al ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x698feaa6]: xchg eax, ecx ; push es ; add cl, cl ; ret
+[SHELL32.dll @ 0x6984d4c9]: xchg eax, ecx ; ret (x3)
+[SHELL32.dll @ 0x69cd4cee]: xchg eax, ecx ; sahf ; ret
+[SHELL32.dll @ 0x69c3eb09]: xchg eax, ecx ; sar bh, cl ; leave ; ret (modifies esp)
+[SHELL32.dll @ 0x6995541d]: xchg eax, ecx ; test byte ptr [ecx - 0x75], ch ; ret
 ```
 
 ## Licence

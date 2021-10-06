@@ -1,0 +1,20 @@
+# Negation
+neg:
+  # xor REG1, REG1
+  # sub REG1, dst
+  # mov(dst, REG1)
+  -
+    - mnemonic: xor
+      op1: REG1
+      op2: REG1
+    - mnemonic: sub
+      op1: REG1
+      op2: dst
+    - operation: mov
+      op1: dst
+      op2: REG1
+
+  # neg dst
+  -
+    - mnemonic: neg
+      op1: dst

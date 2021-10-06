@@ -1,0 +1,7 @@
+# Load
+ld:
+  # mov dst, [src]
+  -
+    - mnemonic: mov
+      op1: dst
+      op2: '[src]'

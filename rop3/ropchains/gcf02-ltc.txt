@@ -1,4 +1,0 @@
-lc(reg1)
-sub(reg3, reg4)
-sbb(reg2, reg1)
-neg(reg2)

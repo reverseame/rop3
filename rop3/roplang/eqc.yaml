@@ -1,0 +1,10 @@
+# Equal Comparison
+eqc:
+  # sub(dst, src)
+  # neg(dst)
+  -
+    - operation: sub
+      op1: dst
+      op2: src
+    - operation: neg
+      op1: dst

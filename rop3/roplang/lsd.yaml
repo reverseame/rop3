@@ -1,0 +1,13 @@
+# Load Stack Delta
+lsd:
+  # lc(REG1, δ)
+  # neg(dst)
+  # and(dst, REG1)
+  -
+    - operation: lc
+      op1: REG1
+    - operation: neg
+      op1: dst
+    - operation: and
+      op1: dst
+      op2: REG1
