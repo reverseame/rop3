@@ -1,3 +1,0 @@
-lc(reg1)
-sub(reg3, reg4)
-rcl(reg2, reg1)

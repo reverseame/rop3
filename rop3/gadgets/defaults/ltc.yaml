@@ -1,7 +1,0 @@
-# Less than comparison
-ltc:
-  # sub dst, src
-  -
-    - mnemonic: sub
-      op1: dst
-      op2: src

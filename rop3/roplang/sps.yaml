@@ -1,0 +1,7 @@
+# Stack Pointer Subtraction
+sps:
+  # sub(REG_SP, src)
+  -
+    - operation: sub
+      op1: sp
+      op2: src

@@ -1,6 +1,0 @@
-lc(reg1)
-sub(reg3, reg4)
-mov(reg5, reg3)
-neg(reg5)
-sbb(reg2, reg1)
-neg(reg2)

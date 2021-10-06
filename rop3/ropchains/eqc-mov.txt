@@ -1,3 +1,0 @@
-sub(reg1, reg2)
-mov(reg3, reg1)
-neg(reg3)

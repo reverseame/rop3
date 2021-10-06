@@ -1,0 +1,7 @@
+# Less Than Comparison
+ltc:
+  # sub(dst, src)
+  -
+    - operation: sub
+      op1: dst
+      op2: src

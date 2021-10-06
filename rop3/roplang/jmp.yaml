@@ -1,0 +1,9 @@
+# Unconditional branching
+jmp:
+  # lc(dst, δ)
+  # spa(dst)
+  -
+    - operation: lc
+      op1: dst
+    - operation: spa
+      op1: dst

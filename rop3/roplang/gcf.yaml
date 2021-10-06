@@ -1,0 +1,91 @@
+# Get Carry Flag (Equal Comparison)
+gcf:
+  # lc(REG1, 0)
+  # eqc(dst, src)
+  # adc dst, REG1
+  -
+    - operation: lc
+      op1: REG1
+    - operation: eqc
+      op1: dst
+      op2: src
+    - mnemonic: adc
+      op1: dst
+      op2: REG1
+
+  # lc(REG1, 0)
+  # eqc(dst, src)
+  # sbb dst, REG1
+  # neg(dst)
+  -
+    - operation: lc
+      op1: REG1
+    - operation: eqc
+      op1: dst
+      op2: src
+    - mnemonic: sbb
+      op1: dst
+      op2: REG1
+    - operation: neg
+      op1: dst
+
+  # lc(REG1, 0)
+  # eqc(dst, src)
+  # sbb dst, REG1
+  # neg(dst)
+  -
+    - operation: lc
+      op1: REG1
+    - operation: eqc
+      op1: dst
+      op2: src
+    - mnemonic: sbb
+      op1: dst
+      op2: REG1
+    - operation: neg
+      op1: dst
+
+  # lc(REG1, 0)
+  # ltc(dst, src)
+  # adc dst, REG1
+  -
+    - operation: lc
+      op1: REG1
+    - operation: ltc
+      op1: dst
+      op2: src
+    - mnemonic: adc
+      op1: dst
+      op2: REG1
+
+  # lc(REG1, 0)
+  # ltc(dst, src)
+  # sbb dst, REG1
+  # neg(dst)
+  -
+    - operation: lc
+      op1: REG1
+    - operation: ltc
+      op1: dst
+      op2: src
+    - mnemonic: sbb
+      op1: dst
+      op2: REG1
+    - operation: neg
+      op1: dst
+
+  # lc(REG1, 0)
+  # ltc(dst, src)
+  # sbb dst, REG1
+  # neg(dst)
+  -
+    - operation: lc
+      op1: REG1
+    - operation: ltc
+      op1: dst
+      op2: src
+    - mnemonic: sbb
+      op1: dst
+      op2: REG1
+    - operation: neg
+      op1: dst

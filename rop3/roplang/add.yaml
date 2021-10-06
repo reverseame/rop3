@@ -1,0 +1,20 @@
+# Addition
+add:
+  # add dst, src
+  -
+    - mnemonic: add
+      op1: dst
+      op2: src
+
+  # clc
+  # adc dst, src
+  -
+    - mnemonic: clc
+    - mnemonic: adc
+      op1: dst
+      op2: src
+
+  # inc dst
+  -
+    - mnemonic: inc
+      op1: dst

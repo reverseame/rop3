@@ -1,3 +1,0 @@
-lc(reg1)
-neg(reg2)
-and(reg2, reg1)

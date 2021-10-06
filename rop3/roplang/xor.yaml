@@ -1,0 +1,7 @@
+# XOR
+xor:
+  # xor dst, src
+  -
+    - mnemonic: xor
+      op1: dst
+      op2: src
