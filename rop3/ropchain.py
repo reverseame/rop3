@@ -159,7 +159,7 @@ class Tree:
         return (state, ops_gadgets)
 
     def get_combinations(self, gadgets):
-        return sorted(list(set([(gadget['dst'], gadget['src']) for gadget in gadgets])) if gadgets[0]['src'] else list(set([gadget['dst'] for gadget in gadgets])))
+        return sorted(list(set([(gadget['dst'], gadget['src']) for gadget in gadgets if gadget['src'] is not None])) if gadgets[0]['src'] else list(set([gadget['dst'] for gadget in gadgets])))
 
     def _traverse(self, state):
         ret = []
