@@ -18,6 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import os
 
 import rop3.debug as debug
+import rop3.binaries.elf as elf
 import rop3.binaries.pe as pe
 
 class Binary:
@@ -40,6 +41,8 @@ class Binary:
         ''' MS-DOS Stub '''
         if self.raw_data[:2] == b'\x4d\x5a':    # MZ
             return pe.PE(self.raw_data, base)
+        elif self.raw_data[:2] == b'\x7f\x45':
+            return elf.ELF(self.raw_data, base)
         else:
             raise BinaryException(f'{self.filename}: Format file not supported')
 
