@@ -90,6 +90,6 @@ $ python3 rop3.py --nojop --noretf --binary ~/dlls/win10x86/SHELL32.dll --op mov
 [SHELL32.dll @ 0x6995541d]: xchg eax, ecx ; test byte ptr [ecx - 0x75], ch ; ret
 ```
 
-## Licence
+## License
 
-Licensed under the [GNU GPLv3](LICENCE) licence.
+Licensed under the [GNU GPLv3](LICENSE) license.
