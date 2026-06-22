@@ -4,7 +4,3 @@ lc:
   -
     - mnemonic: pop
       op1: dst
-
-  # popad
-  -
-    - mnemonic: popad

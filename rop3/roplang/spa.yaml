@@ -1,7 +1,7 @@
 # Stack Pointer Addition
 spa:
   # add(REG_SP, src)
-  -
+  - compose:
     - operation: add
-      op1: sp
+      op1: REG_SP
       op2: src

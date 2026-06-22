@@ -1,0 +1,8 @@
+# Unconditional jump
+gsp:
+  # gsp dst
+  - compose:
+    - operation: mov
+      op1: dst
+      op2: REG_SP
+

@@ -19,11 +19,15 @@ import sys
 
 import rop3.args
 import rop3.utils as utils
+import rop3.debug as debug
 import rop3.ropchain
 import rop3.gadfinder as gadfinder
 
 def main():
     args = rop3.args.ArgumentParser().parse_args(sys.argv[1:])
+
+    if args.verbose:
+        debug.set_verbose()
 
     if args.version:
         utils.show_version()
@@ -33,13 +37,23 @@ def main():
 
         if args.ropchain:
             ropchain = rop3.ropchain.RopChain(finder)
-            result = ropchain.search(args.binary, args.ropchain, base=args.base, badchars=args.badchar)
-            utils.print_ropchains(result, args.silent, args.nosides)
+            result = ropchain.search_from_files(args.binary, args.ropchain, 
+                                     base=args.base, badchars=args.badchar)
+            if args.exhaustive:
+                for idx, x in enumerate(result, 1):
+                    utils.print_ropchain(x, idx)
+            else:
+                utils.print_ropchain(next(iter(result)))
         elif args.op:
-            for filename, base in zip(args.binary, args.base):
-                for gadget in finder.find_op(filename, args.op, args.dst, args.src, base=base, badchars=args.badchar):
-                    utils.print_gadget(gadget, args.silent, args.nosides)
-        else:
-            for filename, base in zip(args.binary, args.base):
-                for gadget in finder.find(filename, base=base, badchars=args.badchar):
+
+            result = finder.find_op(args.binary, args.op, args.dst, args.src, base=args.base, badchars=args.badchar)
+            if result and isinstance(result[0], list):
+                for chain in result:
+                    for gadget in chain:
+                        utils.print_gadget(gadget)
+            else:
+                for gadget in result:
                     utils.print_gadget(gadget)
+        else:
+            for gadget in finder.find(args.binary, base=args.base, badchars=args.badchar):
+                utils.print_gadget(gadget)

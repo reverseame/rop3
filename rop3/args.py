@@ -30,20 +30,21 @@ class ArgumentParser:
         self.argparser = argparse.ArgumentParser(description=description)
         self.argparser.add_argument('-v', '--version',  action='store_true', help=f'display {utils.TOOL_NAME}\'s version and exit')
         self.argparser.add_argument('--depth', type=int, metavar='<bytes>', default=gadfinder.DEPTH, help=f'depth for search engine (default to {gadfinder.DEPTH} bytes)')
-        self.argparser.add_argument('--all', action='store_true', help='show the same gadget in different addresses')
-        self.argparser.add_argument('--nojop', action='store_true', help='do not search for JOP gadgets')
-        self.argparser.add_argument('--noretf', action='store_true', help='do not search for gadgets terminated in a far return (retf)')
-        self.argparser.add_argument('--nosides', action='store_true', help='eliminate gadgets with side-effects')
-        self.argparser.add_argument('--silent', action='store_true', help='eliminate side-effects warnings')
-        # self.argparser.add_argument('--verbose', action='store_true', help='full description of side-effects warnings')
+        self.argparser.add_argument('--all', default=False, action='store_true', help='show the same gadget in different addresses')
+        self.argparser.add_argument('--rop', action=argparse.BooleanOptionalAction, help="search for ROP gadgets", default=True)
+        self.argparser.add_argument('--retf', action=argparse.BooleanOptionalAction, help="search for RETF gadgets", default=False)
+        self.argparser.add_argument('--jop', action=argparse.BooleanOptionalAction, help="search for JOP gadgets", default=False)
+        self.argparser.add_argument('--allow-undeterministic-gadgets', action='store_true', default=False, help='allow gadgets with conditional branches (e.g. jne) as intermediate instructions')
+        self.argparser.add_argument('--allow-complex-memory-ops', action='store_true', default=False, help='allow gadgets whose first instruction uses complex memory addressing (e.g. [r1*r2], [r1+r2*s+disp])')
+        self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
         self.argparser.add_argument('--badchar', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget address')
         self.argparser.add_argument('--base', type=str, metavar='<hex>', nargs='+', help='specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary')
-        # self.argparser.add_argument('--ins', type=str, metavar='<mnemonic>', help='search for an instruction mnemonic')
-        self.argparser.add_argument('--op', type=str, metavar='<op>', help=f'search for operation. Available: {", ".join(sorted([op.name for op in self.parser.get_ops()]))}')
+        self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--dst', type=str, metavar='<reg>', help='specify a destination register for the operation')
         self.argparser.add_argument('--src', type=str, metavar='<reg>', help='specify a source register for the operation')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
+        self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
 
     def parse_args(self, arguments):
         args = self.argparser.parse_args(arguments)
@@ -64,10 +65,16 @@ class ArgumentParser:
 
         if args.all:
             flags |= gadfinder.KEEP_DUPLICATES
-        if args.nojop:
-            flags |= gadfinder.NO_JOP
-        if args.noretf:
-            flags |= gadfinder.NO_RETF
+        if args.jop:
+            flags |= gadfinder.JOP
+        if args.rop:
+            flags |= gadfinder.ROP
+        if args.retf:
+            flags |= gadfinder.RETF
+        if args.allow_undeterministic_gadgets:
+            flags |= gadfinder.ALLOW_UNDETERMINISTIC
+        if args.allow_complex_memory_ops:
+            flags |= gadfinder.ALLOW_COMPLEX_MEM
 
         namespace['flags'] = flags
 
@@ -103,12 +110,6 @@ class ArgumentParser:
                 value = self._check_int_value(badchar)
                 if value < 0x00 or value > 0xff:
                     debug.error(f'{badchar}: bad char must be one byte (range 0x00-0xff)')
-
-        if args.op:
-            try:
-                self.parser.get_op(args.op)
-            except parser.ParserException:
-                debug.error(f'{args.op}: Operation not found (--help)')
 
         if args.ropchain:
             ropchain_filename = os.path.abspath(args.ropchain)

@@ -23,6 +23,8 @@ import __main__
 import rop3.parser as parser
 import rop3.operation as operation
 
+from rop3.arch import arch_singleton
+
 class YamlParser:
     def __init__(self):
         self.folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'roplang')
@@ -46,34 +48,63 @@ class YamlParser:
             content = self._read_yaml(filename)
             ''' Merge dicts '''
             if content:
-                op = list(content.keys())[0]
-                ret.append(self._parse_op(op, content[op]))
-
-        ret = self._resolve_crossrefences(ret)
+                for op in content.keys():
+                    ret.append(self._parse_op(op, content[op]))
 
         return ret
 
     def _get_op_files(self):
-        return [filename for filename in glob.glob(os.path.join(self.folder, '**', '*.yaml'), recursive=True) if os.path.isfile(filename)]
+        return [filename for filename in glob.glob(os.path.join(self.folder, '*.yaml'), recursive=True) if os.path.isfile(filename)]
 
     def _read_yaml(self, filename):
         with open(filename, 'r') as f:
             return yaml.safe_load(f.read())
 
-    def _parse_op(self, op, content):
-        ret = operation.OperationTemplate(op)
+    def _resolve_alias(self, value):
+        if not isinstance(value, str):
+            return value
+        arch = arch_singleton.arch
+        aliases = {
+            'REG_SP': arch.sp,
+            'REG_BP': arch.bp,
+        }
+        return aliases.get(value, value)
 
+    def _parse_op(self, op, content):
+        # Composite operation logic
+        if (
+            isinstance(content, list)
+            and len(content) == 1
+            and isinstance(content[0], dict)
+            and 'compose' in content[0]
+        ):
+            steps = content[0]['compose']
+            # Resolve aliases in composite steps
+            resolved_steps = []
+            for step in steps:
+                resolved_step = dict(step)
+                for key in ('op1', 'op2'):
+                    if key in resolved_step:
+                        resolved_step[key] = self._resolve_alias(resolved_step[key])
+                resolved_steps.append(resolved_step)
+            return parser.CompositeOperation(op, resolved_steps)
+
+
+        # Normal operation
+        ret = operation.OperationTemplate(op)
         for set_ in content:
             s = operation.Set()
             for item in set_:
                 if 'mnemonic' in item:
                     i = operation.Instruction(item['mnemonic'])
-                    for operand in ['op1', 'op2']:
+                    for operand in ('op1', 'op2'):
                         if operand in item:
-                            if type(item[operand]) == dict:
-                                i.add(operation.Operand(item[operand]['reg'], value=item[operand]['value']))
+                            current_op = item[operand]
+                            if type(current_op) == dict:
+                                raise NotImplementedError
                             else:
-                                i.add(operation.Operand(item[operand]))
+                                # Resolve aliases if necessary
+                                i.add(operation.Operand(self._resolve_alias(item[operand])))
                 elif 'operation' in item:
                     i = item
                 s.add(i)
@@ -82,24 +113,3 @@ class YamlParser:
 
         return ret
 
-    def _resolve_crossrefences(self, ops):
-        (pending, ret) = self._resolve_crossreference(ops)
-
-        while pending:
-            (pending, ret) = self._resolve_crossreference(ret)
-
-        return ret
-
-    def _resolve_crossreference(self, ops):
-        altered = False
-
-        for op in ops:
-            for set_ in op:
-                for item in set_:
-                    if 'operation' in item:
-                        op_index = [op.name for op in ops].index(item['operation'])
-                        item_index = set_.items.index(item)
-                        set_.items[item_index] = ops[op_index]
-                        altered = True
-
-        return (altered, ops)

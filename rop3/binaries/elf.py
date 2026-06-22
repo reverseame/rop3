@@ -22,6 +22,8 @@ from elftools.elf.elffile import ELFFile, ELFError
 
 import rop3.binary as binary
 
+from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+
 SHF_EXECINSTR = 0x4
 
 
@@ -32,16 +34,16 @@ class ELF:
         try:
             file = io.BytesIO(data)
             self._elf = ELFFile(file)
-            (self._arch, self._arch_mode) = self._parse_arch()
+            self._arch = self._parse_arch()
         except ELFError as exc:
             raise binary.BinaryException(str(exc)) from exc
 
     def _parse_arch(self):
         if self._elf.header.e_machine in ['EM_X86_64', 'EM_386']:
             if self._elf.elfclass == 32:
-                return (capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+                return X86_Architecture()
             elif self._elf.elfclass == 64:
-                return (capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+                return X64_Architecture()
         raise binary.BinaryException(
             'ELF: Unsupported architecture type')
 
@@ -60,5 +62,3 @@ class ELF:
     def get_arch(self):
         return self._arch
 
-    def get_arch_mode(self):
-        return self._arch_mode

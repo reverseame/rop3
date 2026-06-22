@@ -1,0 +1,21 @@
+adc:
+  -
+    - mnemonic: adc
+      op1: dst
+      op2: src
+
+# Get Carry Flag (Equal Comparison)
+# temporaly disabled
+# gcf:
+#   # lc(REG1, 0)
+#   # eqc(dst, src)
+#   # adc dst, REG1
+#   - compose:
+#     - operation: lc
+#       op1: REG1
+#     - operation: eqc
+#       op1: dst
+#       op2: src
+#     - operation: adc
+#       op1: dst
+#       op2: REG1

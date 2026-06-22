@@ -1,9 +1,14 @@
-# Unconditional branching
-jmp:
-  # lc(dst, δ)
-  # spa(dst)
+# Unconditional jump
+
+leave:
   -
-    - operation: lc
-      op1: dst
-    - operation: spa
-      op1: dst
+    - mnemonic: leave
+
+jmp:
+  # jmp src
+  - compose:
+    - operation: mov
+      op1: rbp
+      op2: src
+    - operation: leave
+

@@ -20,7 +20,7 @@ import struct
 import __main__
 import capstone
 
-MAJOR = 1
+MAJOR = 2
 MINOR = 0
 PATCH = 0
 VERSION = f'{MAJOR}.{MINOR}.{PATCH}'
@@ -52,85 +52,16 @@ def show_version():
     print()
     print('Version: {0} v{1}'.format(TOOL_NAME, VERSION))
 
-def print_ropchains(ropchains, silent=False, nosides=False):
-    if nosides:
-        ropchains = filter_nosides(ropchains)
+def print_gadget(gadget):
+    print(gadget)
 
-    for i, ropchain in enumerate(ropchains, start=1):
-        print('=' * 80)
-        print(f'Ropchain {i}')
-        print('=' * 80)
-        for op in ropchain:
-            print(op['op']['data'], end='')
-            reg_string = ''
-            if op['op']['dst'] and (op['op']['dst'] != op['op'][op['op']['dst']]): reg_string += f'{op["op"]["dst"]}={op["op"][op["op"]["dst"]]}'
-            if op['op']['src'] and (op['op']['src'] != op['op'][op['op']['src']]): reg_string += f', {op["op"]["src"]}={op["op"][op["op"]["src"]]}'
-            if reg_string:
-                print(f': {reg_string}')
-            else:
-                print()
-            for gadget in op['gadgets']:
-                string = format_gadget(gadget, silent)
-                if string: print(f'\t{string}')
-
-def print_gadget(gadget, silent=False, nosides=False):
-    string = format_gadget(gadget, silent, nosides)
-    if string: print(string)
-
-def format_gadget(gadget, silent=False, nosides=False):
-    if ('sides' in gadget) and (gadget['sides'] and nosides):
-        return ''
-
-    string = f'[{os.path.basename(gadget["filename"])} @ {pretty_addr(gadget["vaddr"], gadget["mode"])}]: {gadget["gadget"]}'
-
-    if 'count' in gadget and gadget['count'] > 1:
-        string += f' (x{gadget["count"]})'
-
-    if not silent:
-        if 'sides' in gadget:
-            string += pretty_side_effects(gadget)
-
-    return string
-
-def pretty_side_effects(gadget):
-    if not gadget['sides']:
-        return ''
-
-    string = ''
-    list_sides = []
-
-    for regs in gadget['sides']['regs']:
-        for reg in regs:
-            if reg in ['esp', 'rsp']:
-                list_sides.append(reg)
-            if reg == gadget['dst']:
-                list_sides.append(f'dst={reg}')
-            if reg == gadget['src']:
-                list_sides.append(f'src={reg}')
-
-    if list_sides:
-        string = warning_text(f' (modifies {", ".join(sorted(set(list_sides)))})')
-
-    return string
-
-def filter_nosides(ropchains):
-    ret = []
-
-    for ropchain in ropchains:
-        new_ropchain = []
-        for op in ropchain:
-            new_op = {}
-            new_gads = [gad for gad in op['gadgets'] if not pretty_side_effects(gad)]
-            if new_gads:
-                new_op['op'] = op['op']
-                new_op['gadgets'] = new_gads
-                new_ropchain.append(new_op)
-            else:
-                break
-        else:
-            ret.append(new_ropchain)
-
-    return ret
+def print_ropchain(ropchain, idx=None):
+    if idx is not None:
+        print('#' * 40 + f' Ropchain {idx} ' + '#' * 40)
+    for gad in ropchain:
+        print(gad)
+    if idx is not None:
+        print()
 
 def warning_text(text):
     return f'{WARNING_COLOR}{text}{END_COLOR}'

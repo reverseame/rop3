@@ -1,0 +1,13 @@
+inc:
+  -
+    - mnemonic: add
+      op1: dst
+      op2: 1
+  -
+    - mnemonic: sub
+      op1: dst
+      op2: -1
+  -
+    - mnemonic: inc
+      op1: dst
+
