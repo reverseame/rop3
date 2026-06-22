@@ -33,7 +33,6 @@ class PE:
         try:
             self._pe = pefile.PE(data=data, fast_load=True)
             self._arch = self._parse_arch()
-            # FIXME
             base = base[0] if isinstance(base, list) else base
             if base:
                 base = int(base, 0)
