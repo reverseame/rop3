@@ -35,6 +35,7 @@ class ELF:
             file = io.BytesIO(data)
             self._elf = ELFFile(file)
             self._arch = self._parse_arch()
+            self._base_delta = self._base_delta_for(base)
         except ELFError as exc:
             raise binary.BinaryException(str(exc)) from exc
 
@@ -47,6 +48,20 @@ class ELF:
         raise binary.BinaryException(
             'ELF: Unsupported architecture type')
 
+    def _image_base(self):
+        ''' Position-independent images (ET_DYN: PIE/shared objects) are
+            linked at 0; ET_EXEC uses the lowest loadable segment address '''
+        if self._elf.header.e_type == 'ET_DYN':
+            return 0
+        loads = [seg['p_vaddr'] for seg in self._elf.iter_segments()
+                 if seg['p_type'] == 'PT_LOAD']
+        return min(loads) if loads else 0
+
+    def _base_delta_for(self, base):
+        if not base:
+            return 0
+        return int(base, 0) - self._image_base()
+
     def get_exec_sections(self):
         ret = []
 
@@ -54,7 +69,7 @@ class ELF:
             ''' SHF_EXECINSTR means section contains executable code '''
             if sec.header.sh_flags & SHF_EXECINSTR:
                 ret.append({
-                    'vaddr': sec.header.sh_addr,
+                    'vaddr': sec.header.sh_addr + self._base_delta,
                     'opcodes': sec.data()
                 })
         return ret

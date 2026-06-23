@@ -20,9 +20,17 @@ from dataclasses import dataclass, field
 from rop3.arch import arch_singleton
 
 import os
+import sys
 
 WARNING_COLOR = '\033[93m'
 END_COLOR = '\033[0m'
+
+def _colorize(text: str) -> str:
+    ''' Wrap text in the warning color only when writing to a terminal and
+        NO_COLOR is unset, so redirected/piped output stays clean. '''
+    if sys.stdout.isatty() and not os.environ.get('NO_COLOR'):
+        return f'{WARNING_COLOR}{text}{END_COLOR}'
+    return text
 
 @dataclass
 class Gadget:
@@ -100,7 +108,8 @@ class Gadget:
             ret += f" (x{self.count})"
         side_regs = list(self.side_regs)
         if len(side_regs) > 0:
-            ret += f" {WARNING_COLOR}(modifies {', '.join(side_regs)}){END_COLOR}"
+            modifies = ', '.join(side_regs)
+            ret += f" {_colorize(f'(modifies {modifies})')}"
 
         return ret
 
