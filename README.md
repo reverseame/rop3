@@ -35,7 +35,7 @@ Now, you can install dependencies in [requirements.txt](requirements.txt):
 ```
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop] [--retf | --no-retf] [--jop | --no-jop] [--allow-undeterministic-gadgets] [--allow-complex-memory-ops] [--verbose]
                [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--badchar-bytes <hex> [<hex> ...]] [--keep-canary-address] [--base <hex> [<hex> ...]] [--arch <name>] [--symbols]
-               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive] [--interactive]
+               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive] [--interactive] [--cache] [--cache-dir <dir>]
 
 This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm in a tree-like structure
 
@@ -73,6 +73,17 @@ options:
   --exhaustive, --no-exhaustive
                         exhaustive search for ROP chains
   --interactive         scan the binary once and drop into an interactive prompt
+  --cache               cache discovered gadgets on disk and reuse them on repeated runs over the same file and options
+  --cache-dir <dir>     directory for the gadget cache (default: $XDG_CACHE_HOME/rop3)
+```
+
+### Gadget cache
+
+With `--cache`, the gadgets discovered for a binary are stored on disk and reused on later runs over the same file and options, skipping the scan. The cache key binds the file content hash and every option that affects the result, so a changed binary or option misses cleanly. This is especially handy for large binaries and for the interactive mode.
+
+```Shell
+$ python rop3.py --binary libc.so.6 --cache        # first run scans and caches
+$ python rop3.py --binary libc.so.6 --cache --op mov --dst rdi --src rax   # reuses the cache
 ```
 
 ### Interactive mode

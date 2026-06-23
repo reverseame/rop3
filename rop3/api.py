@@ -38,7 +38,8 @@ class Rop3:
     def __init__(self, binaries, *, depth=gadfinder.DEPTH, rop=True, jop=False,
                  retf=False, all=False, allow_undeterministic=False,
                  allow_complex_mem=False, avoid_canary=True, base=None,
-                 badchars=None, badchar_bytes=None, arch=None, symbols=False):
+                 badchars=None, badchar_bytes=None, arch=None, symbols=False,
+                 cache=False, cache_dir=None):
         self.binaries = [binaries] if isinstance(binaries, str) else list(binaries)
         self.base = base
         self.badchars = badchars
@@ -62,7 +63,7 @@ class Rop3:
         if avoid_canary:
             flags |= gadfinder.AVOID_CANARY
 
-        self._finder = GadFinder(depth, flags)
+        self._finder = GadFinder(depth, flags, cache=cache, cache_dir=cache_dir)
         self._gadgets = None
 
     @classmethod
@@ -76,7 +77,8 @@ class Rop3:
         self.badchar_bytes = args.badchar_bytes
         self.arch = args.arch
         self.symbols = args.symbols
-        self._finder = GadFinder(args.depth, args.flags)
+        self._finder = GadFinder(args.depth, args.flags,
+                                 cache=args.cache, cache_dir=args.cache_dir)
         self._gadgets = None
         return self
 
