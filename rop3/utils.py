@@ -28,7 +28,9 @@ MINOR = 0
 PATCH = 0
 VERSION = f'{MAJOR}.{MINOR}.{PATCH}'
 
-TOOL_NAME = os.path.basename(os.path.realpath(__main__.__file__))
+# __main__ may lack __file__ when imported as a library or in a spawned
+# multiprocessing worker; fall back to a sensible default in that case.
+TOOL_NAME = os.path.basename(os.path.realpath(getattr(__main__, '__file__', 'rop3.py')))
 
 HEADER = '\
                           .d8888b.  \n\

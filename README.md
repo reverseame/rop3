@@ -35,7 +35,7 @@ Now, you can install dependencies in [requirements.txt](requirements.txt):
 ```
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop] [--retf | --no-retf] [--jop | --no-jop] [--allow-undeterministic-gadgets] [--allow-complex-memory-ops] [--verbose]
                [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--badchar-bytes <hex> [<hex> ...]] [--keep-canary-address] [--base <hex> [<hex> ...]] [--arch <name>] [--symbols]
-               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive] [--interactive] [--cache] [--cache-dir <dir>]
+               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive] [--interactive] [--jobs <n>] [--cache] [--cache-dir <dir>]
 
 This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm in a tree-like structure
 
@@ -73,9 +73,14 @@ options:
   --exhaustive, --no-exhaustive
                         exhaustive search for ROP chains
   --interactive         scan the binary once and drop into an interactive prompt
+  --jobs <n>            number of worker processes for the gadget scan (default: 1)
   --cache               cache discovered gadgets on disk and reuse them on repeated runs over the same file and options
   --cache-dir <dir>     directory for the gadget cache (default: $XDG_CACHE_HOME/rop3)
 ```
+
+### Parallel scan
+
+`--jobs N` distributes the gadget scan over `N` worker processes. Each executable section is split into chunks scanned independently, then the results are merged and deduplicated, so the output is identical to a serial run. The speedup is sublinear (the merge, deduplication and sort run in the parent, and there is per-process start-up cost), so it is worth it mainly for large binaries and/or a high `--depth`; on small inputs the process overhead dominates and `--jobs 1` (the default) is faster.
 
 ### Gadget cache
 
