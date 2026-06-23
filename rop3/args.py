@@ -39,6 +39,7 @@ class ArgumentParser:
         self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
         self.argparser.add_argument('--badchar', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget address')
+        self.argparser.add_argument('--keep-canary-address', action='store_true', default=False, help='do not prefer canary-free addresses (0x00, 0x0a, 0x0d, 0xff) when discarding duplicate gadgets')
         self.argparser.add_argument('--base', type=str, metavar='<hex>', nargs='+', help='specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--dst', type=str, metavar='<reg>', help='specify a destination register for the operation')
@@ -75,6 +76,8 @@ class ArgumentParser:
             flags |= gadfinder.ALLOW_UNDETERMINISTIC
         if args.allow_complex_memory_ops:
             flags |= gadfinder.ALLOW_COMPLEX_MEM
+        if not args.keep_canary_address:
+            flags |= gadfinder.AVOID_CANARY
 
         namespace['flags'] = flags
 

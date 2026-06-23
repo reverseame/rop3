@@ -21,7 +21,8 @@ import io
 from macholib.MachO import MachO as _MachO
 from macholib.mach_o import (
     LC_SEGMENT, LC_SEGMENT_64,
-    CPU_TYPE_NAMES
+    CPU_TYPE_NAMES,
+    S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS
 )
 
 import rop3.binary as binary
@@ -29,6 +30,7 @@ import rop3.binary as binary
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
 VM_PROT_EXECUTE = 0x04
+S_INSTRUCTION_ATTRS = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
 
 class MachO:
     def __init__(self, data, base):
@@ -44,16 +46,17 @@ class MachO:
             self._macho.load(self._file)
         except Exception as exc:
             raise binary.BinaryException(str(exc)) from exc
-        # Some binaries include many headers
+        # Fat binaries carry several headers; pick the first supported slice
+        # (do not commit to a header until its architecture is recognised)
         self._header = None
+        self._arch = None
         for header in self._macho.headers:
             arch = CPU_TYPE_NAMES.get(header.header.cputype)
-            self._header = header
             if arch == "x86_64":
-                self._arch = X64_Architecture()
+                self._header, self._arch = header, X64_Architecture()
                 break
             elif arch == "i386":
-                self._arch = X86_Architecture()
+                self._header, self._arch = header, X86_Architecture()
                 break
         if not self._header:
             raise binary.BinaryException(
@@ -65,15 +68,19 @@ class MachO:
             if lc.cmd in (LC_SEGMENT, LC_SEGMENT_64):
                 if cmd.initprot & VM_PROT_EXECUTE:
                     for section in data:
-                        sec_name = section.sectname.decode('utf-8').strip('\x00')
-                        if sec_name == '__text':
-                            offset = self._header.offset
-                            self._file.seek(offset + section.offset)
-                            section_data = self._file.read(section.size)
-                            ret.append({
-                                'vaddr': section.addr,
-                                'opcodes': section_data
-                            })
+                        ''' Scan every code section (e.g. __text, __stubs,
+                            __stub_helper), not just __text. Skip data
+                            sections living in the executable segment
+                            (e.g. __const, __cstring, __unwind_info). '''
+                        if not section.flags & S_INSTRUCTION_ATTRS:
+                            continue
+                        offset = self._header.offset
+                        self._file.seek(offset + section.offset)
+                        section_data = self._file.read(section.size)
+                        ret.append({
+                            'vaddr': section.addr,
+                            'opcodes': section_data
+                        })
         return ret
 
     def get_arch(self):

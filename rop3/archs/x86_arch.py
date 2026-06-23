@@ -45,6 +45,15 @@ REG_ALIASES: dict[str, tuple[str, int]] = {
     for alias, size in info['sub'] + [(canon, info['bytes'])]
 }
 
+# 'rax' -> {8: 'rax', 4: 'eax'},  'r8' -> {8: 'r8', 4: 'r8d'}
+REG_BY_WIDTH: dict[str, dict[int, str]] = {
+    canon: {
+        info['bytes']: canon,
+        **{size: name for name, size in info['sub'] if size in (4, 8)},
+    }
+    for canon, info in REGS.items()
+}
+
 MNEMONIC_PREFIXES: tuple[str, ...] = (
     'notrack', 'bnd',
 )
@@ -177,11 +186,17 @@ class X86_Architecture(Architecture):
                 return True
         return False
 
+    @property
+    def _canonical_width(self) -> int:
+        """Register width (in bytes) used to display/normalize register names"""
+        return 4
+
     def normalize_reg(self, name: str) -> str:
         entry = REG_ALIASES.get(str(name))
-        if entry:
-            return entry[0]
-        return str(name)
+        if not entry:
+            return str(name)
+        canon = entry[0]
+        return REG_BY_WIDTH.get(canon, {}).get(self._canonical_width, canon)
 
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """
@@ -196,6 +211,10 @@ class X64_Architecture(X86_Architecture):
     @property
     def mode(self):
         return capstone.CS_MODE_64
+
+    @property
+    def _canonical_width(self) -> int:
+        return 8
 
     @property
     def sp(self) -> str:

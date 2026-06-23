@@ -26,7 +26,14 @@ ROP = 4
 RETF = 8
 ALLOW_UNDETERMINISTIC = 16
 ALLOW_COMPLEX_MEM = 32
+AVOID_CANARY = 64
 
+''' Terminator canary bytes to avoid in gadget addresses by default:
+    0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
+    terminators for gets() and alike) and 0xff (EOF). See issue #5. '''
+CANARY_BYTES = (0x00, 0x0a, 0x0d, 0xff)
+
+import os
 import re
 import capstone
 
@@ -51,6 +58,7 @@ class GadFinder:
     def find(self, filenames: list[str], base=None, badchars=None) -> list[Gadget]:
         ''' base is normalised to one entry per binary by the argument parser '''
         bases = base if isinstance(base, list) else [base] * len(filenames)
+        avoid = self._avoid_bytes(badchars)
 
         if not self._keep_duplicates():
             seen: dict = {}
@@ -60,20 +68,42 @@ class GadFinder:
                 total = 0
                 for gadget in self._search_gadgets(binary, badchars):
                     total += 1
-                    if gadget in seen:
-                        seen[gadget].count += 1
-                    else:
+                    existing = seen.get(gadget)
+                    if existing is None:
                         gadget.count = 1
                         seen[gadget] = gadget
+                    else:
+                        existing.count += 1
+                        ''' Among duplicates, keep the address with the fewest
+                            terminator canary bytes (see issue #5) '''
+                        if self._avoid_canary() and \
+                                self._addr_canary_score(gadget, avoid) < self._addr_canary_score(existing, avoid):
+                            gadget.count = existing.count
+                            seen[gadget] = gadget
                 unique = len(seen) - before
                 debug.info(f'{unique} unique gadgets ({total - unique} duplicates discarded)')
-            return list(seen.values())
+            return self._sort_gadgets(list(seen.values()))
         else:
             gadgets = []
             for filename, file_base in zip(filenames, bases):
                 binary = self._open_binary(filename, file_base)
                 gadgets.extend(self._search_gadgets(binary, badchars))
-            return gadgets
+            return self._sort_gadgets(gadgets)
+
+    def _avoid_bytes(self, badchars) -> set:
+        ''' Bytes to avoid in gadget addresses when deduplicating: the
+            user-supplied bad chars if any, else the default canary bytes. '''
+        if badchars:
+            return {int(badchar, 0) for badchar in badchars}
+        return set(CANARY_BYTES)
+
+    def _addr_canary_score(self, gadget: Gadget, avoid: set) -> int:
+        ''' Number of bytes to avoid present in the gadget's packed address '''
+        packed = utils.pack_addr(gadget.vaddr, gadget.mode)
+        return sum(byte in avoid for byte in packed)
+
+    def _sort_gadgets(self, gadgets: list[Gadget]) -> list[Gadget]:
+        return sorted(gadgets, key=lambda g: (os.path.basename(g.filename), g.vaddr))
 
     def _open_binary(self, filename, base):
         binary = rop3.binary.Binary(filename, base)
@@ -167,6 +197,9 @@ class GadFinder:
 
     def _keep_duplicates(self):
         return self.flags & KEEP_DUPLICATES
+
+    def _avoid_canary(self):
+        return self.flags & AVOID_CANARY
 
     def _is_valid_gadget(self, decodes):
         ''' Invalid instructions and, thus, not decoded '''
