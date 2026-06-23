@@ -17,11 +17,12 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 import capstone
 import io
+import struct
 
 from macholib.MachO import MachO as _MachO
 from macholib.mach_o import (
-    LC_SEGMENT, LC_SEGMENT_64,
-    CPU_TYPE_NAMES,
+    LC_SEGMENT, LC_SEGMENT_64, LC_SYMTAB,
+    CPU_TYPE_NAMES, N_STAB,
     S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS
 )
 
@@ -32,8 +33,14 @@ from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 VM_PROT_EXECUTE = 0x04
 S_INSTRUCTION_ATTRS = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
 
+# Mach-O architecture name -> (rop3 architecture class)
+SUPPORTED_ARCHS = {
+    'x86_64': X64_Architecture,
+    'i386': X86_Architecture,
+}
+
 class MachO:
-    def __init__(self, data, base):
+    def __init__(self, data, base, arch=None):
         # Dirty way to initialize the class, since it only supports reading
         # from a filename
         try:
@@ -46,23 +53,41 @@ class MachO:
             self._macho.load(self._file)
         except Exception as exc:
             raise binary.BinaryException(str(exc)) from exc
-        # Fat binaries carry several headers; pick the first supported slice
-        # (do not commit to a header until its architecture is recognised)
-        self._header = None
-        self._arch = None
-        for header in self._macho.headers:
-            arch = CPU_TYPE_NAMES.get(header.header.cputype)
-            if arch == "x86_64":
-                self._header, self._arch = header, X64_Architecture()
-                break
-            elif arch == "i386":
-                self._header, self._arch = header, X86_Architecture()
-                break
-        if not self._header:
-            raise binary.BinaryException(
-                    'Mach-O: No supported architectures were found')
+
+        self._header, self._arch = self._select_slice(arch)
 
         self._base_delta = self._base_delta_for(base)
+
+    def _select_slice(self, arch):
+        '''
+        Fat binaries carry several headers. With --arch, pick that slice; else
+        pick the first supported slice in file order. Do not commit to a header
+        until its architecture is recognized.
+        '''
+        available = {}   # arch name -> header (first occurrence)
+        for header in self._macho.headers:
+            name = CPU_TYPE_NAMES.get(header.header.cputype)
+            if name is not None:
+                available.setdefault(name, header)
+
+        if arch is not None:
+            if arch not in SUPPORTED_ARCHS:
+                raise binary.BinaryException(
+                    f'Mach-O: unsupported --arch {arch} '
+                    f'(choose from {", ".join(sorted(SUPPORTED_ARCHS))})')
+            if arch not in available:
+                present = ", ".join(sorted(available)) or "none"
+                raise binary.BinaryException(
+                    f'Mach-O: arch {arch} not present in binary (available: {present})')
+            return available[arch], SUPPORTED_ARCHS[arch]()
+
+        for header in self._macho.headers:
+            name = CPU_TYPE_NAMES.get(header.header.cputype)
+            if name in SUPPORTED_ARCHS:
+                return header, SUPPORTED_ARCHS[name]()
+
+        raise binary.BinaryException(
+                'Mach-O: No supported architectures were found')
 
     def _image_base(self):
         ''' Link-time base of the image: the __TEXT segment vmaddr (fall back
@@ -100,6 +125,36 @@ class MachO:
                             'vaddr': section.addr + self._base_delta,
                             'opcodes': section_data
                         })
+        return ret
+
+    def get_symbols(self):
+        ''' Symbols from the LC_SYMTAB symbol table, rebased by the same delta
+            as the sections. macholib does not expand the nlist array, so it is
+            parsed here from the file. Stripped binaries yield none. '''
+        ret = []
+        is64 = self._arch.mode == capstone.CS_MODE_64
+        entry_fmt = '<IBBHQ' if is64 else '<IBBhI'   # nlist_64 / nlist
+        entry_size = struct.calcsize(entry_fmt)
+        slice_off = self._header.offset
+
+        for (lc, cmd, data) in self._header.commands:
+            if lc.cmd != LC_SYMTAB:
+                continue
+            self._file.seek(slice_off + cmd.stroff)
+            strtab = self._file.read(cmd.strsize)
+            self._file.seek(slice_off + cmd.symoff)
+            entries = self._file.read(cmd.nsyms * entry_size)
+            for i in range(cmd.nsyms):
+                n_strx, n_type, n_sect, n_desc, n_value = struct.unpack_from(
+                    entry_fmt, entries, i * entry_size)
+                if n_type & N_STAB:          # debug (STABS) entry
+                    continue
+                if not n_value:              # undefined / no address
+                    continue
+                end = strtab.find(b'\x00', n_strx)
+                name = strtab[n_strx:end].decode('utf-8', 'replace')
+                if name:
+                    ret.append((n_value + self._base_delta, name))
         return ret
 
     def get_arch(self):

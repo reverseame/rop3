@@ -33,7 +33,7 @@ def test_get_op_unknown_raises(x64):
         parser.Parser().get_op('definitely_not_an_op')
 
 
-def test_composite_op_is_recognised(x64):
+def test_composite_op_is_recognized(x64):
     ''' lsd is a composite (compose:) operation. '''
     resolved = parser.Parser().get_op('lsd')
     assert isinstance(resolved, parser.CompositeOperation)

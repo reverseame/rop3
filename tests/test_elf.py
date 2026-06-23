@@ -24,6 +24,7 @@ from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from conftest import build_minimal_elf, EM_386, EM_X86_64, ET_DYN
 
 TEXT = b'\x58\xc3'   # pop rax ; ret
+SYMS = [('funcA', 0x1000), ('funcB', 0x1100)]
 
 
 def test_elf_detects_x64():
@@ -71,3 +72,21 @@ def test_binary_unknown_format_raises(tmp_path):
     path.write_bytes(b'not a real binary header')
     with pytest.raises(binary.BinaryException):
         binary.Binary(str(path), None)
+
+
+def test_elf_get_symbols():
+    data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN, symbols=SYMS)
+    assert sorted(elfmod.ELF(data, None).get_symbols()) == \
+        [(0x1000, 'funcA'), (0x1100, 'funcB')]
+
+
+def test_elf_get_symbols_rebased():
+    ''' Symbols shift by the same delta as sections under --base. '''
+    data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN, symbols=SYMS)
+    assert sorted(elfmod.ELF(data, '0x400000').get_symbols()) == \
+        [(0x401000, 'funcA'), (0x401100, 'funcB')]
+
+
+def test_elf_no_symbols_when_stripped():
+    data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN)
+    assert elfmod.ELF(data, None).get_symbols() == []

@@ -59,6 +59,22 @@ class PE:
                 })
         return ret
 
+    def get_symbols(self):
+        ''' Best-effort symbols from the export table (names + ordinals),
+            relative to the (possibly relocated) image base. '''
+        ret = []
+        self._pe.parse_data_directories()
+        export_dir = getattr(self._pe, 'DIRECTORY_ENTRY_EXPORT', None)
+        if export_dir is None:
+            return ret
+        image_base = self._pe.OPTIONAL_HEADER.ImageBase
+        for exp in export_dir.symbols:
+            if exp.address:
+                name = exp.name.decode('utf-8', 'replace') if exp.name \
+                    else f'ordinal_{exp.ordinal}'
+                ret.append((image_base + exp.address, name))
+        return ret
+
     def get_arch(self):
         return self._arch
 

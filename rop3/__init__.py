@@ -41,25 +41,30 @@ def main():
             if args.ropchain:
                 ropchain = rop3.ropchain.RopChain(finder)
                 result = ropchain.search_from_files(args.binary, args.ropchain,
-                                         base=args.base, badchars=args.badchar)
-                if args.exhaustive:
-                    for idx, x in enumerate(result, 1):
-                        utils.print_ropchain(x, idx)
-                else:
-                    utils.print_ropchain(next(iter(result)))
+                                         base=args.base, badchars=args.badchar,
+                                         badchar_bytes=args.badchar_bytes,
+                                         arch=args.arch, symbols=args.symbols)
+                utils.output_ropchains(result, args.output, exhaustive=args.exhaustive)
             elif args.op:
-
-                result = finder.find_op(args.binary, args.op, args.dst, args.src, base=args.base, badchars=args.badchar)
+                result = finder.find_op(args.binary, args.op, args.dst, args.src,
+                                        base=args.base, badchars=args.badchar,
+                                        badchar_bytes=args.badchar_bytes,
+                                        arch=args.arch, symbols=args.symbols)
                 if result and isinstance(result[0], list):
-                    for chain in result:
-                        for gadget in chain:
-                            utils.print_gadget(gadget)
+                    ''' Composite operation: a list of chains '''
+                    if args.output == 'text':
+                        for chain in result:
+                            for gadget in chain:
+                                utils.print_gadget(gadget)
+                    else:
+                        utils.output_ropchains(result, args.output, exhaustive=True)
                 else:
-                    for gadget in result:
-                        utils.print_gadget(gadget)
+                    utils.output_gadgets(result, args.output)
             else:
-                for gadget in finder.find(args.binary, base=args.base, badchars=args.badchar):
-                    utils.print_gadget(gadget)
+                gadgets = finder.find(args.binary, base=args.base, badchars=args.badchar,
+                                      badchar_bytes=args.badchar_bytes,
+                                      arch=args.arch, symbols=args.symbols)
+                utils.output_gadgets(gadgets, args.output)
         except parser.ParserException as exc:
             debug.error(str(exc))
         except rop3.ropchain.RopChainNotFound as exc:

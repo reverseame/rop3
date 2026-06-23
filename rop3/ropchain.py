@@ -52,8 +52,10 @@ class RopChain:
     def __init__(self, gadfinder):
         self.gadfinder = gadfinder
 
-    def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None) -> Iterator[list[Gadget]]:
-        gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars)
+    def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None,
+                          badchar_bytes=None, arch=None, symbols=False) -> Iterator[list[Gadget]]:
+        gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars,
+                                      badchar_bytes=badchar_bytes, arch=arch, symbols=symbols)
         return self.search_from_gadgets(gadgets, ropfile)
 
     def search_from_gadgets(self, gadgets, ropfile) -> Iterator[list[Gadget]]:
@@ -148,7 +150,7 @@ class RopChain:
         Returns an array indexed [comb_idx][step_idx].
 
         Each operation's gadget list is sorted once up front, and the
-        filter+prune result is memoised per (step, req_dst, req_src): different
+        filter+prune result is memoized per (step, req_dst, req_src): different
         combinations frequently request the same concrete registers for a given
         step, so this avoids recomputing the same filtered list repeatedly.
         """
@@ -256,7 +258,7 @@ class Tree:
         """
         Gadgets are the actual rop gadgets present in the binary.
         Returns (combinations, ops_gadgets) where each combination is a flat
-        dict mapping every abstract-register name to a normalised concrete reg.
+        dict mapping every abstract-register name to a normalized concrete reg.
         """
         (state, ops_gadgets, op_pairs) = self._get_initial_state(gadgets)
         combinations = self._traverse(state, op_pairs)

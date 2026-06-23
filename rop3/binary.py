@@ -26,10 +26,10 @@ class Binary:
     '''
     Interface to access binary file details
     '''
-    def __init__(self, filename, base):
+    def __init__(self, filename, base, arch=None):
         self.filename = os.path.realpath(filename)
         self.raw_data = self._read_binary()
-        self._binary = self._load_binary(base)
+        self._binary = self._load_binary(base, arch)
 
     def _read_binary(self):
         try:
@@ -38,7 +38,7 @@ class Binary:
         except (IOError, FileNotFoundError):
             debug.error(f'{self.filename}: Unable to read file')
 
-    def _load_binary(self, base):
+    def _load_binary(self, base, arch=None):
         # MS-DOS Stub (PE)
         if self.raw_data[:2] == b'\x4d\x5a':    # MZ
             return pe.PE(self.raw_data, base)
@@ -53,7 +53,7 @@ class Binary:
             b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe', # 64-bit
             b'\xca\xfe\xba\xbe', # Fat header
         ]:
-            return macho.MachO(self.raw_data, base)
+            return macho.MachO(self.raw_data, base, arch)
 
         else:
             raise BinaryException(f'{self.filename}: Format file not supported')
@@ -70,6 +70,14 @@ class Binary:
         @returns computer architecture, e.g: x86
         '''
         return self._binary.get_arch()
+
+    def get_symbols(self):
+        '''
+        @returns a list of (address, name) tuples for the binary's symbols,
+        or an empty list when the format/loader has none (e.g. stripped)
+        '''
+        getter = getattr(self._binary, 'get_symbols', None)
+        return getter() if getter else []
 
 class BinaryException(Exception):
     pass
