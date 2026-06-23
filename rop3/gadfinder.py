@@ -20,6 +20,7 @@ import re
 import bisect
 import capstone
 
+from rop3.cache import GadgetCache
 import rop3.utils as utils
 import rop3.debug as debug
 import rop3.binary
@@ -52,9 +53,10 @@ class GadFinder:
     '''
     Class to search gadgets in a binary
     '''
-    def __init__(self, depth=DEPTH, flags=DEFAULT):
+    def __init__(self, depth=DEPTH, flags=DEFAULT, cache=False, cache_dir=None):
         self.depth = depth
         self.flags = flags
+        self._cache = GadgetCache(cache_dir) if cache else None
 
     def find(self, filenames: list[str], base=None, badchars=None,
              badchar_bytes=None, arch=None, symbols=False) -> list[Gadget]:
@@ -155,6 +157,39 @@ class GadFinder:
         return op_obj.filter_gadgets(gadgets)
 
     def _search_gadgets(self, binary, badchars, badchar_bytes=None, symbol_table=None):
+        '''
+        Yield the gadgets of a binary, building them either from the on-disk
+        cache (when enabled and warm) or from a fresh scan. The cache only
+        stores the raw (vaddr, bytes) records; everything address/disassembly
+        derived (decodes, symbol) is rebuilt here.
+        '''
+        if self._cache is not None:
+            key = self._cache.key(
+                self._cache.file_hash(binary.raw_data),
+                self._record_params(binary, badchars, badchar_bytes))
+            cached = self._cache.load(key)
+            if cached is not None:
+                debug.info(f'{os.path.basename(binary.filename)}: '
+                           f'{len(cached)} gadgets from cache')
+                yield from self._reconstruct(binary, cached, symbol_table)
+                return
+
+        records = [] if self._cache is not None else None
+        arch = arch_singleton.arch.arch
+        mode = arch_singleton.arch.mode
+        for vaddr, raw, decodes in self._scan(binary, badchars, badchar_bytes):
+            if records is not None:
+                records.append([vaddr, raw.hex()])
+            symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
+            yield Gadget(filename=binary.filename, arch=arch, mode=mode,
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+
+        if records is not None:
+            self._cache.store(key, records)
+
+    def _scan(self, binary, badchars, badchar_bytes):
+        ''' Single pass over the executable sections; yields the raw
+            (vaddr, bytes, decodes) of every valid gadget (one disassembly). '''
         sections = binary.get_exec_sections()
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
@@ -181,17 +216,34 @@ class GadFinder:
                                 continue
                             decodes = list(md.disasm(bytes_, vaddr))
                             if self._is_valid_gadget(decodes):
-                                symbol = self._nearest_symbol(vaddr, symbol_table) \
-                                    if symbol_table else None
-                                yield Gadget(
-                                    filename=binary.filename,
-                                    arch=arch,
-                                    mode=mode,
-                                    vaddr=vaddr,
-                                    decodes=decodes,
-                                    bytes=bytes_,
-                                    symbol=symbol,
-                                )
+                                yield (vaddr, bytes_, decodes)
+
+    def _reconstruct(self, binary, records, symbol_table):
+        ''' Rebuild Gadget objects from cached (vaddr, hex-bytes) records. '''
+        arch = arch_singleton.arch.arch
+        mode = arch_singleton.arch.mode
+        md = capstone.Cs(arch, mode)
+        md.detail = True
+        for vaddr, hexbytes in records:
+            raw = bytes.fromhex(hexbytes)
+            decodes = list(md.disasm(raw, vaddr))
+            symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
+            yield Gadget(filename=binary.filename, arch=arch, mode=mode,
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+
+    def _record_params(self, binary, badchars, badchar_bytes) -> dict:
+        ''' Everything (besides file content) that changes the raw record set,
+            so a different option misses the cache cleanly. '''
+        arch = arch_singleton.arch
+        return {
+            'depth': self.depth,
+            'flags': int(self.flags),
+            'arch': [arch.arch, arch.mode],
+            'badchars': sorted(badchars) if badchars else None,
+            'badchar_bytes': sorted(badchar_bytes) if badchar_bytes else None,
+            'sections': [[s['vaddr'], len(s['opcodes'])]
+                         for s in binary.get_exec_sections()],
+        }
 
     def _gad_terminations(self):
         ret = []

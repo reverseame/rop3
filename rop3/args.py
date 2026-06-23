@@ -51,6 +51,8 @@ class ArgumentParser:
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
         self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
+        self.argparser.add_argument('--cache', action='store_true', default=False, help='cache discovered gadgets on disk and reuse them on repeated runs over the same file and options')
+        self.argparser.add_argument('--cache-dir', type=str, metavar='<dir>', default=None, help='directory for the gadget cache (default: $XDG_CACHE_HOME/rop3)')
 
     def parse_args(self, arguments):
         args = self.argparser.parse_args(arguments)
