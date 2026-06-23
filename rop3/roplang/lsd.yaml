@@ -3,7 +3,7 @@ lsd:
   # lc(REG1, δ)
   # neg(dst)
   # and(dst, REG1)
-  -
+  - compose:
     - operation: lc
       op1: REG1
     - operation: neg

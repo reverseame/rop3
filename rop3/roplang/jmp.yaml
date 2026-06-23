@@ -8,7 +8,7 @@ jmp:
   # jmp src
   - compose:
     - operation: mov
-      op1: rbp
+      op1: REG_BP
       op2: src
     - operation: leave
 
