@@ -71,6 +71,8 @@ def pretty_addr(addr, mode=capstone.CS_MODE_64):
         padding = 8
     elif mode == capstone.CS_MODE_64:
         padding = 16
+    else:
+        raise ValueError(f'unsupported mode: {mode}')
 
     return f'{int(addr):#0{padding}x}'
 
@@ -79,6 +81,8 @@ def pack_addr(addr, mode=capstone.CS_MODE_64):
         formater = '<I'
     elif mode == capstone.CS_MODE_64:
         formater = '<Q'
+    else:
+        raise ValueError(f'unsupported mode: {mode}')
 
     return struct.pack(formater, addr)
 

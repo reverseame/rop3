@@ -62,6 +62,25 @@ class MachO:
             raise binary.BinaryException(
                     'Mach-O: No supported architectures were found')
 
+        self._base_delta = self._base_delta_for(base)
+
+    def _image_base(self):
+        ''' Link-time base of the image: the __TEXT segment vmaddr (fall back
+            to the lowest segment vmaddr) '''
+        vmaddrs = []
+        for (lc, cmd, data) in self._header.commands:
+            if lc.cmd in (LC_SEGMENT, LC_SEGMENT_64):
+                segname = cmd.segname.decode('utf-8').strip('\x00')
+                if segname == '__TEXT':
+                    return cmd.vmaddr
+                vmaddrs.append(cmd.vmaddr)
+        return min(vmaddrs) if vmaddrs else 0
+
+    def _base_delta_for(self, base):
+        if not base:
+            return 0
+        return int(base, 0) - self._image_base()
+
     def get_exec_sections(self):
         ret = []
         for (lc, cmd, data) in self._header.commands:
@@ -78,7 +97,7 @@ class MachO:
                         self._file.seek(offset + section.offset)
                         section_data = self._file.read(section.size)
                         ret.append({
-                            'vaddr': section.addr,
+                            'vaddr': section.addr + self._base_delta,
                             'opcodes': section_data
                         })
         return ret
