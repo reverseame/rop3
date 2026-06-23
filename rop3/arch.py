@@ -103,6 +103,10 @@ class ArchitectureSingleton:
             return
         self._arch = arch
 
+    def reset(self) -> None:
+        ''' Clear the current architecture (mainly for tests / library use) '''
+        self._arch = None
+
     def is_initialized(self) -> bool:
         return self._arch is not None
 

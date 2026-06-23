@@ -15,6 +15,20 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import os
+import re
+import capstone
+
+import rop3.utils as utils
+import rop3.debug as debug
+import rop3.binary
+import rop3.operation as operation
+from rop3.arch import arch_singleton
+from rop3.ropchain import RopChain
+import rop3.parser as parser
+
+from .gadget import Gadget
+
 ''' Default depth engine '''
 DEPTH = 5
 
@@ -32,20 +46,6 @@ AVOID_CANARY = 64
     0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
     terminators for gets() and alike) and 0xff (EOF). See issue #5. '''
 CANARY_BYTES = (0x00, 0x0a, 0x0d, 0xff)
-
-import os
-import re
-import capstone
-
-import rop3.utils as utils
-import rop3.debug as debug
-import rop3.binary
-import rop3.operation as operation
-from rop3.arch import arch_singleton
-from rop3.ropchain import RopChain
-import rop3.parser as parser
-
-from .gadget import Gadget
 
 class GadFinder:
     '''

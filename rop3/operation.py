@@ -16,6 +16,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import capstone
+import dataclasses
 
 from rop3.arch import arch_singleton
 
@@ -44,11 +45,17 @@ class Operation:
         for gadget in gadgets:
             (equal, set_, dst, src) = self.template.is_equal(gadget.decodes)
             if equal:
-                gadget.op = self.template.name
-                gadget.dst = self.dst if self.dst else dst
-                gadget.src = self.src if self.src else src
-                gadget.calculate_side_effects()
-                ret.append(gadget)
+                ''' Annotate a copy so the shared input gadget is not mutated
+                    (the same object may be filtered for several operations).
+                    replace() also gives the copy fresh side-effect sets. '''
+                matched = dataclasses.replace(
+                    gadget,
+                    op=self.template.name,
+                    dst=self.dst if self.dst else dst,
+                    src=self.src if self.src else src,
+                )
+                matched.calculate_side_effects()
+                ret.append(matched)
 
         return ret
 
@@ -120,7 +127,7 @@ class Set:
             return (False, dst, src)
 
         for i, item in enumerate(self.items):
-            if type(item) != Instruction:
+            if not isinstance(item, Instruction):
                 return (False, dst, src)
 
             (equal, ins_dst, ins_src) = item.is_equal(decodes[i])

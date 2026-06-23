@@ -1,5 +1,5 @@
 capstone >= 4.0.1
 pefile >= 2019.4.18
-pyelftools
-pyyaml
-macholib
+pyelftools >= 0.27
+pyyaml >= 5.4
+macholib >= 1.14

@@ -100,7 +100,7 @@ class YamlParser:
                     for operand in ('op1', 'op2'):
                         if operand in item:
                             current_op = item[operand]
-                            if type(current_op) == dict:
+                            if isinstance(current_op, dict):
                                 raise NotImplementedError
                             else:
                                 # Resolve aliases if necessary
