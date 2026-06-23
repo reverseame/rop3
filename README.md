@@ -6,6 +6,19 @@ rop3 is a tool developed in [Python](https://www.python.org/downloads/) and it r
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
+## Features
+
+- **Multi-format, multi-arch**: analyzes ELF, PE and Mach-O binaries (x86 and x86-64). For fat/universal Mach-O binaries, `--arch` selects the slice to analyze.
+- **Gadget search**: ROP, JOP and RETF gadgets, with controls for search depth (`--depth`), undeterministic gadgets (`--allow-undeterministic-gadgets`) and complex memory operands (`--allow-complex-memory-ops`).
+- **Operations and ROP chains**: search for high-level operations (`--op`/`--dst`/`--src`) and build ROP chains from a ROPLang file (`--ropchain`, `--exhaustive`), including multi-step composite operations.
+- **Relocation**: rebase any binary (ELF/PE/Mach-O) with `--base`, one address per binary.
+- **Bad-char filtering**: avoid bytes in the gadget address (`--badchar`) and/or in the gadget opcode bytes (`--badchar-bytes`). By default, duplicate gadgets prefer canary-free addresses (`0x00`, `0x0a`, `0x0d`, `0xff`); disable with `--keep-canary-address`.
+- **Symbol annotation**: with `--symbols`, each gadget is tagged with the nearest symbol (`name+offset`) when the binary is not stripped.
+- **Output formats**: human-readable text (default), or machine-readable `--output json`/`--output csv` for scripting. Colors are emitted only on a TTY.
+- **Interactive mode**: `--interactive` scans the binary once and drops into a REPL to explore gadgets, operations and chains without re-scanning.
+- **Performance**: parallel scanning across processes (`--jobs N`) and an optional on-disk gadget cache (`--cache`) for repeated runs over the same file.
+- **Library API**: use rop3 programmatically through the `Rop3` class (see [Use as a library](#use-as-a-library)).
+
 ## Installation
 
 We recommend to install rop3's dependencies with [pip](https://pypi.org/project/pip/) in a virtual environment to not to mess up with your current configuration:
