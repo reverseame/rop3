@@ -50,6 +50,7 @@ class ArgumentParser:
         self.argparser.add_argument('--src', type=str, metavar='<reg>', help='specify a source register for the operation')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
+        self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
 
     def parse_args(self, arguments):
         args = self.argparser.parse_args(arguments)
