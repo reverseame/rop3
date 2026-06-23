@@ -39,7 +39,7 @@ class Rop3:
                  retf=False, all=False, allow_undeterministic=False,
                  allow_complex_mem=False, avoid_canary=True, base=None,
                  badchars=None, badchar_bytes=None, arch=None, symbols=False,
-                 cache=False, cache_dir=None):
+                 cache=False, cache_dir=None, jobs=1):
         self.binaries = [binaries] if isinstance(binaries, str) else list(binaries)
         self.base = base
         self.badchars = badchars
@@ -63,7 +63,8 @@ class Rop3:
         if avoid_canary:
             flags |= gadfinder.AVOID_CANARY
 
-        self._finder = GadFinder(depth, flags, cache=cache, cache_dir=cache_dir)
+        self._finder = GadFinder(depth, flags, cache=cache, cache_dir=cache_dir,
+                                 jobs=jobs)
         self._gadgets = None
 
     @classmethod
@@ -78,7 +79,8 @@ class Rop3:
         self.arch = args.arch
         self.symbols = args.symbols
         self._finder = GadFinder(args.depth, args.flags,
-                                 cache=args.cache, cache_dir=args.cache_dir)
+                                 cache=args.cache, cache_dir=args.cache_dir,
+                                 jobs=args.jobs)
         self._gadgets = None
         return self
 

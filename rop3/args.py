@@ -51,6 +51,7 @@ class ArgumentParser:
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
         self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
+        self.argparser.add_argument('--jobs', type=int, metavar='<n>', default=1, help='number of worker processes for the gadget scan (default: 1)')
         self.argparser.add_argument('--cache', action='store_true', default=False, help='cache discovered gadgets on disk and reuse them on repeated runs over the same file and options')
         self.argparser.add_argument('--cache-dir', type=str, metavar='<dir>', default=None, help='directory for the gadget cache (default: $XDG_CACHE_HOME/rop3)')
 
@@ -122,6 +123,9 @@ class ArgumentParser:
                 value = self._check_int_value(badchar)
                 if value < 0x00 or value > 0xff:
                     debug.error(f'{badchar}: bad char must be one byte (range 0x00-0xff)')
+
+        if args.jobs is not None and args.jobs < 1:
+            debug.error(f'--jobs must be >= 1 (got {args.jobs})')
 
         if args.ropchain:
             ropchain_filename = os.path.abspath(args.ropchain)

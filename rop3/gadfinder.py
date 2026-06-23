@@ -17,8 +17,10 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import re
+import math
 import bisect
 import capstone
+import multiprocessing
 
 from rop3.cache import GadgetCache
 import rop3.utils as utils
@@ -26,6 +28,7 @@ import rop3.debug as debug
 import rop3.binary
 import rop3.operation as operation
 from rop3.arch import arch_singleton
+from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.ropchain import RopChain
 import rop3.parser as parser
 
@@ -53,10 +56,12 @@ class GadFinder:
     '''
     Class to search gadgets in a binary
     '''
-    def __init__(self, depth=DEPTH, flags=DEFAULT, cache=False, cache_dir=None):
+    def __init__(self, depth=DEPTH, flags=DEFAULT, cache=False, cache_dir=None,
+                 jobs=1):
         self.depth = depth
         self.flags = flags
         self._cache = GadgetCache(cache_dir) if cache else None
+        self._jobs = max(1, int(jobs)) if jobs else 1
 
     def find(self, filenames: list[str], base=None, badchars=None,
              badchar_bytes=None, arch=None, symbols=False) -> list[Gadget]:
@@ -80,11 +85,15 @@ class GadFinder:
                     else:
                         existing.count += 1
                         ''' Among duplicates, keep the address with the fewest
-                            terminator canary bytes (see issue #5) '''
-                        if self._avoid_canary() and \
-                                self._addr_canary_score(gadget, avoid) < self._addr_canary_score(existing, avoid):
-                            gadget.count = existing.count
-                            seen[gadget] = gadget
+                            terminator canary bytes; break ties by the lower
+                            address so the result is deterministic regardless
+                            of scan order (serial or parallel). See issue #5. '''
+                        if self._avoid_canary():
+                            new_key = (self._addr_canary_score(gadget, avoid), gadget.vaddr)
+                            cur_key = (self._addr_canary_score(existing, avoid), existing.vaddr)
+                            if new_key < cur_key:
+                                gadget.count = existing.count
+                                seen[gadget] = gadget
                 unique = len(seen) - before
                 debug.info(f'{unique} unique gadgets ({total - unique} duplicates discarded)')
             return self._sort_gadgets(list(seen.values()))
@@ -163,6 +172,7 @@ class GadFinder:
         stores the raw (vaddr, bytes) records; everything address/disassembly
         derived (decodes, symbol) is rebuilt here.
         '''
+        key = None
         if self._cache is not None:
             key = self._cache.key(
                 self._cache.file_hash(binary.raw_data),
@@ -173,6 +183,13 @@ class GadFinder:
                            f'{len(cached)} gadgets from cache')
                 yield from self._reconstruct(binary, cached, symbol_table)
                 return
+
+        if self._jobs > 1:
+            records = self._scan_parallel(binary, badchars, badchar_bytes)
+            if self._cache is not None:
+                self._cache.store(key, records)
+            yield from self._reconstruct(binary, records, symbol_table)
+            return
 
         records = [] if self._cache is not None else None
         arch = arch_singleton.arch.arch
@@ -186,6 +203,43 @@ class GadFinder:
 
         if records is not None:
             self._cache.store(key, records)
+
+    def _scan_parallel(self, binary, badchars, badchar_bytes):
+        '''
+        Scan the executable sections across worker processes. Each section is
+        split into chunks; a chunk emits only the gadgets whose termination
+        falls inside its window (the slice extends `depth` bytes earlier so
+        gadgets straddling a boundary are still complete), so there are no
+        cross-chunk duplicates. Returns sorted [vaddr, hex] records.
+        '''
+        arch = arch_singleton.arch.arch
+        mode = arch_singleton.arch.mode
+        terminations = self._gad_terminations()
+
+        tasks = []
+        for section in binary.get_exec_sections():
+            opcodes = section['opcodes']
+            sec_vaddr = section['vaddr']
+            n = len(opcodes)
+            chunk = max(4096, math.ceil(n / (self._jobs * 4)))
+            for lo in range(0, n, chunk):
+                hi = min(lo + chunk, n)
+                start = max(0, lo - self.depth)
+                ''' Termination END offsets run in [0, n]; the final chunk owns
+                    the closing n as well, so make its window inclusive. '''
+                emit_hi = hi + 1 if hi == n else hi
+                tasks.append((
+                    arch, mode, self.depth, int(self.flags), terminations,
+                    badchars, badchar_bytes,
+                    opcodes[start:hi], start, sec_vaddr, lo, emit_hi,
+                ))
+
+        records = []
+        with multiprocessing.Pool(self._jobs) as pool:
+            for part in pool.imap_unordered(_scan_worker, tasks):
+                records.extend(part)
+        records.sort()   # deterministic order regardless of worker scheduling
+        return records
 
     def _scan(self, binary, badchars, badchar_bytes):
         ''' Single pass over the executable sections; yields the raw
@@ -316,4 +370,49 @@ class GadFinder:
 
         forbidden = {int(b, 0) for b in badchar_bytes}
         return not any(byte in forbidden for byte in gadget_bytes)
+
+
+def _arch_for(arch_const, mode):
+    ''' Rebuild the architecture object inside a worker process. '''
+    return X64_Architecture() if mode == capstone.CS_MODE_64 else X86_Architecture()
+
+
+def _scan_worker(task):
+    '''
+    Worker (runs in its own process): scan one section chunk and return the
+    raw [vaddr, hex] records for the gadgets whose termination lies in the
+    chunk's window. Decodes are not returned (capstone objects are not
+    picklable); the parent rebuilds them.
+    '''
+    (arch_const, mode, depth, flags, terminations, badchars, badchar_bytes,
+     slice_bytes, slice_start, sec_vaddr, emit_lo, emit_hi) = task
+
+    arch_singleton.reset()
+    arch_singleton.initialize(_arch_for(arch_const, mode))
+    finder = GadFinder(depth, flags)
+
+    md = capstone.Cs(arch_const, mode)
+    md.detail = True
+
+    out = []
+    for termination in terminations:
+        for match in re.finditer(termination['bytes'], slice_bytes):
+            ref_local = match.end()
+            ref_off = slice_start + ref_local        # offset within the section
+            ''' Only this chunk owns terminations in [emit_lo, emit_hi) '''
+            if not (emit_lo <= ref_off < emit_hi):
+                continue
+            for d in range(termination['size'], depth + 1):
+                start_local = ref_local - d
+                if start_local < 0:
+                    continue
+                vaddr = sec_vaddr + ref_off - d
+                if finder._is_valid_address(vaddr, badchars, mode):
+                    raw = slice_bytes[start_local:ref_local]
+                    if not finder._is_valid_bytes(raw, badchar_bytes):
+                        continue
+                    decodes = list(md.disasm(raw, vaddr))
+                    if finder._is_valid_gadget(decodes):
+                        out.append([vaddr, raw.hex()])
+    return out
 
