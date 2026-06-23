@@ -25,6 +25,8 @@ import rop3.binary as binary
 import rop3.ropchain
 import rop3.gadfinder as gadfinder
 
+from rop3.api import Rop3
+
 def main():
     args = rop3.args.ArgumentParser().parse_args(sys.argv[1:])
 
@@ -35,21 +37,17 @@ def main():
         utils.show_version()
         sys.exit(0)
     elif args.binary:
-        finder = gadfinder.GadFinder(args.depth, args.flags)
+        rop = Rop3.from_args(args)
 
         try:
-            if args.ropchain:
-                ropchain = rop3.ropchain.RopChain(finder)
-                result = ropchain.search_from_files(args.binary, args.ropchain,
-                                         base=args.base, badchars=args.badchar,
-                                         badchar_bytes=args.badchar_bytes,
-                                         arch=args.arch, symbols=args.symbols)
+            if args.interactive:
+                from rop3.interactive import Rop3Shell
+                Rop3Shell(rop).cmdloop()
+            elif args.ropchain:
+                result = rop.ropchain(args.ropchain)
                 utils.output_ropchains(result, args.output, exhaustive=args.exhaustive)
             elif args.op:
-                result = finder.find_op(args.binary, args.op, args.dst, args.src,
-                                        base=args.base, badchars=args.badchar,
-                                        badchar_bytes=args.badchar_bytes,
-                                        arch=args.arch, symbols=args.symbols)
+                result = rop.find_op(args.op, args.dst, args.src)
                 if result and isinstance(result[0], list):
                     ''' Composite operation: a list of chains '''
                     if args.output == 'text':
@@ -61,10 +59,7 @@ def main():
                 else:
                     utils.output_gadgets(result, args.output)
             else:
-                gadgets = finder.find(args.binary, base=args.base, badchars=args.badchar,
-                                      badchar_bytes=args.badchar_bytes,
-                                      arch=args.arch, symbols=args.symbols)
-                utils.output_gadgets(gadgets, args.output)
+                utils.output_gadgets(rop.gadgets(), args.output)
         except parser.ParserException as exc:
             debug.error(str(exc))
         except rop3.ropchain.RopChainNotFound as exc:

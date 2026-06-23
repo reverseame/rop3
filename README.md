@@ -35,7 +35,7 @@ Now, you can install dependencies in [requirements.txt](requirements.txt):
 ```
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop] [--retf | --no-retf] [--jop | --no-jop] [--allow-undeterministic-gadgets] [--allow-complex-memory-ops] [--verbose]
                [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--badchar-bytes <hex> [<hex> ...]] [--keep-canary-address] [--base <hex> [<hex> ...]] [--arch <name>] [--symbols]
-               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive]
+               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive] [--interactive]
 
 This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm in a tree-like structure
 
@@ -72,6 +72,41 @@ options:
   --ropchain <file>     plain text file with a ROP chain
   --exhaustive, --no-exhaustive
                         exhaustive search for ROP chains
+  --interactive         scan the binary once and drop into an interactive prompt
+```
+
+### Interactive mode
+
+With `--interactive`, rop3 scans the binary once and drops into a prompt so you can explore its gadgets without re-scanning on every query:
+
+```Shell
+$ python rop3.py --binary /bin/ls --interactive
+Loaded 71 gadgets from /bin/ls
+rop3> count
+71
+rop3> search pop rbp
+[ls @ 0x100000777]: pop rbp ; ret (x29)
+...
+rop3> op mov rdi rax
+rop3> chain chain.txt
+rop3> quit
+```
+
+Commands: `gadgets`/`search [substring]`, `count`, `op <name> [dst] [src]`, `chain <file>`, `help`, `quit`.
+
+### Use as a library
+
+rop3 can also be used programmatically through the `Rop3` class. Gadgets are scanned once and cached on the instance:
+
+```python
+from rop3 import Rop3
+
+r = Rop3("libc.so.6", base="0x7f0000000000", symbols=True)
+for gadget in r.gadgets():
+    print(gadget)
+
+r.find_op("mov", dst="rdi", src="rax")   # list of matching gadgets
+r.ropchain("chain.txt")                  # iterator over ROP chains
 ```
 
 In the work that we presented in [15th IEEE Workshop on Offensive Technologies (WOOT21)](https://www.ieee-security.org/TC/SP2021/SPW2021/WOOT21/), we used rop3 to evaluate the executional power of Return Oriented Programming in a [subset of most common Windows DLLs](https://drive.google.com/file/d/1gOxUolzrw-xlaW6K-fhzZ7Z-sqxiaZeZ/view?usp=sharing>). Check the [paper](https://drive.google.com/file/d/1Pe7s7bLhJ_20MC-duQ7YiLP-Rx5VCjFK/view?usp=sharing) for further details.
