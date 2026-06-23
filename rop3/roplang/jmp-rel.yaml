@@ -1,0 +1,6 @@
+# Unconditional branching
+jmp-rel:
+  # spa(src)
+  - compose:
+    - operation: spa
+      op1: src

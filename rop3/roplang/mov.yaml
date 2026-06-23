@@ -6,6 +6,14 @@ mov:
       op1: dst
       op2: src
 
+  # push src
+  # pop dst
+  -
+    - mnemonic: push
+      op1: src
+    - mnemonic: pop
+      op1: dst
+
   # xchg dst, src
   -
     - mnemonic: xchg
@@ -51,10 +59,3 @@ mov:
       op1: dst
       op2: src
 
-  # push src
-  # pop dst
-  -
-    - mnemonic: push
-      op1: src
-    - mnemonic: pop
-      op1: dst

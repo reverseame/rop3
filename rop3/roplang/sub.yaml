@@ -13,8 +13,3 @@ sub:
     - mnemonic: sbb
       op1: dst
       op2: src
-
-  # dec dst
-  -
-    - mnemonic: dec
-      op1: dst

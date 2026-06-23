@@ -20,6 +20,7 @@ import os
 import rop3.debug as debug
 import rop3.binaries.elf as elf
 import rop3.binaries.pe as pe
+import rop3.binaries.macho as macho
 
 class Binary:
     '''
@@ -38,13 +39,25 @@ class Binary:
             debug.error(f'{self.filename}: Unable to read file')
 
     def _load_binary(self, base):
-        ''' MS-DOS Stub '''
+        # MS-DOS Stub (PE)
         if self.raw_data[:2] == b'\x4d\x5a':    # MZ
             return pe.PE(self.raw_data, base)
+
+        # ELF Magic
         elif self.raw_data[:2] == b'\x7f\x45':
             return elf.ELF(self.raw_data, base)
+
+        # Mach-O Magic
+        elif self.raw_data[:4] in [
+            b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', # 32-bit
+            b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe', # 64-bit
+            b'\xca\xfe\xba\xbe', # Fat header
+        ]:
+            return macho.MachO(self.raw_data, base)
+
         else:
             raise BinaryException(f'{self.filename}: Format file not supported')
+
 
     def get_exec_sections(self):
         '''
@@ -57,12 +70,6 @@ class Binary:
         @returns computer architecture, e.g: x86
         '''
         return self._binary.get_arch()
-
-    def get_arch_mode(self):
-        '''
-        @returns computer architecture mode, e.g: 64-bits
-        '''
-        return self._binary.get_arch_mode()
 
 class BinaryException(Exception):
     pass

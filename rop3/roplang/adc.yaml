@@ -1,0 +1,6 @@
+adc:
+  -
+    - mnemonic: adc
+      op1: dst
+      op2: src
+

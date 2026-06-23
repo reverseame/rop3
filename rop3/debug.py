@@ -23,7 +23,10 @@ import rop3.utils as utils
 logger = logging.getLogger(utils.TOOL_NAME)
 
 ''' Log format '''
-logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(levelname)s: %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(name)s: %(levelname)s: %(message)s')
+
+def set_verbose():
+    logger.setLevel(logging.INFO)
 
 def debug(msg):
     log(logging.DEBUG, msg)

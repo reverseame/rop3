@@ -20,6 +20,8 @@ import capstone
 
 import rop3.binary as binary
 
+from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+
 IMAGE_FILE_MACHINE_I386 = 0x014c
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
 
@@ -30,7 +32,7 @@ class PE:
     def __init__(self, data, base):
         try:
             self._pe = pefile.PE(data=data, fast_load=True)
-            (self._arch, self._arch_mode) = self._parse_arch()
+            self._arch = self._parse_arch()
             if base:
                 base = int(base, 0)
                 self._pe.relocate_image(base)
@@ -39,9 +41,9 @@ class PE:
 
     def _parse_arch(self):
         if self._pe.FILE_HEADER.Machine == IMAGE_FILE_MACHINE_I386:
-            return (capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+            return X86_Architecture()
         elif self._pe.FILE_HEADER.Machine == IMAGE_FILE_MACHINE_AMD64:
-            return (capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+            return X64_Architecture()
         else:
             raise binary.BinaryException('PE: Unsupported architecture type in COFF header')
 
@@ -60,5 +62,3 @@ class PE:
     def get_arch(self):
         return self._arch
 
-    def get_arch_mode(self):
-        return self._arch_mode

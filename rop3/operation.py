@@ -16,58 +16,39 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import capstone
-import capstone.x86_const as x86_const
+
+from rop3.arch import arch_singleton
 
 import rop3.parser as parser
+
+from .gadget import Gadget
 
 class Operation:
     def __init__(self, op, dst=None, src=None):
         self.name = op
-        self.dst = dst
-        self.src = src
         self.template = parser.Parser().get_op(op)
+        self.dst = dst
         self.template.set_dst(dst)
+        self.src = src
         self.template.set_src(src)
 
-    def filter_gadgets(self, gadgets):
+    def filter_gadgets(self, gadgets) -> list[Gadget]:
         ret = []
 
         if not gadgets:
             return ret
 
-        arch = gadgets[0]['arch']
-        mode = gadgets[0]['mode']
-        md = capstone.Cs(arch, mode)
-        md.detail = True
+        arch = gadgets[0].arch
+        mode = gadgets[0].mode
 
         for gadget in gadgets:
-            decodes = list(md.disasm(gadget['bytes'], gadget['vaddr']))
-            (equal, set_, dst, src) = self.template.is_equal(decodes)
+            (equal, set_, dst, src) = self.template.is_equal(gadget.decodes)
             if equal:
-                gadget['op'] = self.template.name
-                gadget['dst'] = self.dst if self.dst else dst
-                gadget['src'] = self.src if self.src else src
-                gadget['sides'] = self.get_side_effects(decodes, len(set_))
+                gadget.op = self.template.name
+                gadget.dst = self.dst if self.dst else dst
+                gadget.src = self.src if self.src else src
+                gadget.calculate_side_effects()
                 ret.append(gadget)
-
-        return ret
-
-    def get_side_effects(self, decodes, offset):
-        ret = {}
-        regs = []
-
-        for decode in decodes[offset:-1]:
-            ins_reg = []
-            # Implicit writes
-            ins_reg.extend([decode.reg_name(reg) for reg in decode.regs_write])
-            # Explicit writes
-            (_, regs_write) = decode.regs_access()
-            ins_reg.extend([decode.reg_name(reg) for reg in regs_write])
-            if ins_reg:
-                regs.append(ins_reg)
-        if regs:
-            ret['offset'] = offset
-            ret['regs'] = regs
 
         return ret
 
@@ -135,22 +116,27 @@ class Set:
         dst = None
         src = None
 
+        if len(decodes) < len(self.items):
+            return (False, dst, src)
+
         for i, item in enumerate(self.items):
-            if type(item) == Instruction:
-                (equal, ins_dst, ins_src) = item.is_equal(decodes[i])
-                if not equal:
-                    return (False, dst, src)
-                dst = ins_dst if not dst else dst
-                src = ins_src if not src else src
-                
-            elif type(item) == OperationTemplate:
-                (equal, _, op_dst, op_src) = item.is_equal(decodes[i:])
-                if not equal:
-                    return (False, dst, src)
-                dst = op_dst if not dst else dst
-                src = op_src if not src else src
-            else:
+            if type(item) != Instruction:
                 return (False, dst, src)
+
+            (equal, ins_dst, ins_src) = item.is_equal(decodes[i])
+            if not equal:
+                return (False, dst, src)
+
+            if ins_dst is not None:
+                if dst is None:
+                    dst = ins_dst
+                elif dst != ins_dst:
+                    return (False, dst, src)
+            if ins_src is not None:
+                if src is None:
+                    src = ins_src
+                elif src != ins_src:
+                    return (False, dst, src)
 
         return (True, dst, src)
 
@@ -205,72 +191,81 @@ class Operand:
     def __init__(self, operand, value=None):
         self.value = value
         self.type = self._parse_type(operand)
-        if self.is_reg() or self.is_mem():
-            self.reg, self.generic = self._parse_reg(operand)
-        elif self.is_imm():
-            self.imm = self._parse_imm(operand)
 
-    def __str__(self):
-        if self.is_reg() or self.is_mem():
+    def __str__(self) -> str:
+        if self.is_reg():
             return self.reg
-        elif self.is_imm():
+        elif self.is_mem():
+            return f"[{self.reg}]"
+        else:
             return str(self.imm)
 
     def _parse_type(self, reg):
-        if reg[0] == '[' and reg[-1] == ']':
-            return x86_const.X86_OP_MEM
+        self.generic = False
+        reg_name = str(reg)
+        if reg_name.startswith('[') and reg_name.endswith(']'):
+            self.reg = reg[1:-1]
+            if self.reg in ('dst', 'src') or self.reg.startswith('REG'):
+                self.generic = True
+            return arch_singleton.arch.op_mem
+
+        self.reg = reg
         
+        if reg in ('dst', 'src') or reg_name.startswith('REG'):
+            self.generic = True
+            return arch_singleton.arch.op_reg
+            
         try:
-            self._parse_imm(reg)
-            return x86_const.X86_OP_IMM
+            self.imm = self._parse_imm(reg)
+            return arch_singleton.arch.op_imm
         except (ValueError, TypeError):
-            pass
-
-        return x86_const.X86_OP_REG
-
-    def _parse_reg(self, reg):
-        generic = False
-
-        if self.is_mem():
-            reg = reg[1:-1]
-
-        if reg in ['dst', 'src'] or reg.startswith('REG'):
-            generic = True
-
-        return reg, generic
+            return arch_singleton.arch.op_reg
 
     def _parse_imm(self, reg):
+        if isinstance(reg, int):
+            return reg
         return int(reg, 0)
 
     def is_reg(self):
-        return self.type == x86_const.X86_OP_REG
+        return self.type == arch_singleton.arch.op_reg
 
     def is_mem(self):
-        return self.type == x86_const.X86_OP_MEM
+        return self.type == arch_singleton.arch.op_mem
 
     def is_imm(self):
-        return self.type == x86_const.X86_OP_IMM
+        return self.type == arch_singleton.arch.op_imm
 
     def is_dst(self):
-        if self.is_reg() or self.is_mem():
+        if self.reg is not None:
             return self.reg == 'dst'
+        return False
 
     def set_dst(self, dst):
         if self.is_dst():
             self.reg = dst
             self.generic = False
+            self.type = arch_singleton.arch.op_reg
 
     def is_src(self):
-        if self.is_reg() or self.is_mem():
+        if self.reg is not None:
             return self.reg == 'src'
+        return False
 
     def set_src(self, src):
         if self.is_src():
-            self.reg = src
             self.generic = False
+            try:
+                self.imm = self._parse_imm(src)
+                self.type = arch_singleton.arch.op_imm
+            except (ValueError, TypeError):
+                self.reg = src
+                self.type = arch_singleton.arch.op_reg
 
     def is_equal(self, decode, operand):
         operand_reg = None
+
+        if self.generic and self.is_src() and operand.type == arch_singleton.arch.op_imm:
+            return (True, operand.value.imm)
 
         if self.type != operand.type:
             return (False, operand_reg)
@@ -279,9 +274,15 @@ class Operand:
             operand_reg = decode.reg_name(operand.value.reg)
         elif self.is_mem():
             operand_reg = decode.reg_name(operand.value.mem.base)
+        elif self.is_imm():
+            if operand.value.imm == self.imm:
+                return (True, self.imm)
+            else:
+                return (False, self.imm)
 
         if not self.generic:
             if operand_reg != self.reg:
                 return (False, operand_reg)
-            
+
         return (True, operand_reg)
+

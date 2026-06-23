@@ -1,0 +1,11 @@
+sc:
+  -
+    - mnemonic: push
+      op1: src
+    - mnemonic: pop
+      op1: src
+  -
+    - mnemonic: push
+      op1: src
+    - mnemonic: pop
+      op1: REG1

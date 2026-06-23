@@ -20,6 +20,11 @@ YAML = 0
 import rop3.debug as debug
 import rop3.parsers.yaml_parser as yaml_parser
 
+class CompositeOperation:
+    def __init__(self, name, steps):
+        self.name = name
+        self.steps = steps
+
 class Parser:
     def __init__(self, type_=YAML):
         if type_ == YAML:
@@ -35,3 +40,4 @@ class Parser:
 
 class ParserException(Exception):
     pass
+

@@ -1,7 +1,7 @@
 # Less Than Comparison
 ltc:
   # sub(dst, src)
-  -
+  - compose:
     - operation: sub
       op1: dst
       op2: src

@@ -2,7 +2,7 @@
 eqc:
   # sub(dst, src)
   # neg(dst)
-  -
+  - compose:
     - operation: sub
       op1: dst
       op2: src
