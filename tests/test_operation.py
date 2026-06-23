@@ -48,6 +48,17 @@ def test_filter_gadgets_empty_input(x64):
     assert operation.Operation('lc').filter_gadgets([]) == []
 
 
+def test_filter_gadgets_does_not_mutate_input(x64):
+    ''' filter_gadgets must annotate copies, not the shared input gadgets. '''
+    g = make_gadget(b'\x58\xc3', 0x1000)             # pop rax ; ret
+    assert g.op is None and g.dst is None
+    matched = operation.Operation('lc', dst='rax').filter_gadgets([g])
+    assert matched and matched[0] is not g           # a copy was returned
+    assert matched[0].op == 'lc' and matched[0].dst == 'rax'
+    # original is untouched
+    assert g.op is None and g.dst is None and g.side_regs == set()
+
+
 def test_operand_parse_imm_supports_hex_and_negative(x64):
     ''' Regression: immediates parsed with int(x, 0). '''
     op = operation.Operand('rax')

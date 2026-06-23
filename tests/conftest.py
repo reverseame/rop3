@@ -31,21 +31,21 @@ def reset_arch():
     The architecture is a process-global singleton; reset it around every
     test so cases are independent and can pick their own architecture.
     '''
-    arch_singleton._arch = None
+    arch_singleton.reset()
     yield
-    arch_singleton._arch = None
+    arch_singleton.reset()
 
 
 @pytest.fixture
 def x64():
-    arch_singleton._arch = None
+    arch_singleton.reset()
     arch_singleton.initialize(X64_Architecture())
     return arch_singleton.arch
 
 
 @pytest.fixture
 def x86():
-    arch_singleton._arch = None
+    arch_singleton.reset()
     arch_singleton.initialize(X86_Architecture())
     return arch_singleton.arch
 
