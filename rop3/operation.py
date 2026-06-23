@@ -222,7 +222,9 @@ class Operand:
             return arch_singleton.arch.op_reg
 
     def _parse_imm(self, reg):
-        return int(reg)
+        if isinstance(reg, int):
+            return reg
+        return int(reg, 0)
 
     def is_reg(self):
         return self.type == arch_singleton.arch.op_reg

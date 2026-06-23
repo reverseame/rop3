@@ -5,8 +5,8 @@ not:
     - mnemonic: not
       op1: dst
 
-  # xor dst, src (src = 0xffffffff)
-  # -
-  #   - mnemonic: xor
-  #     op1: dst
-  #     op2: '0xffffffff'
+  # xor dst, 0xffffffff
+  -
+    - mnemonic: xor
+      op1: dst
+      op2: '0xffffffff'

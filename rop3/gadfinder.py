@@ -49,11 +49,13 @@ class GadFinder:
         self.flags = flags
 
     def find(self, filenames: list[str], base=None, badchars=None) -> list[Gadget]:
+        ''' base is normalised to one entry per binary by the argument parser '''
+        bases = base if isinstance(base, list) else [base] * len(filenames)
+
         if not self._keep_duplicates():
             seen: dict = {}
-            for filename in filenames:
-                binary = rop3.binary.Binary(filename, base)
-                arch_singleton.initialize(binary.get_arch())
+            for filename, file_base in zip(filenames, bases):
+                binary = self._open_binary(filename, file_base)
                 before = len(seen)
                 total = 0
                 for gadget in self._search_gadgets(binary, badchars):
@@ -68,11 +70,18 @@ class GadFinder:
             return list(seen.values())
         else:
             gadgets = []
-            for filename in filenames:
-                binary = rop3.binary.Binary(filename, base)
-                arch_singleton.initialize(binary.get_arch())
+            for filename, file_base in zip(filenames, bases):
+                binary = self._open_binary(filename, file_base)
                 gadgets.extend(self._search_gadgets(binary, badchars))
             return gadgets
+
+    def _open_binary(self, filename, base):
+        binary = rop3.binary.Binary(filename, base)
+        arch = binary.get_arch()
+        if arch_singleton.is_initialized() and not arch_singleton.matches(arch):
+            debug.error(f'{filename}: mixing architectures (x86/x64) in a single run is not supported')
+        arch_singleton.initialize(arch)
+        return binary
 
     def find_op(self, filenames, op, dst=None, src=None, base=None, badchars=None):
         gadgets = self.find(filenames, base, badchars)
