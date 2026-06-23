@@ -45,6 +45,7 @@ class Gadget:
     op: str = None
     dst: str = None
     src: str = None
+    symbol: str = None
     side_regs: set[str] = field(init=False, default_factory=set)
     side_mem: set[str] = field(init=False, default_factory=set)
 
@@ -104,6 +105,8 @@ class Gadget:
     def __str__(self) -> str:
         ret = f"[{os.path.basename(self.filename)} @ {hex(self.vaddr)}]: "
         ret += self.text_repr
+        if self.symbol:
+            ret += f" <{self.symbol}>"
         if self.count and self.count > 1:
             ret += f" (x{self.count})"
         side_regs = list(self.side_regs)
@@ -112,6 +115,24 @@ class Gadget:
             ret += f" {_colorize(f'(modifies {modifies})')}"
 
         return ret
+
+    def to_dict(self) -> dict:
+        ''' Serializable representation for machine-readable output. '''
+        return {
+            'file': os.path.basename(self.filename),
+            'vaddr': hex(self.vaddr),
+            'gadget': self.text_repr,
+            'instructions': [
+                f'{d.mnemonic} {d.op_str}'.strip() for d in self.decodes
+            ],
+            'bytes': self.bytes.hex() if self.bytes is not None else None,
+            'count': self.count,
+            'symbol': self.symbol,
+            'op': self.op,
+            'dst': self.dst,
+            'src': self.src,
+            'modifies': sorted(self.side_regs),
+        }
 
 def heuristic_basic_count(gadget: "Gadget") -> int:
     """

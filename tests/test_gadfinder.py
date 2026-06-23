@@ -43,10 +43,11 @@ def test_addr_canary_score(x86):
 
 
 class _FakeBinary:
-    def __init__(self, vaddr, opcodes, filename='fake'):
+    def __init__(self, vaddr, opcodes, filename='fake', symbols=None):
         self.filename = filename
         self._vaddr = vaddr
         self._opcodes = opcodes
+        self._symbols = symbols or []
 
     def get_exec_sections(self):
         return [{'vaddr': self._vaddr, 'opcodes': self._opcodes}]
@@ -54,11 +55,14 @@ class _FakeBinary:
     def get_arch(self):
         return X86_Architecture()
 
+    def get_symbols(self):
+        return self._symbols
 
-def _run_find(flags, buf, base_vaddr):
+
+def _run_find(flags, buf, base_vaddr, symbols_table=None, **kwargs):
     f = gadfinder.GadFinder(flags=flags)
-    f._open_binary = lambda fn, b: _FakeBinary(base_vaddr, bytes(buf))
-    return f.find(['fake'])
+    f._open_binary = lambda fn, b, arch=None: _FakeBinary(base_vaddr, bytes(buf), symbols=symbols_table)
+    return f.find(['fake'], **kwargs)
 
 
 def test_dedup_prefers_canary_free_address(x86):
@@ -95,3 +99,38 @@ def test_results_sorted_by_address(x86):
     gadgets = _run_find(gadfinder.ROP, buf, base)
     vaddrs = [g.vaddr for g in gadgets]
     assert vaddrs == sorted(vaddrs)
+
+
+def test_badchar_bytes_filters_on_opcode_bytes(x86):
+    ''' Issue #21: reject gadgets whose opcode bytes contain a forbidden byte. '''
+    base = 0x10000
+    buf = bytearray(0x40)
+    buf[0x10] = 0xc3                 # ret  -> bytes c3
+    buf[0x20:0x22] = b'\x5d\xc3'     # pop ebp ; ret -> bytes 5d c3
+    gadgets = _run_find(gadfinder.ROP, buf, base, badchar_bytes=['0x5d'])
+    reprs = {g.text_repr for g in gadgets}
+    assert 'ret' in reprs
+    assert 'pop ebp ; ret' not in reprs
+    assert all(0x5d not in g.bytes for g in gadgets)
+
+
+def test_symbol_annotation(x86):
+    ''' Issue #22: gadgets get the nearest symbol at or below their address. '''
+    base = 0x10000
+    buf = bytearray(0x40)
+    buf[0x10:0x12] = b'\x90\xc3'   # nop ; ret  -> gadget at 0x10010
+    buf[0x30:0x32] = b'\x58\xc3'   # pop eax ; ret -> gadget at 0x10030
+    symbols = [(0x10000, 'start'), (0x10020, 'middle')]
+    gadgets = _run_find(gadfinder.ROP, buf, base, symbols=True, symbols_table=symbols)
+    by_text = {g.text_repr: g.symbol for g in gadgets}
+    assert by_text['nop ; ret'] == 'start+0x10'        # nearest <= 0x10010
+    assert by_text['pop eax ; ret'] == 'middle+0x10'   # nearest <= 0x10030
+
+
+def test_symbol_annotation_exact_address(x86):
+    base = 0x10000
+    buf = bytearray(0x40)
+    buf[0x0] = 0xc3    # ret exactly at symbol address 0x10000
+    gadgets = _run_find(gadfinder.ROP, buf, base, symbols=True,
+                        symbols_table=[(0x10000, 'start')])
+    assert gadgets[0].symbol == 'start'   # no +offset when offset is 0

@@ -73,74 +73,104 @@ EM_X86_64 = 62
 ET_EXEC = 2
 ET_DYN = 3
 SHT_PROGBITS = 1
+SHT_SYMTAB = 2
 SHT_STRTAB = 3
 SHF_ALLOC = 0x2
 SHF_EXECINSTR = 0x4
+STB_GLOBAL = 1
+STT_FUNC = 2
 
 
 def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
-                      text_addr: int, e_type: int = ET_DYN) -> bytes:
+                      text_addr: int, e_type: int = ET_DYN, symbols=None) -> bytes:
     '''
     Produce a tiny but valid ELF that pyelftools can parse: an ELF header, a
     `.text` PROGBITS section flagged executable at `text_addr`, and a
-    `.shstrtab`. Enough to exercise architecture detection, executable-section
-    extraction and --base relocation. ET_DYN keeps the image base at 0.
+    `.shstrtab`. With `symbols` (a list of (name, value)), it also emits a
+    `.symtab`/`.strtab` pair. Enough to exercise architecture detection,
+    executable-section extraction, --base relocation and symbol parsing.
+    ET_DYN keeps the image base at 0.
     '''
     is64 = elfclass == 64
-    shstrtab = b'\x00.text\x00.shstrtab\x00'
-    name_text = shstrtab.index(b'.text\x00')
-    name_shstr = shstrtab.index(b'.shstrtab\x00')
+    symbols = symbols or []
+
+    def section(name, stype, flags, addr, offset, size, link=0, entsize=0):
+        if is64:
+            return struct.pack('<IIQQQQIIQQ', name, stype, flags, addr,
+                               offset, size, link, 0, 1, entsize)
+        return struct.pack('<IIIIIIIIII', name, stype, flags, addr,
+                           offset, size, link, 0, 1, entsize)
+
+    def sym(name_off, value):
+        info = (STB_GLOBAL << 4) | STT_FUNC
+        if is64:
+            return struct.pack('<IBBHQQ', name_off, info, 0, 1, value, 0)
+        return struct.pack('<IIIBBH', name_off, value, 0, info, 0, 1)
+
+    sym_size = struct.calcsize('<IBBHQQ' if is64 else '<IIIBBH')
+
+    # Section-header string table (.shstrtab)
+    names = b'\x00'
+    def add_name(s):
+        nonlocal names
+        off = len(names)
+        names += s.encode() + b'\x00'
+        return off
+    name_text = add_name('.text')
+    name_shstr = add_name('.shstrtab')
+    name_symtab = add_name('.symtab') if symbols else 0
+    name_strtab = add_name('.strtab') if symbols else 0
+
+    # Symbol string table (.strtab) and symbol entries
+    strtab = b'\x00'
+    sym_entries = sym(0, 0)   # mandatory null symbol at index 0
+    for sname, value in symbols:
+        off = len(strtab)
+        strtab += sname.encode() + b'\x00'
+        sym_entries += sym(off, value)
 
     ehsize = 64 if is64 else 52
     shentsize = 64 if is64 else 40
-    n_sections = 3  # NULL, .text, .shstrtab
 
+    # Lay out section data blocks after the header
     text_off = ehsize
     shstr_off = text_off + len(text_bytes)
-    shoff = shstr_off + len(shstrtab)
+    cursor = shstr_off + len(names)
+    if symbols:
+        symtab_off = cursor
+        strtab_off = symtab_off + len(sym_entries)
+        cursor = strtab_off + len(strtab)
+    shoff = cursor
 
-    # e_ident
+    n_sections = 5 if symbols else 3   # NULL, .text, .shstrtab[, .symtab, .strtab]
+
     ei_class = 2 if is64 else 1
     e_ident = b'\x7fELF' + bytes([ei_class, 1, 1, 0]) + b'\x00' * 8
+    hdr_fmt = '<HHIQQQIHHHHHH' if is64 else '<HHIIIIIHHHHHH'
+    header = e_ident + struct.pack(
+        hdr_fmt,
+        e_type, machine, 1,            # type, machine, version
+        text_addr,                     # entry
+        0,                             # phoff
+        shoff,                         # shoff
+        0,                             # flags
+        ehsize, 0, 0,                  # ehsize, phentsize, phnum
+        shentsize, n_sections, 2,      # shentsize, shnum, shstrndx (.shstrtab)
+    )
 
-    if is64:
-        header = e_ident + struct.pack(
-            '<HHIQQQIHHHHHH',
-            e_type, machine, 1,            # type, machine, version
-            text_addr,                     # entry
-            0,                             # phoff
-            shoff,                         # shoff
-            0,                             # flags
-            ehsize, 0, 0,                  # ehsize, phentsize, phnum
-            shentsize, n_sections, 2,      # shentsize, shnum, shstrndx
-        )
-    else:
-        header = e_ident + struct.pack(
-            '<HHIIIIIHHHHHH',
-            e_type, machine, 1,
-            text_addr,
-            0,
-            shoff,
-            0,
-            ehsize, 0, 0,
-            shentsize, n_sections, 2,
-        )
-
-    def section64(name, stype, flags, addr, offset, size):
-        return struct.pack('<IIQQQQIIQQ', name, stype, flags, addr,
-                           offset, size, 0, 0, 1, 0)
-
-    def section32(name, stype, flags, addr, offset, size):
-        return struct.pack('<IIIIIIIIII', name, stype, flags, addr,
-                           offset, size, 0, 0, 1, 0)
-
-    section = section64 if is64 else section32
-
-    sections = b''.join([
+    section_headers = [
         section(0, 0, 0, 0, 0, 0),                                       # NULL
         section(name_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
                 text_addr, text_off, len(text_bytes)),                   # .text
-        section(name_shstr, SHT_STRTAB, 0, 0, shstr_off, len(shstrtab)), # .shstrtab
-    ])
+        section(name_shstr, SHT_STRTAB, 0, 0, shstr_off, len(names)),    # .shstrtab
+    ]
+    payload = text_bytes + names
+    if symbols:
+        section_headers.append(                                          # .symtab
+            section(name_symtab, SHT_SYMTAB, 0, 0, symtab_off,
+                    len(sym_entries), link=4, entsize=sym_size))
+        section_headers.append(                                          # .strtab
+            section(name_strtab, SHT_STRTAB, 0, 0, strtab_off, len(strtab)))
+        payload += sym_entries + strtab
 
-    return header + text_bytes + shstrtab + sections
+    return header + payload + b''.join(section_headers)

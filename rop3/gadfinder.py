@@ -17,6 +17,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import re
+import bisect
 import capstone
 
 import rop3.utils as utils
@@ -55,18 +56,20 @@ class GadFinder:
         self.depth = depth
         self.flags = flags
 
-    def find(self, filenames: list[str], base=None, badchars=None) -> list[Gadget]:
-        ''' base is normalised to one entry per binary by the argument parser '''
+    def find(self, filenames: list[str], base=None, badchars=None,
+             badchar_bytes=None, arch=None, symbols=False) -> list[Gadget]:
+        ''' base is normalized to one entry per binary by the argument parser '''
         bases = base if isinstance(base, list) else [base] * len(filenames)
         avoid = self._avoid_bytes(badchars)
 
         if not self._keep_duplicates():
             seen: dict = {}
             for filename, file_base in zip(filenames, bases):
-                binary = self._open_binary(filename, file_base)
+                binary = self._open_binary(filename, file_base, arch)
+                symtab = self._symbol_table(binary) if symbols else None
                 before = len(seen)
                 total = 0
-                for gadget in self._search_gadgets(binary, badchars):
+                for gadget in self._search_gadgets(binary, badchars, badchar_bytes, symtab):
                     total += 1
                     existing = seen.get(gadget)
                     if existing is None:
@@ -86,8 +89,9 @@ class GadFinder:
         else:
             gadgets = []
             for filename, file_base in zip(filenames, bases):
-                binary = self._open_binary(filename, file_base)
-                gadgets.extend(self._search_gadgets(binary, badchars))
+                binary = self._open_binary(filename, file_base, arch)
+                symtab = self._symbol_table(binary) if symbols else None
+                gadgets.extend(self._search_gadgets(binary, badchars, badchar_bytes, symtab))
             return self._sort_gadgets(gadgets)
 
     def _avoid_bytes(self, badchars) -> set:
@@ -105,16 +109,34 @@ class GadFinder:
     def _sort_gadgets(self, gadgets: list[Gadget]) -> list[Gadget]:
         return sorted(gadgets, key=lambda g: (os.path.basename(g.filename), g.vaddr))
 
-    def _open_binary(self, filename, base):
-        binary = rop3.binary.Binary(filename, base)
-        arch = binary.get_arch()
-        if arch_singleton.is_initialized() and not arch_singleton.matches(arch):
+    def _open_binary(self, filename, base, arch=None):
+        binary = rop3.binary.Binary(filename, base, arch)
+        binary_arch = binary.get_arch()
+        if arch_singleton.is_initialized() and not arch_singleton.matches(binary_arch):
             debug.error(f'{filename}: mixing architectures (x86/x64) in a single run is not supported')
-        arch_singleton.initialize(arch)
+        arch_singleton.initialize(binary_arch)
         return binary
 
-    def find_op(self, filenames, op, dst=None, src=None, base=None, badchars=None):
-        gadgets = self.find(filenames, base, badchars)
+    def _symbol_table(self, binary):
+        ''' Sorted (address, name) pairs and a parallel address list for the
+            nearest-symbol bisect (see _nearest_symbol). '''
+        symbols = sorted(binary.get_symbols())
+        addrs = [addr for addr, _ in symbols]
+        return (addrs, symbols)
+
+    def _nearest_symbol(self, vaddr, symbol_table):
+        ''' Name (with byte offset) of the closest symbol at or below vaddr. '''
+        addrs, symbols = symbol_table
+        idx = bisect.bisect_right(addrs, vaddr) - 1
+        if idx < 0:
+            return None
+        sym_addr, name = symbols[idx]
+        offset = vaddr - sym_addr
+        return f'{name}+{hex(offset)}' if offset else name
+
+    def find_op(self, filenames, op, dst=None, src=None, base=None,
+                badchars=None, badchar_bytes=None, arch=None, symbols=False):
+        gadgets = self.find(filenames, base, badchars, badchar_bytes, arch, symbols)
         return self.find_op_from_gadgets(gadgets, op, dst, src)
 
     def find_op_from_gadgets(self, gadgets, op, dst=None, src=None):
@@ -132,7 +154,7 @@ class GadFinder:
         op_obj = operation.Operation(op, dst, src)
         return op_obj.filter_gadgets(gadgets)
 
-    def _search_gadgets(self, binary, badchars):
+    def _search_gadgets(self, binary, badchars, badchar_bytes=None, symbol_table=None):
         sections = binary.get_exec_sections()
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
@@ -155,15 +177,20 @@ class GadFinder:
                         vaddr = sec_vaddr + ref - depth
                         if self._is_valid_address(vaddr, badchars, mode):
                             bytes_ = sec_opcodes[ref - depth:ref]
+                            if not self._is_valid_bytes(bytes_, badchar_bytes):
+                                continue
                             decodes = list(md.disasm(bytes_, vaddr))
                             if self._is_valid_gadget(decodes):
+                                symbol = self._nearest_symbol(vaddr, symbol_table) \
+                                    if symbol_table else None
                                 yield Gadget(
                                     filename=binary.filename,
                                     arch=arch,
                                     mode=mode,
                                     vaddr=vaddr,
                                     decodes=decodes,
-                                    bytes=bytes_
+                                    bytes=bytes_,
+                                    symbol=symbol,
                                 )
 
     def _gad_terminations(self):
@@ -227,6 +254,14 @@ class GadFinder:
             return True
 
         vaddr = utils.pack_addr(vaddr, arch_mode)
-        
+
         return not any([bytes([int(badchar, 0)]) in vaddr for badchar in badchars])
+
+    def _is_valid_bytes(self, gadget_bytes, badchar_bytes):
+        ''' Reject gadgets whose opcode bytes contain a forbidden byte (#21). '''
+        if not badchar_bytes:
+            return True
+
+        forbidden = {int(b, 0) for b in badchar_bytes}
+        return not any(byte in forbidden for byte in gadget_bytes)
 

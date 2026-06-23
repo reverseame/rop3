@@ -34,8 +34,8 @@ Now, you can install dependencies in [requirements.txt](requirements.txt):
 
 ```
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop] [--retf | --no-retf] [--jop | --no-jop] [--allow-undeterministic-gadgets] [--allow-complex-memory-ops] [--verbose]
-               [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--keep-canary-address] [--base <hex> [<hex> ...]] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>]
-               [--exhaustive | --no-exhaustive]
+               [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]] [--badchar-bytes <hex> [<hex> ...]] [--keep-canary-address] [--base <hex> [<hex> ...]] [--arch <name>] [--symbols]
+               [--output {text,json,csv}] [--op <op>] [--dst <reg>] [--src <reg>] [--ropchain <file>] [--exhaustive | --no-exhaustive]
 
 This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm in a tree-like structure
 
@@ -56,10 +56,16 @@ options:
                         specify a list of binary path files to analyze
   --badchar <hex> [<hex> ...]
                         specify a list of chars to avoid in gadget address
+  --badchar-bytes <hex> [<hex> ...]
+                        specify a list of chars to avoid in gadget opcode bytes
   --keep-canary-address
                         do not prefer canary-free addresses (0x00, 0x0a, 0x0d, 0xff) when discarding duplicate gadgets
   --base <hex> [<hex> ...]
                         specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary
+  --arch <name>         select the architecture slice of a fat Mach-O binary (e.g. x86_64, i386)
+  --symbols             annotate gadgets with the nearest symbol (when the binary is not stripped)
+  --output {text,json,csv}
+                        output format (default: text)
   --op <op>             search for operation
   --dst <reg>           specify a destination register for the operation
   --src <reg>           specify a source register for the operation

@@ -82,3 +82,24 @@ def test_colorize_honors_tty_and_no_color(monkeypatch):
     assert '\033' in gadget_mod._colorize('x')
     monkeypatch.setenv('NO_COLOR', '1')
     assert '\033' not in gadget_mod._colorize('x')
+
+
+def test_to_dict(x64):
+    g = make_gadget(b'\x58\xc3', 0x1000)             # pop rax ; ret
+    g.count = 3
+    g.symbol = 'main+0x4'
+    d = g.to_dict()
+    assert d['file'] == 'test'
+    assert d['vaddr'] == '0x1000'
+    assert d['gadget'] == 'pop rax ; ret'
+    assert d['instructions'] == ['pop rax', 'ret']
+    assert d['bytes'] == '58c3'
+    assert d['count'] == 3
+    assert d['symbol'] == 'main+0x4'
+    assert d['modifies'] == []
+
+
+def test_str_includes_symbol(x64):
+    g = make_gadget(b'\xc3', 0x1000)
+    g.symbol = 'func+0x10'
+    assert '<func+0x10>' in str(g)

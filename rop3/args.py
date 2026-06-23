@@ -39,8 +39,12 @@ class ArgumentParser:
         self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
         self.argparser.add_argument('--badchar', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget address')
+        self.argparser.add_argument('--badchar-bytes', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget opcode bytes')
         self.argparser.add_argument('--keep-canary-address', action='store_true', default=False, help='do not prefer canary-free addresses (0x00, 0x0a, 0x0d, 0xff) when discarding duplicate gadgets')
         self.argparser.add_argument('--base', type=str, metavar='<hex>', nargs='+', help='specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary')
+        self.argparser.add_argument('--arch', type=str, metavar='<name>', default=None, help='select the architecture slice of a fat Mach-O binary (e.g. x86_64, i386)')
+        self.argparser.add_argument('--symbols', action='store_true', default=False, help='annotate gadgets with the nearest symbol (when the binary is not stripped)')
+        self.argparser.add_argument('--output', choices=['text', 'json', 'csv'], default='text', help='output format (default: text)')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--dst', type=str, metavar='<reg>', help='specify a destination register for the operation')
         self.argparser.add_argument('--src', type=str, metavar='<reg>', help='specify a source register for the operation')
@@ -108,8 +112,10 @@ class ArgumentParser:
             for baddr in args.base:
                 self._check_int_value(baddr)
 
-        if args.badchar:
-            for badchar in args.badchar:
+        for option in (args.badchar, args.badchar_bytes):
+            if not option:
+                continue
+            for badchar in option:
                 value = self._check_int_value(badchar)
                 if value < 0x00 or value > 0xff:
                     debug.error(f'{badchar}: bad char must be one byte (range 0x00-0xff)')

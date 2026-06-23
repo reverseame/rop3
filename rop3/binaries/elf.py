@@ -19,6 +19,7 @@ import capstone
 import io
 
 from elftools.elf.elffile import ELFFile, ELFError
+from elftools.elf.sections import SymbolTableSection
 
 import rop3.binary as binary
 
@@ -72,6 +73,19 @@ class ELF:
                     'vaddr': sec.header.sh_addr + self._base_delta,
                     'opcodes': sec.data()
                 })
+        return ret
+
+    def get_symbols(self):
+        ''' Function/object symbols from .symtab and .dynsym, rebased by the
+            same delta as the sections. Stripped binaries yield none. '''
+        ret = []
+        for sec in self._elf.iter_sections():
+            if not isinstance(sec, SymbolTableSection):
+                continue
+            for sym in sec.iter_symbols():
+                addr = sym['st_value']
+                if sym.name and addr:
+                    ret.append((addr + self._base_delta, sym.name))
         return ret
 
     def get_arch(self):
