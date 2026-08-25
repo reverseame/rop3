@@ -70,3 +70,46 @@ def test_output_ropchains_text_non_exhaustive_takes_first(x64, capsys):
         raise AssertionError('second chain should not be consumed')
     utils.output_ropchains(gen(), 'text', exhaustive=False)
     assert 'pop rax ; ret' in capsys.readouterr().out
+
+
+# --- Tuple format ---------------------------------------------------------
+
+def test_gadget_tuple_repr_two_operand(x64):
+    import rop3.operation as operation
+    g = make_gadget(b'\x48\x89\xc7\xc3', 0x1000)          # mov rdi, rax ; ret
+    matched = operation.Operation('mov', ['rdi', 'rax']).filter_gadgets([g])
+    assert matched[0].tuple_repr() == '⟨mov, rdi, rax, {rdi}, {rax}⟩'
+
+
+def test_gadget_tuple_repr_one_operand_omits_op2(x64):
+    import rop3.operation as operation
+    g = make_gadget(b'\x48\xf7\xd8\xc3', 0x1000)          # neg rax ; ret
+    matched = operation.Operation('neg', ['rax']).filter_gadgets([g])
+    # <neg, rax, {written}, {read}> -- exactly one operand before the sets.
+    t = matched[0].tuple_repr()
+    assert t.startswith('⟨neg, rax, {') and t.endswith('⟩')
+    assert t.count('{') == 2                               # only the two reg sets
+
+
+def test_gadget_tuple_repr_excludes_stack_pointer(x64):
+    # pop rax ; ret writes rax (and rsp, which is excluded); reads nothing but rsp.
+    t = make_gadget(b'\x58\xc3', 0x1000).tuple_repr()
+    assert t == '⟨, {rax}, {}⟩'                  # unmatched: empty op/operands
+    assert 'rsp' not in t
+
+
+def test_gadget_tuple_repr_immediate_operand(x64):
+    import rop3.operation as operation
+    g = make_gadget(b'\x48\xc7\xc0\xff\xff\xff\xff\xc3', 0x1000)   # mov rax, -1 ; ret
+    matched = operation.Operation('mov', ['rax']).filter_gadgets([g])
+    # The immediate source shows as a literal, not a dropped/None operand.
+    assert matched[0].tuple_repr() == '⟨mov, rax, -1, {rax}, {}⟩'
+
+
+def test_output_gadgets_tuple(x64, capsys):
+    import rop3.operation as operation
+    g = make_gadget(b'\x48\x89\xc7\xc3', 0x1000)          # mov rdi, rax ; ret
+    matched = operation.Operation('mov', ['rdi', 'rax']).filter_gadgets([g])
+    utils.output_gadgets(matched, 'tuple')
+    out = capsys.readouterr().out
+    assert '@ 0x1000]: ⟨mov, rdi, rax, {rdi}, {rax}⟩' in out

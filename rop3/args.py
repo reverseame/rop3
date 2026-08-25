@@ -29,13 +29,17 @@ class ArgumentParser:
         description = 'This tool allows you to search for gadgets, operations, and ROP chains using a backtracking algorithm in a tree-like structure'
         self.argparser = argparse.ArgumentParser(description=description)
         self.argparser.add_argument('-v', '--version',  action='store_true', help=f'display {utils.TOOL_NAME}\'s version and exit')
-        self.argparser.add_argument('--depth', type=int, metavar='<bytes>', default=gadfinder.DEPTH, help=f'depth for search engine (default to {gadfinder.DEPTH} bytes)')
+        self.argparser.add_argument('--depth', type=int, metavar='<bytes>', default=None, help='maximum gadget length in bytes (default: architecture-specific)')
         self.argparser.add_argument('--all', default=False, action='store_true', help='show the same gadget in different addresses')
         self.argparser.add_argument('--rop', action=argparse.BooleanOptionalAction, help="search for ROP gadgets", default=True)
         self.argparser.add_argument('--retf', action=argparse.BooleanOptionalAction, help="search for RETF gadgets", default=False)
+        self.argparser.add_argument('--ret-imm', action=argparse.BooleanOptionalAction, default=False, help='include gadgets ending in a `ret <imm>` / `retf <imm>` (disabled by default)')
         self.argparser.add_argument('--jop', action=argparse.BooleanOptionalAction, help="search for JOP gadgets", default=False)
+        self.argparser.add_argument('--frame', action=argparse.BooleanOptionalAction, default=True, help='framed gadget search (default on): on AArch64/RISC-V keep only gadgets that restore the return address from the stack; no effect on x86')
+        self.argparser.add_argument('--reg-aliases', action='store_true', default=False, help='allow sub-register aliases (al, ax, eax, ...) to substitute their full register when matching operations; they are then treated as the same register for chain assignment and side effects')
         self.argparser.add_argument('--allow-undeterministic-gadgets', action='store_true', default=False, help='allow gadgets with conditional branches (e.g. jne) as intermediate instructions')
         self.argparser.add_argument('--allow-complex-memory-ops', action='store_true', default=False, help='allow gadgets whose first instruction uses complex memory addressing (e.g. [r1*r2], [r1+r2*s+disp])')
+        self.argparser.add_argument('--keep-contradictory', action='store_true', default=False, help="keep 'contradictory' operation gadgets whose destination register is overwritten before the ret (e.g. `add rax, rbx ; mov rax, rcx ; ret`); by default these are filtered out of --op results")
         self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
         self.argparser.add_argument('--badchar', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget address')
@@ -45,9 +49,9 @@ class ArgumentParser:
         self.argparser.add_argument('--arch', type=str, metavar='<name>', default=None, help='select the architecture slice of a fat Mach-O binary (e.g. x86_64, i386)')
         self.argparser.add_argument('--symbols', action='store_true', default=False, help='annotate gadgets with the nearest symbol (when the binary is not stripped)')
         self.argparser.add_argument('--output', choices=['text', 'json', 'csv'], default='text', help='output format (default: text)')
+        self.argparser.add_argument('--tuple', action='store_true', default=False, help='print each gadget as the tuple <op_name, op1[, op2], written registers, read registers> (overrides --output text)')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
-        self.argparser.add_argument('--dst', type=str, metavar='<reg>', help='specify a destination register for the operation')
-        self.argparser.add_argument('--src', type=str, metavar='<reg>', help='specify a source register for the operation')
+        self.argparser.add_argument('--operands', type=str, metavar='<reg>', nargs='+', help='operation operands, positionally (op1 op2 op3 ...); e.g. --op mov --operands rdi rax')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
         self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
@@ -86,6 +90,14 @@ class ArgumentParser:
             flags |= gadfinder.ALLOW_COMPLEX_MEM
         if not args.keep_canary_address:
             flags |= gadfinder.AVOID_CANARY
+        if args.ret_imm:
+            flags |= gadfinder.ALLOW_RET_IMM
+        if args.reg_aliases:
+            flags |= gadfinder.ALLOW_REG_ALIASES
+        if args.keep_contradictory:
+            flags |= gadfinder.KEEP_CONTRADICTORY
+        if not args.frame:
+            flags |= gadfinder.UNFRAMED
 
         namespace['flags'] = flags
 

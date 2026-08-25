@@ -23,20 +23,20 @@ import rop3.utils as utils
 
 def test_pretty_addr_padding():
     # padding is the total field width including the '0x' prefix
-    assert utils.pretty_addr(0x1000, capstone.CS_MODE_32) == '0x001000'
-    assert utils.pretty_addr(0x1000, capstone.CS_MODE_64) == '0x00000000001000'
-    assert len(utils.pretty_addr(0x1000, capstone.CS_MODE_32)) == 8
-    assert len(utils.pretty_addr(0x1000, capstone.CS_MODE_64)) == 16
+    assert utils.pretty_addr(0x1000, 4) == '0x001000'
+    assert utils.pretty_addr(0x1000, 8) == '0x00000000001000'
+    assert len(utils.pretty_addr(0x1000, 4)) == 8
+    assert len(utils.pretty_addr(0x1000, 8)) == 16
 
 
 def test_pack_addr_endianness_and_width():
-    assert utils.pack_addr(0x41424344, capstone.CS_MODE_32) == b'\x44\x43\x42\x41'
-    assert utils.pack_addr(0x41424344, capstone.CS_MODE_64) == \
+    assert utils.pack_addr(0x41424344, 4) == b'\x44\x43\x42\x41'
+    assert utils.pack_addr(0x41424344, 8) == \
         b'\x44\x43\x42\x41\x00\x00\x00\x00'
 
 
 @pytest.mark.parametrize('fn', [utils.pretty_addr, utils.pack_addr])
-def test_addr_helpers_reject_unknown_mode(fn):
-    ''' Regression for issue #15: unbound local on unsupported mode. '''
+def test_addr_helpers_reject_unknown_size(fn):
+    ''' Regression for issue #15: unbound local on unsupported address size. '''
     with pytest.raises(ValueError):
-        fn(0x1000, mode=999)
+        fn(0x1000, size=999)

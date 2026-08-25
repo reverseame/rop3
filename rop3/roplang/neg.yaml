@@ -1,4 +1,23 @@
+# Negate: op1 <- -op1
 neg:
-  -
-    - mnemonic: neg
-      op1: dst
+  operands: 1
+  dst: [op1]
+  src: [op1]
+
+  x86:
+    - steps:
+        - mnemonic: neg
+          op1: op1
+
+  arm:
+    - steps:
+        - mnemonic: neg
+          op1: op1
+          op2: op1
+
+  riscv:
+    # neg op1, op1   ==   sub op1, zero, op1  (capstone renders the pseudo)
+    - steps:
+        - mnemonic: neg
+          op1: op1
+          op2: op1

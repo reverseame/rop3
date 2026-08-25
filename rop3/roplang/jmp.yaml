@@ -1,14 +1,25 @@
-# Unconditional jump
-
-leave:
-  -
-    - mnemonic: leave
-
+# Stack pivot: SP <- op1.
 jmp:
-  # jmp src
-  - compose:
-    - operation: mov
-      op1: REG_BP
-      op2: src
-    - operation: leave
+  operands: 1
+  dst: []
+  src: [op1]
 
+  x86:
+    # reuse mov to set the frame pointer, then a `leave` gadget
+    - steps:
+        - operation: mov
+          op1: REG_BP
+          op2: op1
+        - mnemonic: leave
+
+  arm:
+    - steps:
+        - mnemonic: mov
+          op1: REG_SP
+          op2: op1
+
+  riscv:
+    - steps:
+        - operation: mov
+          op1: REG_SP
+          op2: op1

@@ -1,0 +1,53 @@
+# Get carry flag (equal comparison). 3 operands: op3 is the flag register.
+gcf-eqc:
+  operands: 3
+  dst: [op1]
+  src: [op2, op3]
+
+  x86:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: eqc
+          op1: op2
+          op2: op3
+        - mnemonic: adc
+          op1: op1
+          op2: REG10
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: eqc
+          op1: op2
+          op2: op3
+        - mnemonic: sbb
+          op1: op1
+          op2: REG10
+        - operation: neg
+          op1: op1
+    - steps:
+        - operation: lc
+          op1: op1
+        - operation: eqc
+          op1: op2
+          op2: op3
+        - mnemonic: rcl
+          op1: op1
+          op2: 1
+
+  arm:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: eqc
+          op1: op2
+          op2: op3
+        - operation: lc
+          op1: op1
+        - mnemonic: adc
+          op1: op1
+          op2: REG10
+
+  riscv:
+    available: false
+    reason: RISC-V has no condition/carry flags (adc/sbb/rcl do not translate)

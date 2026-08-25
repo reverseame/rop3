@@ -57,16 +57,15 @@ class Rop3Shell(cmd.Cmd):
         print(len(self.rop3.gadgets()))
 
     def do_op(self, arg):
-        'op <name> [dst] [src]: search for an operation'
+        'op <name> [operands...]: search for an operation'
         parts = shlex.split(arg)
         if not parts:
-            print('usage: op <name> [dst] [src]')
+            print('usage: op <name> [operands...]')
             return
         op = parts[0]
-        dst = parts[1] if len(parts) > 1 else None
-        src = parts[2] if len(parts) > 2 else None
+        operands = parts[1:] or None
         try:
-            result = self.rop3.find_op(op, dst, src)
+            result = self.rop3.find_op(op, operands=operands)
         except parser.ParserException as exc:
             print(str(exc))
             return

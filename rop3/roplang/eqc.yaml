@@ -1,10 +1,25 @@
-# Equal Comparison
+# Equal comparison: flag <- (op1 == op2)
 eqc:
-  # sub(dst, src)
-  # neg(dst)
-  - compose:
-    - operation: sub
-      op1: dst
-      op2: src
-    - operation: neg
-      op1: dst
+  operands: 2
+  dst: [op1]
+  src: [op1, op2]
+
+  x86:
+    - steps:
+        - operation: sub
+          op1: op1
+          op2: op2
+        - operation: neg
+          op1: op1
+
+  arm:
+    - steps:
+        - operation: sub
+          op1: op1
+          op2: op2
+        - operation: neg
+          op1: op1
+
+  riscv:
+    available: false
+    reason: RISC-V has no condition/carry flags

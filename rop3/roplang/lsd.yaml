@@ -1,13 +1,35 @@
-# Load Stack Delta
+# Load stack delta (compound). REG10 is an internal scratch register.
 lsd:
-  # lc(REG1, δ)
-  # neg(dst)
-  # and(dst, REG1)
-  - compose:
-    - operation: lc
-      op1: REG1
-    - operation: neg
-      op1: dst
-    - operation: and
-      op1: dst
-      op2: REG1
+  operands: 1
+  dst: [op1]
+  src: [op1]
+
+  x86:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: neg
+          op1: op1
+        - operation: and
+          op1: op1
+          op2: REG10
+
+  arm:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: neg
+          op1: op1
+        - operation: and
+          op1: op1
+          op2: REG10
+
+  riscv:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - operation: neg
+          op1: op1
+        - operation: and
+          op1: op1
+          op2: REG10

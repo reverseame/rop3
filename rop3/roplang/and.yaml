@@ -1,7 +1,37 @@
-# AND
+# Bitwise AND: op1 <- op1 & op2
 and:
-  # and dst, src
-  -
-    - mnemonic: and
-      op1: dst
-      op2: src
+  operands: 2
+  dst: [op1]
+  src: [op1, op2]
+
+  x86:
+    - steps:
+        - mnemonic: and
+          op1: op1
+          op2: op2
+
+  arm:
+    - steps:
+        - mnemonic: and
+          op1: op1
+          op2: op1
+          op3: op2
+
+  riscv:
+    # and op1, op1, op2
+    - steps:
+        - mnemonic: and
+          op1: op1
+          op2: op1
+          op3: op2
+    # c.and op1, op2
+    - steps:
+        - mnemonic: c.and
+          op1: op1
+          op2: op2
+    # andi op1, op1, imm   (op2 binds to the immediate)
+    - steps:
+        - mnemonic: andi
+          op1: op1
+          op2: op1
+          op3: op2

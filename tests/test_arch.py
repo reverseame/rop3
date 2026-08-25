@@ -86,3 +86,29 @@ def test_is_valid_abstract_reg_width():
     assert not X64_Architecture().is_valid_abstract_reg('eax')
     assert X86_Architecture().is_valid_abstract_reg('eax')
     assert not X86_Architecture().is_valid_abstract_reg('rax')
+
+
+def test_rop_terminations_exclude_ret_imm_by_default():
+    arch = X64_Architecture()
+    assert all(t['size'] == 1 for t in arch.get_rop_terminations())   # only plain ret
+    assert any(t['size'] == 3 for t in arch.get_rop_terminations(include_ret_imm=True))
+
+
+def test_is_valid_rop_gadget_ret_imm_gating():
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
+    arch = X64_Architecture()
+    ret_imm = list(md.disasm(b'\x58\xc2\x08\x00', 0))   # pop rax ; ret 8
+    plain = list(md.disasm(b'\x58\xc3', 0))             # pop rax ; ret
+    assert not arch.is_valid_rop_gadget(ret_imm)
+    assert arch.is_valid_rop_gadget(ret_imm, allow_ret_imm=True)
+    assert arch.is_valid_rop_gadget(plain)
+
+
+def test_ret_imm_anywhere_gated():
+    ''' A `ret <imm>` returns at that point, so a gadget containing one anywhere
+        (even as the first instruction) is excluded unless ret-imm is allowed. '''
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
+    arch = X64_Architecture()
+    lead_ret_imm = list(md.disasm(b'\xc2\x48\x89\xc3', 0))   # ret 0x8948 ; ret
+    assert not arch.is_valid_rop_gadget(lead_ret_imm)
+    assert arch.is_valid_rop_gadget(lead_ret_imm, allow_ret_imm=True)

@@ -16,14 +16,15 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import pefile
-import capstone
 
 import rop3.binary as binary
 
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+from rop3.archs.aarch64_arch import AArch64_Architecture
 
 IMAGE_FILE_MACHINE_I386 = 0x014c
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
+IMAGE_FILE_MACHINE_ARM64 = 0xaa64
 
 IMAGE_SCN_MEM_EXECUTE = 0x20000000
 
@@ -44,6 +45,8 @@ class PE:
             return X86_Architecture()
         elif self._pe.FILE_HEADER.Machine == IMAGE_FILE_MACHINE_AMD64:
             return X64_Architecture()
+        elif self._pe.FILE_HEADER.Machine == IMAGE_FILE_MACHINE_ARM64:
+            return AArch64_Architecture()
         else:
             raise binary.BinaryException('PE: Unsupported architecture type in COFF header')
 

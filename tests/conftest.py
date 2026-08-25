@@ -70,6 +70,8 @@ def make_gadget(code: bytes, vaddr: int, mode=capstone.CS_MODE_64,
 
 EM_386 = 3
 EM_X86_64 = 62
+EM_RISCV = 243
+EF_RISCV_RVC = 0x1
 ET_EXEC = 2
 ET_DYN = 3
 SHT_PROGBITS = 1
@@ -82,7 +84,8 @@ STT_FUNC = 2
 
 
 def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
-                      text_addr: int, e_type: int = ET_DYN, symbols=None) -> bytes:
+                      text_addr: int, e_type: int = ET_DYN, symbols=None,
+                      e_flags: int = 0) -> bytes:
     '''
     Produce a tiny but valid ELF that pyelftools can parse: an ELF header, a
     `.text` PROGBITS section flagged executable at `text_addr`, and a
@@ -153,7 +156,7 @@ def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
         text_addr,                     # entry
         0,                             # phoff
         shoff,                         # shoff
-        0,                             # flags
+        e_flags,                       # flags
         ehsize, 0, 0,                  # ehsize, phentsize, phnum
         shentsize, n_sections, 2,      # shentsize, shnum, shstrndx (.shstrtab)
     )
@@ -174,3 +177,96 @@ def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
         payload += sym_entries + strtab
 
     return header + payload + b''.join(section_headers)
+
+
+# --- Minimal in-memory Mach-O (thin) builder ------------------------------
+
+MH_MAGIC_64 = 0xFEEDFACF
+LC_SEGMENT_64 = 0x19
+MH_EXECUTE = 2
+VM_PROT_READ = 0x1
+VM_PROT_EXECUTE = 0x4
+S_ATTR_SOME_INSTRUCTIONS = 0x400
+CPU_TYPE_X86_64 = 0x01000007
+CPU_TYPE_ARM64 = 0x0100000C
+
+
+def build_minimal_macho(cputype: int, text_bytes: bytes,
+                        text_addr: int = 0x100000000, cpusubtype: int = 0) -> bytes:
+    '''
+    Produce a tiny thin (non-fat) 64-bit Mach-O that macholib parses: a
+    mach_header_64 and one LC_SEGMENT_64 (__TEXT) carrying a single executable
+    __text section. Enough to exercise architecture detection and
+    executable-section extraction without a committed binary.
+    '''
+    seg_fmt = '<II16sQQQQiiII'      # segment_command_64 (72 bytes)
+    sec_fmt = '<16s16sQQIIIIIIII'   # section_64 (80 bytes)
+    cmdsize = struct.calcsize(seg_fmt) + struct.calcsize(sec_fmt)
+    text_off = 32 + cmdsize         # after header + load command
+
+    header = struct.pack('<IiiIIIII', MH_MAGIC_64, cputype, cpusubtype,
+                         MH_EXECUTE, 1, cmdsize, 0, 0)
+    prot = VM_PROT_READ | VM_PROT_EXECUTE
+    segment = struct.pack(seg_fmt, LC_SEGMENT_64, cmdsize, b'__TEXT',
+                          text_addr, len(text_bytes), text_off, len(text_bytes),
+                          prot, prot, 1, 0)
+    section = struct.pack(sec_fmt, b'__text', b'__TEXT', text_addr,
+                          len(text_bytes), text_off, 2, 0, 0,
+                          S_ATTR_SOME_INSTRUCTIONS, 0, 0, 0)
+    return header + segment + section + text_bytes
+
+
+# --- Minimal in-memory PE (PE32+) builder ---------------------------------
+
+IMAGE_FILE_MACHINE_AMD64 = 0x8664
+IMAGE_FILE_MACHINE_ARM64 = 0xAA64
+IMAGE_SCN_CNT_CODE = 0x20
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_READ = 0x40000000
+
+
+def build_minimal_pe(machine: int, text_bytes: bytes, text_rva: int = 0x1000,
+                     image_base: int = 0x140000000) -> bytes:
+    '''
+    Produce a tiny PE32+ (one executable .text section) that pefile parses: a
+    DOS stub, the PE signature, a COFF header with `machine`, a PE32+ optional
+    header with 16 (empty) data directories, and one section header. Enough for
+    architecture detection and executable-section extraction.
+    '''
+    file_align = 0x200
+    sect_align = 0x1000
+    n_dirs = 16
+
+    opt_head = struct.pack('<HBBIIIII', 0x20b, 1, 0, len(text_bytes), 0, 0,
+                           text_rva, text_rva)               # magic..BaseOfCode
+    opt_head += struct.pack('<Q', image_base)                # ImageBase
+    opt_head += struct.pack('<II', sect_align, file_align)   # Section/FileAlignment
+    opt_head += struct.pack('<HHHHHH', 6, 0, 0, 0, 6, 0)     # OS/Image/Subsystem ver
+    opt_head += struct.pack('<I', 0)                         # Win32VersionValue
+    size_of_image = sect_align + \
+        ((len(text_bytes) + sect_align - 1) // sect_align) * sect_align
+    opt_tail = struct.pack('<IIHH', 0, 0, 3, 0)              # CheckSum, Subsystem, DllChar
+    opt_tail += struct.pack('<QQQQ', 0x100000, 0x1000, 0x100000, 0x1000)
+    opt_tail += struct.pack('<II', 0, n_dirs)               # LoaderFlags, NumberOfRvaAndSizes
+    opt_tail += b'\x00' * (8 * n_dirs)                       # data directories
+
+    def optional_header(size_of_headers):
+        return opt_head + struct.pack('<II', size_of_image, size_of_headers) + opt_tail
+
+    opt_size = len(optional_header(0))
+    coff = struct.pack('<HHIIIHH', machine, 1, 0, 0, 0, opt_size, 0x22)
+    dos = b'MZ' + b'\x00' * 0x3a + struct.pack('<I', 0x40)   # e_lfanew = 0x40
+    pe_sig = b'PE\x00\x00'
+
+    section_hdr_off = 0x40 + len(pe_sig) + len(coff) + opt_size
+    size_of_headers = ((section_hdr_off + 40 + file_align - 1)
+                       // file_align) * file_align
+    raw_ptr = size_of_headers
+
+    section = struct.pack('<8sIIIIIIHHI', b'.text', len(text_bytes), text_rva,
+                          len(text_bytes), raw_ptr, 0, 0, 0, 0,
+                          IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ)
+
+    blob = dos + pe_sig + coff + optional_header(size_of_headers) + section
+    blob += b'\x00' * (raw_ptr - len(blob))
+    return blob + text_bytes

@@ -15,7 +15,8 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import capstone
+import re
+import copy
 import dataclasses
 
 from rop3.arch import arch_singleton
@@ -24,283 +25,476 @@ import rop3.parser as parser
 
 from .gadget import Gadget
 
+# Abstract operand placeholders: operation operands op1, op2, op3, ... and the
+# scratch helper registers REG1, REG10, ...
+_ABSTRACT_RE = re.compile(r'^(op\d+|REG\d+)$')
+
+
+def is_abstract_name(name) -> bool:
+    return isinstance(name, str) and bool(_ABSTRACT_RE.match(name))
+
+
+def is_immediate(value) -> bool:
+    ''' Whether a value is a numeric immediate (e.g. 8, '8', '0x10', '#0', -1)
+        rather than a register name. '''
+    if isinstance(value, int):
+        return True
+    try:
+        int(str(value).lstrip('#'), 0)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 class Operation:
-    def __init__(self, op, dst=None, src=None):
-        self.name = op
-        self.template = parser.Parser().get_op(op)
-        self.dst = dst
-        self.template.set_dst(dst)
-        self.src = src
-        self.template.set_src(src)
+    '''
+    Matcher for a single-gadget realization of an operation. The operation's
+    operands are given explicitly and positionally as `operands` = [op1, op2,
+    op3, ...] (an operation has 1, 2 or 3 of them); a value of None leaves that
+    operand unconstrained (matches any register).
+    '''
+    def __init__(self, op, operands=None):
+        self.defn = op if isinstance(op, OperationDef) else parser.Parser().get_op(op)
+        if not self.defn.available:
+            reason = self.defn.unavailable_reason or 'not available for this architecture'
+            raise parser.OperationNotAvailable(f'{self.defn.name}: {reason}')
+        self.name = self.defn.name
+        self.bindings: dict = {}
+        for i, value in enumerate(operands or ()):
+            if value is not None:
+                self.bindings[f'op{i + 1}'] = value
 
-    def filter_gadgets(self, gadgets) -> list[Gadget]:
+    def filter_gadgets(self, gadgets, reject_clobbered=True) -> list[Gadget]:
+        ''' Gadgets whose instructions realize this operation. The operation's
+            first instruction must be the gadget's first instruction after the
+            architecture's frame prologue (Set.is_equal); its remaining
+            instructions may be separated by other instructions.
+
+            With `reject_clobbered` (the default), a gadget is discarded when
+            its destination register is overwritten before the terminator (a
+            "contradictory" gadget that does not actually realize the
+            operation). The check runs inside the match, so clobbered gadgets
+            are rejected before the (more expensive) annotation. '''
         ret = []
-
         if not gadgets:
             return ret
 
-        arch = gadgets[0].arch
-        mode = gadgets[0].mode
-
-        for gadget in gadgets:
-            (equal, set_, dst, src) = self.template.is_equal(gadget.decodes)
-            if equal:
-                ''' Annotate a copy so the shared input gadget is not mutated
-                    (the same object may be filtered for several operations).
-                    replace() also gives the copy fresh side-effect sets. '''
-                matched = dataclasses.replace(
-                    gadget,
-                    op=self.template.name,
-                    dst=self.dst if self.dst else dst,
-                    src=self.src if self.src else src,
-                )
-                matched.calculate_side_effects()
-                ret.append(matched)
+        protect = self._destination_registers if reject_clobbered else None
+        for real in self.defn.realizations:
+            if not real.is_single_gadget:
+                continue
+            set_ = real.links[0].bound(self.bindings)
+            for gadget in gadgets:
+                (equal, binds) = set_.is_equal(gadget.decodes, protect=protect)
+                if not equal:
+                    continue
+                ret.append(self._annotate(gadget, binds))
 
         return ret
 
-class OperationTemplate:
-    def __init__(self, op):
-        self.name = op
-        self.sets = []
+    def _as_register(self, name, binds):
+        ''' The concrete register bound to an operand name, following one level
+            of placeholder indirection (opN -> free REGn -> concrete). None if
+            the operand is an immediate or is unbound. '''
+        arch = arch_singleton.arch
+        val = self.bindings.get(name, name)
+        if isinstance(val, str) and is_abstract_name(val):
+            val = binds.get(val, val)
+        if not isinstance(val, str) or is_abstract_name(val) or is_immediate(val):
+            return None
+        return arch.normalize_reg(val)
 
-    def __iter__(self):
-        for item in self.sets:
-            yield item
+    def _as_operand(self, name, binds):
+        ''' Display value bound to an operand name: a concrete register (like
+            _as_register) or, when the operand bound to a numeric literal, that
+            immediate formatted as a string. None if the operand is an unbound
+            placeholder or is unused. '''
+        val = self.bindings.get(name, name)
+        if isinstance(val, str) and is_abstract_name(val):
+            val = binds.get(val, val)
+        if isinstance(val, str) and is_abstract_name(val):
+            return None                         # still an unbound placeholder
+        if is_immediate(val):
+            return self._format_imm(val)
+        if isinstance(val, str):
+            return arch_singleton.arch.normalize_reg(val)
+        return None
 
-    def add(self, set_):
-        self.sets.append(set_)
+    @staticmethod
+    def _format_imm(val) -> str:
+        ''' Render an immediate the way the disassembly does: small magnitudes
+            in decimal (e.g. -1), larger ones in hex (e.g. 0x1000). '''
+        n = int(str(val).lstrip('#'), 0) if not isinstance(val, int) else val
+        return str(n) if -256 < n < 256 else hex(n)
 
-    def set_dst(self, dst):
-        if dst:
-            for set_ in self.sets:
-                set_.set_dst(dst)
+    def _destination_registers(self, binds):
+        ''' The concrete destination register(s) this operation writes, under
+            the given match bindings. Passed to Set.is_equal so the match can
+            reject gadgets that overwrite the result before returning. '''
+        return {r for r in (self._as_register(n, binds) for n in self.defn.dst_roles) if r}
 
-    def set_src(self, src):
-        if src:
-            for set_ in self.sets:
-                set_.set_src(src)
+    def _annotate(self, gadget, binds) -> Gadget:
+        ''' Annotate a copy so the shared input gadget is not mutated. '''
+        def as_register(name):
+            return self._as_register(name, binds)
 
-    def is_equal(self, decodes):
-        dst = None
-        src = None
+        matched = dataclasses.replace(gadget, op=self.name)
+        # dst/src register sets come from the operation's role metadata (which
+        # operands it writes / reads); the two solver slots are just op1 and op2.
+        matched.dst = {r for r in map(as_register, self.defn.dst_roles) if r}
+        matched.src = {r for r in map(as_register, self.defn.src_roles) if r}
+        matched.slot_op1 = as_register('op1')
+        matched.slot_op2 = as_register('op2')
+        matched.disp_op1 = self._as_operand('op1', binds)
+        matched.disp_op2 = self._as_operand('op2', binds)
+        matched.calculate_side_effects()
+        return matched
 
-        for set_ in self.sets:
-            (equal, dst, src) = set_.is_equal(decodes)
-            if equal:
-                return (True, set_, dst, src)
-        
-        return (False, None, dst, src)
+
+class OperationDef:
+    '''
+    Parsed definition of a ROPLang operation for the current architecture: its
+    operand arity, which operands it writes (dst_roles) / reads (src_roles) for
+    side-effect accounting, and the list of alternative realizations (each a
+    chain of gadget-patterns and operation references).
+    '''
+    def __init__(self, name, operands=0, dst_roles=None, src_roles=None,
+                 available=True, unavailable_reason=None):
+        self.name = name
+        self.operands = operands
+        self.dst_roles = list(dst_roles or [])
+        self.src_roles = list(src_roles or [])
+        self.realizations: list[Realization] = []
+        # Whether this operation is realizable on the current architecture.
+        # A YAML `<arch>: {available: false}` marks it unavailable (see parser).
+        self.available = available
+        self.unavailable_reason = unavailable_reason
+
+    def add(self, realization):
+        self.realizations.append(realization)
+
+
+class Realization:
+    ''' One alternative realization: an ordered chain of links, each either a
+        Set (a gadget-pattern of consecutive instructions) or an OpRef. '''
+    def __init__(self):
+        self.links: list = []
+
+    def add(self, link):
+        self.links.append(link)
+
+    @property
+    def is_single_gadget(self) -> bool:
+        return len(self.links) == 1 and isinstance(self.links[0], Set)
+
+
+class OpRef:
+    ''' A step that reuses another operation, binding its operands. '''
+    def __init__(self, name, bindings):
+        self.name = name
+        self.bindings = dict(bindings)   # sub-op operand -> outer operand/value
+
 
 class Set:
+    ''' A gadget-pattern: consecutive instructions matched within one gadget. '''
     def __init__(self):
         self.items = []
 
-    def __iter__(self):
-        for item in self.items:
-            yield item
-
-    def __len__(self):
-        return len(self.items)
-
     def __str__(self):
-        return ' ; '.join([str(item) for item in self.items])
+        return ' ; '.join(str(item) for item in self.items)
 
     def add(self, item):
         self.items.append(item)
 
-    def set_dst(self, dst):
-        if dst:
-            for item in self.items:
-                item.set_dst(dst)
+    def bound(self, bindings: dict) -> "Set":
+        ''' A copy with the given operand names bound to concrete values. Each
+            operand is bound once by its own name, so binding an operand to a
+            value that happens to be another operand's name cannot cascade
+            (e.g. {op1: op2, op2: op3} yields `op2, op3`, not `op3, op3`). '''
+        clone = copy.deepcopy(self)
+        for item in clone.items:
+            for operand in item.operands:
+                name = operand.reg
+                if operand.abstract and name in bindings:
+                    operand.set_binding(name, bindings[name])
+        return clone
 
-    def set_src(self, src):
-        if src:
-            for item in self.items:
-                item.set_src(src)
+    def renamed(self, mapping: dict) -> "Set":
+        ''' A copy with abstract operand names remapped (e.g. REG1 -> op2). '''
+        clone = copy.deepcopy(self)
+        for item in clone.items:
+            for operand in item.operands:
+                if operand.abstract and operand.reg in mapping:
+                    operand.reg = mapping[operand.reg]
+        return clone
 
-    def is_equal(self, decodes):
-        dst = None
-        src = None
+    def is_equal(self, decodes, protect=None):
+        '''
+        Match this pattern against a gadget's decoded instructions.
 
-        if len(decodes) < len(self.items):
-            return (False, dst, src)
+        The gadget is viewed as [frame prologue] [operation body] [epilogue].
+        The architecture's frame prologue (Architecture.is_frame_prefix) -- a
+        leading run of framing instructions, e.g. the RISC-V `ld ra, off(sp)`
+        restore; empty on x86/AArch64 -- is skipped, and the operation's FIRST
+        instruction must sit right after it (position 0 when the prologue is
+        empty). This anchors detection to real gadgets instead of matching an
+        operation buried behind arbitrary leading instructions.
 
-        for i, item in enumerate(self.items):
-            if not isinstance(item, Instruction):
-                return (False, dst, src)
+        The remaining pattern instructions then match as an ordered subsequence:
+        they must appear in order but may be separated by other instructions
+        (e.g. `push rbx ; nop ; pop rax` still realizes `push ; pop`). Trailing
+        instructions after the last matched one form the epilogue.
 
-            (equal, ins_dst, ins_src) = item.is_equal(decodes[i])
+        `protect`, if given, is a callable (bindings) -> set of the operation's
+        destination registers. A match is rejected when any epilogue instruction
+        overwrites a destination the operation actually produces -- a
+        "contradictory" gadget (e.g. `add rax, rbx ; mov rax, rcx ; ret`) whose
+        result never reaches the terminator. Doing this here fails fast, before
+        the gadget is annotated.
+
+        Returns (matched, bindings) with the first consistent binding found.
+        '''
+        if not self.items:
+            return (True, {})
+
+        arch = arch_singleton.arch
+        start = 0
+        while start < len(decodes) and arch.is_frame_prefix(decodes[start]):
+            start += 1
+
+        if len(decodes) - start < len(self.items):
+            return (False, {})
+
+        # The operation's first instruction is anchored at `start`; the rest
+        # follow as an ordered subsequence.
+        (equal, binds) = self.items[0].is_equal(decodes[start])
+        if not equal:
+            return (False, {})
+        bindings: dict = {}
+        if not self._merge(bindings, binds):
+            return (False, {})
+
+        (ok, bindings, indices) = self._match_subsequence(1, decodes, start + 1,
+                                                          bindings, [start])
+        if not ok:
+            return (False, {})
+        if protect is not None and self._result_clobbered(decodes, indices, protect(bindings)):
+            return (False, {})
+        return (True, bindings)
+
+    def _match_subsequence(self, item_idx, decodes, start, bindings, indices):
+        ''' Place self.items[item_idx:] onto increasing positions of `decodes`
+            (>= start), backtracking on binding conflicts. `indices` collects
+            the matched instruction positions. '''
+        if item_idx == len(self.items):
+            return (True, bindings, indices)
+        item = self.items[item_idx]
+        remaining = len(self.items) - item_idx
+        # Leave room for the remaining items at strictly increasing positions.
+        for i in range(start, len(decodes) - remaining + 1):
+            (equal, binds) = item.is_equal(decodes[i])
             if not equal:
-                return (False, dst, src)
+                continue
+            merged = dict(bindings)
+            if not self._merge(merged, binds):
+                continue
+            (ok, result, idxs) = self._match_subsequence(item_idx + 1, decodes,
+                                                         i + 1, merged, indices + [i])
+            if ok:
+                return (ok, result, idxs)
+        return (False, {}, [])
 
-            if ins_dst is not None:
-                if dst is None:
-                    dst = ins_dst
-                elif dst != ins_dst:
-                    return (False, dst, src)
-            if ins_src is not None:
-                if src is None:
-                    src = ins_src
-                elif src != ins_src:
-                    return (False, dst, src)
+    def _result_clobbered(self, decodes, indices, dst_regs):
+        ''' Whether the operation's destination is overwritten before the
+            terminator. `dst_regs` are the operation's declared destinations;
+            they are intersected with the registers the matched instructions
+            actually write (so a store, whose result is in memory, protects
+            nothing and is never falsely rejected). A gadget is contradictory if
+            an instruction between the last matched one and the terminator
+            writes such a register.
 
-        return (True, dst, src)
+            The final (terminating) instruction is excluded: it is control flow,
+            and its incidental write to the stack pointer (an x86 `ret` pops) is
+            the gadget's exit mechanism, not a clobber of the result -- so a
+            stack-pointer operation like `add rsp, 8 ; ret` is not contradictory. '''
+        if not dst_regs:
+            return False
+
+        arch = arch_singleton.arch
+
+        def writes(insn):
+            return {arch.normalize_reg(insn.reg_name(r))
+                    for r in arch.written_registers(insn)}
+
+        produced = {reg for i in indices for reg in writes(decodes[i])}
+        guarded = dst_regs & produced
+        if not guarded:
+            return False
+
+        last = max(indices)
+        clobbered = {reg for insn in decodes[last + 1:-1] for reg in writes(insn)}
+        return bool(guarded & clobbered)
+
+    @staticmethod
+    def _merge(bindings: dict, binds: dict) -> bool:
+        ''' Fold `binds` into `bindings` in place; False on a conflicting
+            reassignment of an abstract operand. '''
+        for name, val in binds.items():
+            if name in bindings and bindings[name] != val:
+                return False
+            bindings[name] = val
+        return True
+
 
 class Instruction:
     def __init__(self, mnemonic):
         self.mnemonic = mnemonic
         self.operands = []
 
-    def __iter__(self):
-        for item in self.operands:
-            yield item
-
     def __str__(self):
-        operands = ', '.join([str(operand) for operand in self.operands])
-
+        operands = ', '.join(str(operand) for operand in self.operands)
         return f'{self.mnemonic} {operands}'
-    
+
     def add(self, operand):
         self.operands.append(operand)
 
-    def set_dst(self, dst):
-        if dst:
-            for operand in self.operands:
-                operand.set_dst(dst)
+    def set_binding(self, name, value):
+        for operand in self.operands:
+            operand.set_binding(name, value)
 
-    def set_src(self, src):
-        if src:
-            for operand in self.operands:
-                operand.set_src(src)
-        
     def is_equal(self, decode):
-        dst = None
-        src = None
-
         if self.mnemonic != decode.mnemonic:
-            return (False, dst, src)
-
+            return (False, {})
         if len(self.operands) != len(decode.operands):
-            return (False, dst, src)
+            return (False, {})
 
+        bindings: dict = {}
         for myoperand, operand in zip(self.operands, decode.operands):
-            (equal, reg) = myoperand.is_equal(decode, operand)
+            (equal, bind) = myoperand.is_equal(decode, operand)
             if not equal:
-                return (False, dst, src)
-            
-            dst = reg if not dst and myoperand.is_dst() else dst
-            src = reg if not src and myoperand.is_src() else src
+                return (False, {})
+            if bind is not None:
+                name, val = bind
+                if name in bindings and bindings[name] != val:
+                    return (False, {})
+                bindings[name] = val
 
-        return (True, dst, src)
+        return (True, bindings)
+
 
 class Operand:
-    def __init__(self, operand, value=None):
-        self.value = value
-        self.type = self._parse_type(operand)
+    '''
+    A pattern operand. It is one of:
+      - a register (abstract placeholder like op1/REG1, or a concrete reg name),
+      - a memory reference [base] (abstract or concrete base), or
+      - an immediate (numeric, optionally written #NN as in ARM/RISC-V asm).
+    '''
+    def __init__(self, operand):
+        self.mem = False
+        self.abstract = False
+        self.reg = None
+        self.imm = None
+        self._parse(operand)
 
     def __str__(self) -> str:
-        if self.is_reg():
-            return self.reg
-        elif self.is_mem():
-            return f"[{self.reg}]"
-        else:
+        if self.is_mem():
+            return f'[{self.reg}]'
+        if self.is_imm():
             return str(self.imm)
+        return str(self.reg)
 
-    def _parse_type(self, reg):
-        self.generic = False
-        reg_name = str(reg)
-        if reg_name.startswith('[') and reg_name.endswith(']'):
-            self.reg = reg[1:-1]
-            if self.reg in ('dst', 'src') or self.reg.startswith('REG'):
-                self.generic = True
-            return arch_singleton.arch.op_mem
+    def _parse(self, operand):
+        s = str(operand)
+        if s.startswith('[') and s.endswith(']'):
+            self.mem = True
+            s = s[1:-1]
 
-        self.reg = reg
-        
-        if reg in ('dst', 'src') or reg_name.startswith('REG'):
-            self.generic = True
-            return arch_singleton.arch.op_reg
-            
+        if not self.mem:
+            imm = self._try_imm(s)
+            if imm is not None:
+                self.imm = imm
+                return
+
+        self.reg = s
+        self.abstract = is_abstract_name(s)
+
+    def _try_imm(self, value):
         try:
-            self.imm = self._parse_imm(reg)
-            return arch_singleton.arch.op_imm
+            return self._parse_imm(value)
         except (ValueError, TypeError):
-            return arch_singleton.arch.op_reg
+            return None
 
-    def _parse_imm(self, reg):
-        if isinstance(reg, int):
-            return reg
-        return int(reg, 0)
+    def _parse_imm(self, value):
+        if isinstance(value, int):
+            return value
+        value = str(value)
+        if value.startswith('#'):
+            value = value[1:]
+        return int(value, 0)
 
-    def is_reg(self):
-        return self.type == arch_singleton.arch.op_reg
+    def is_reg(self) -> bool:
+        return not self.mem and self.imm is None
 
-    def is_mem(self):
-        return self.type == arch_singleton.arch.op_mem
+    def is_mem(self) -> bool:
+        return self.mem
 
-    def is_imm(self):
-        return self.type == arch_singleton.arch.op_imm
+    def is_imm(self) -> bool:
+        return not self.mem and self.imm is not None
 
-    def is_dst(self):
-        if self.reg is not None:
-            return self.reg == 'dst'
-        return False
-
-    def set_dst(self, dst):
-        if self.is_dst():
-            self.generic = False
-            if self.is_mem():
-                self.reg = dst
-            else:
-                try:
-                    self.imm = self._parse_imm(dst)
-                    self.type = arch_singleton.arch.op_imm
-                except (ValueError, TypeError):
-                    self.reg = dst
-                    self.type = arch_singleton.arch.op_reg
-
-    def is_src(self):
-        if self.reg is not None:
-            return self.reg == 'src'
-        return False
-
-    def set_src(self, src):
-        if self.is_src():
-            self.generic = False
-            if self.is_mem():
-                self.reg = src
-            else:
-                try:
-                    self.imm = self._parse_imm(src)
-                    self.type = arch_singleton.arch.op_imm
-                except (ValueError, TypeError):
-                    self.reg = src
-                    self.type = arch_singleton.arch.op_reg
+    def set_binding(self, name, value):
+        ''' Bind this operand if it is the abstract placeholder `name`.
+            Binding to another placeholder (a free chain variable such as REG1)
+            keeps the operand abstract so the ROP-chain solver can resolve it. '''
+        if not self.abstract or self.reg != name:
+            return
+        imm = None if self.mem else self._try_imm(value)
+        if imm is not None:
+            self.imm = imm
+            self.reg = None
+            self.abstract = False
+        else:
+            self.reg = str(value)
+            self.abstract = is_abstract_name(value)
 
     def is_equal(self, decode, operand):
-        operand_reg = None
+        arch = arch_singleton.arch
 
-        # Allows generic reg -> imm substitution (not for mem)
-        if self.generic and self.is_src() and self.is_reg() and operand.type == arch_singleton.arch.op_imm:
-            return (True, operand.value.imm)
+        # A generic register operand may match an immediate (reg -> imm subst),
+        # but never a memory operand (a load address is not an immediate).
+        if self.abstract and self.is_reg() and operand.type == arch.op_imm:
+            return (True, (self.reg, operand.value.imm))
 
-        if self.type != operand.type:
-            return (False, operand_reg)
+        if self.is_mem():
+            if operand.type != arch.op_mem:
+                return (False, None)
+            base = decode.reg_name(operand.value.mem.base)
+            if self.abstract:
+                if not self._alias_ok(arch, base):
+                    return (False, None)
+                return (True, (self.reg, base))
+            return (base == self.reg, None)
 
-        if self.is_reg():
-            operand_reg = decode.reg_name(operand.value.reg)
-        elif self.is_mem():
-            operand_reg = decode.reg_name(operand.value.mem.base)
-        elif self.is_imm():
-            if operand.value.imm == self.imm:
-                return (True, self.imm)
-            else:
-                return (False, self.imm)
+        if self.is_imm():
+            if operand.type != arch.op_imm:
+                return (False, None)
+            return (operand.value.imm == self.imm, None)
 
-        if not self.generic:
-            if operand_reg != self.reg:
-                return (False, operand_reg)
+        # register operand
+        if operand.type != arch.op_reg:
+            return (False, None)
+        reg = decode.reg_name(operand.value.reg)
+        if self.abstract:
+            if not self._alias_ok(arch, reg):
+                return (False, None)
+            return (True, (self.reg, reg))
+        # Concrete registers must match exactly: writing a sub-register (ah/eax)
+        # is not the same as writing the full register (rax).
+        return (reg == self.reg, None)
 
-        return (True, operand_reg)
-
+    @staticmethod
+    def _alias_ok(arch, reg) -> bool:
+        ''' Whether a concrete register may fill an abstract operand. By default
+            only full (canonical-width) registers qualify; with register aliases
+            enabled, sub-registers (al, ax, eax) qualify too and are normalized
+            to their full register for assignment and side effects. '''
+        return arch_singleton.allow_reg_aliases or arch.is_valid_abstract_reg(reg)

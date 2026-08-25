@@ -1,7 +1,28 @@
-# Store
+# Store to memory: [op1] <- op2
 st:
-  # mov [dst], src
-  -
-    - mnemonic: mov
-      op1: '[dst]'
-      op2: src
+  operands: 2
+  dst: [op1]
+  src: [op2]
+
+  x86:
+    - steps:
+        - mnemonic: mov
+          op1: '[op1]'
+          op2: op2
+
+  arm:
+    - steps:
+        - mnemonic: str
+          op1: op2
+          op2: '[op1]'
+
+  riscv:
+    # sd op2, off(op1)   (store op2 into [op1]; RV64 doubleword store)
+    - steps:
+        - mnemonic: sd
+          op1: op2
+          op2: '[op1]'
+    - steps:
+        - mnemonic: sw
+          op1: op2
+          op2: '[op1]'

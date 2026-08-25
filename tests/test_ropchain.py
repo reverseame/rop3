@@ -24,7 +24,9 @@ from conftest import make_gadget
 
 
 def _op(op, dst=None, src=None):
-    return {'data': f'{op}({dst or ""},{src or ""})', 'op': op, 'dst': dst, 'src': src}
+    ''' A requested chain step. Operand slots are the positional op1/op2
+        (op1 is the destination, op2 the source). '''
+    return {'data': f'{op}({dst or ""},{src or ""})', 'op': op, 'op1': dst, 'op2': src}
 
 
 def test_search_simple_concrete_chain(x64):
@@ -107,22 +109,22 @@ def test_parse_negative_constant_source(x64, tmp_path):
     parsed = RopChain(None)._parse_ropfile(str(ropfile))
     assert len(parsed) == 1
     assert parsed[0]['op'] == 'sub'
-    assert parsed[0]['dst'] == 'rax'
-    assert parsed[0]['src'] == '-1'
+    assert parsed[0]['op1'] == 'rax'
+    assert parsed[0]['op2'] == '-1'
 
 
 def test_parse_hyphenated_operation_name(x64, tmp_path):
     '''
     Regression (#38): an operation whose name contains a hyphen (e.g. jmp-rel)
     must be parsed. Before the fix REGEX_OP did not allow '-' in the operation
-    name and the line failed with "Unable to parse operation". jmp-rel is a
-    composite operation, so it expands into its concrete steps.
+    name and the line failed with "Unable to parse operation".
     '''
     ropfile = tmp_path / 'chain.txt'
     ropfile.write_text('jmp-rel(rax)\n')
     parsed = RopChain(None)._parse_ropfile(str(ropfile))
     assert parsed
-    assert all(op['op'] != 'jmp-rel' for op in parsed)
+    assert parsed[0]['op'] == 'jmp-rel'
+    assert parsed[0]['operands'] == ['rax']
 
 
 def test_store_dst_does_not_clear_clobbered_address_register(x64):
@@ -149,3 +151,133 @@ def test_store_dst_does_not_clear_clobbered_address_register(x64):
     ]
     with pytest.raises(ropchain_mod.RopChainNotFound):
         list(RopChain(None).search(gadgets, chain))
+
+
+def _opn(op, *operands):
+    return {'data': f'{op}({",".join(operands)})', 'op': op, 'operands': list(operands)}
+
+
+def test_compound_operation_expands_to_chain(x64):
+    ''' A compound op (eqc = sub ; neg) is realized as a multi-gadget chain. '''
+    gadgets = [
+        make_gadget(b'\x48\x29\xd8\xc3', 0x1000),   # sub rax, rbx ; ret
+        make_gadget(b'\x48\xf7\xd8\xc3', 0x1010),   # neg rax ; ret
+    ]
+    results = list(RopChain(None).search(gadgets, [_op('eqc', 'rax', 'rbx')]))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['sub rax, rbx ; ret', 'neg rax ; ret']
+
+
+def test_nary_positional_operands(x64):
+    ''' Steps may bind operands positionally op(op1, op2, ...). '''
+    gadgets = [make_gadget(b'\x48\x89\xd8\xc3', 0x1000)]   # mov rax, rbx ; ret
+    results = list(RopChain(None).search(gadgets, [_opn('mov', 'rax', 'rbx')]))
+    assert results
+    assert results[0][0].text_repr == 'mov rax, rbx ; ret'
+
+
+def test_parse_three_operands(x64, tmp_path):
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('add(rax, rbx, rcx)\n')
+    parsed = RopChain(None)._parse_ropfile(str(ropfile))
+    assert parsed[0]['operands'] == ['rax', 'rbx', 'rcx']
+
+
+def test_reg_aliases_unify_across_chain_steps(x64):
+    ''' With register aliases, `pop ax` (an alias of rax) and `neg rax` share the
+        same generic slot REG1: they are treated as the same register. '''
+    from rop3.arch import arch_singleton
+    gadgets = [
+        make_gadget(b'\x66\x58\xc3', 0x1000),       # pop ax ; ret
+        make_gadget(b'\x48\xf7\xd8\xc3', 0x1010),   # neg rax ; ret
+    ]
+    chain = [_op('lc', dst='REG1'), _op('neg', dst='REG1')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(None).search(gadgets, chain))     # aliases off: pop ax unusable
+    arch_singleton.allow_reg_aliases = True
+    try:
+        results = list(RopChain(None).search(gadgets, chain))
+        assert [g.text_repr for g in results[0]] == ['pop ax ; ret', 'neg rax ; ret']
+    finally:
+        arch_singleton.allow_reg_aliases = False
+
+
+def test_compound_yields_one_chain_per_realization(x64):
+    ''' A compound with multiple realizations expands to one distinct ropchain
+        per realization (gcf-eqc has several). '''
+    import rop3.parser as parser
+    from rop3.ropchain import expand_steps
+    defn = parser.Parser().get_op('gcf-eqc')
+    chains = expand_steps('gcf-eqc', {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'})
+    assert len(chains) == len(defn.realizations) >= 2
+    signatures = {tuple(s['op'] for s in ch) for ch in chains}
+    assert len(signatures) == len(chains)     # each realization is distinct
+
+
+def test_search_tries_every_realization(x64):
+    ''' The search must try each realization: gadgets that satisfy only a
+        non-first realization of gcf-eqc (the `rcl` variant) still yield a
+        chain. '''
+    gadgets = [
+        make_gadget(b'\x58\xc3', 0x10),           # pop rax ; ret
+        make_gadget(b'\x48\x29\xcb\xc3', 0x20),   # sub rbx, rcx ; ret
+        make_gadget(b'\x48\xf7\xdb\xc3', 0x30),   # neg rbx ; ret
+        make_gadget(b'\x48\xd1\xd0\xc3', 0x40),   # rcl rax, 1 ; ret  (only realization)
+    ]
+    step = {'op': 'gcf-eqc', 'operands': ['rax', 'rbx', 'rcx'], 'data': 'gcf-eqc(rax,rbx,rcx)'}
+    results = list(RopChain(None).search(gadgets, [step], prune_equivalent=False))
+    assert results
+    assert results[0][-1].text_repr == 'rcl rax, 1 ; ret'
+
+
+def test_search_compound_op_gcf_eqc(x64):
+    '''
+    End-to-end search of a compound operation. gcf-eqc(op1, op2, op3), first
+    realization, expands (nested) to:
+
+        lc(REG1)       -> pop REG1                (REG1 is a scratch register)
+        eqc(op2, op3)  -> sub(op2, op3) ; neg(op2)
+        adc op1, REG1  -> adc op1, REG1
+
+    so gcf-eqc(rax, rbx, rcx) must assemble
+
+        pop <REG1> ; sub rbx, rcx ; neg rbx ; adc rax, <REG1>
+
+    with REG1 unified between the pop and the adc. The `pop rsi` decoy is
+    rejected because no `adc rax, rsi` exists, forcing REG1 = rdx.
+    '''
+    gadgets = [
+        make_gadget(b'\x5a\xc3', 0x10),           # pop rdx ; ret
+        make_gadget(b'\x5e\xc3', 0x18),           # pop rsi ; ret   (decoy scratch)
+        make_gadget(b'\x48\x29\xcb\xc3', 0x20),   # sub rbx, rcx ; ret
+        make_gadget(b'\x48\xf7\xdb\xc3', 0x30),   # neg rbx ; ret
+        make_gadget(b'\x48\x11\xd0\xc3', 0x40),   # adc rax, rdx ; ret
+    ]
+    step = {'op': 'gcf-eqc', 'operands': ['rax', 'rbx', 'rcx'], 'data': 'gcf-eqc(rax,rbx,rcx)'}
+    results = list(RopChain(None).search(gadgets, [step]))
+    assert results
+    assert [g.text_repr for g in results[0]] == [
+        'pop rdx ; ret',
+        'sub rbx, rcx ; ret',
+        'neg rbx ; ret',
+        'adc rax, rdx ; ret',
+    ]
+
+
+def test_search_compound_op_with_generic_operands(x64):
+    '''
+    Regression: searching a multi-operand compound with no operands must treat
+    its operands (op1/op2/op3) as free register slots, enumerated and unified
+    like REGn -- not leaked as literal names. gcf-ltc over a full gadget set
+    must still assemble (this returned nothing before the fix).
+    '''
+    gadgets = [
+        make_gadget(b'\x5a\xc3', 0x10),           # pop rdx ; ret
+        make_gadget(b'\x48\x29\xcb\xc3', 0x20),   # sub rbx, rcx ; ret
+        make_gadget(b'\x48\x11\xd0\xc3', 0x40),   # adc rax, rdx ; ret
+    ]
+    step = {'op': 'gcf-ltc', 'op1': None, 'op2': None, 'data': 'gcf-ltc()'}
+    results = list(RopChain(None).search(gadgets, [step]))
+    assert results
+    assert [g.text_repr for g in results[0]] == [
+        'pop rdx ; ret', 'sub rbx, rcx ; ret', 'adc rax, rdx ; ret']

@@ -16,14 +16,17 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
+import re
 import yaml
 import glob
-import __main__
- 
+import capstone
+
 import rop3.parser as parser
 import rop3.operation as operation
 
 from rop3.arch import arch_singleton
+
+_OP_KEY_RE = re.compile(r'^op\d+$')
 
 class YamlParser:
     def __init__(self):
@@ -70,46 +73,96 @@ class YamlParser:
         }
         return aliases.get(value, value)
 
+    def _arch_family(self) -> str:
+        ''' YAML architecture block key for the current architecture. '''
+        cs_arch = arch_singleton.arch.arch
+        if cs_arch == capstone.CS_ARCH_X86:
+            return 'x86'
+        if cs_arch in (capstone.CS_ARCH_ARM, getattr(capstone, 'CS_ARCH_ARM64', object())):
+            return 'arm'
+        if cs_arch == getattr(capstone, 'CS_ARCH_RISCV', object()):
+            return 'riscv'
+        return 'x86'
+
     def _parse_op(self, op, content):
-        # Composite operation logic
-        if (
-            isinstance(content, list)
-            and len(content) == 1
-            and isinstance(content[0], dict)
-            and 'compose' in content[0]
-        ):
-            steps = content[0]['compose']
-            # Resolve aliases in composite steps
-            resolved_steps = []
-            for step in steps:
-                resolved_step = dict(step)
-                for key in ('op1', 'op2'):
-                    if key in resolved_step:
-                        resolved_step[key] = self._resolve_alias(resolved_step[key])
-                resolved_steps.append(resolved_step)
-            return parser.CompositeOperation(op, resolved_steps)
+        '''
+        Parse an operation definition in the multi-architecture format:
 
+            <op>:
+              operands: N
+              dst: [opI, ...]
+              src: [opJ, ...]
+              <arch>:
+                - steps: [ {mnemonic|operation, op1, op2, ...}, ... ]
+        '''
+        if not isinstance(content, dict):
+            # Legacy list-format definition not yet migrated to the multi-arch
+            # schema: expose it as a known-but-empty operation so the loader
+            # keeps working while the rest are ported in a follow-up.
+            return operation.OperationDef(op)
 
-        # Normal operation
-        ret = operation.OperationTemplate(op)
-        for set_ in content:
-            s = operation.Set()
-            for item in set_:
-                if 'mnemonic' in item:
-                    i = operation.Instruction(item['mnemonic'])
-                    for operand in ('op1', 'op2'):
-                        if operand in item:
-                            current_op = item[operand]
-                            if isinstance(current_op, dict):
-                                raise NotImplementedError
-                            else:
-                                # Resolve aliases if necessary
-                                i.add(operation.Operand(self._resolve_alias(item[operand])))
-                elif 'operation' in item:
-                    i = item
-                s.add(i)
+        defn = operation.OperationDef(
+            op,
+            operands=content.get('operands', 0),
+            dst_roles=content.get('dst') or [],
+            src_roles=content.get('src') or [],
+        )
 
-            ret.add(s)
+        arch_block = content.get(self._arch_family())
+        if isinstance(arch_block, dict):
+            # Availability marker instead of a realization list, e.g.
+            #   riscv:
+            #     available: false
+            #     reason: RISC-V has no condition/carry flags
+            if arch_block.get('available', True) is False:
+                defn.available = False
+                defn.unavailable_reason = arch_block.get('reason')
+        elif arch_block:
+            for entry in arch_block:
+                steps = entry.get('steps', []) if isinstance(entry, dict) else entry
+                defn.add(self._parse_realization(steps))
 
-        return ret
+        return defn
+
+    def _parse_realization(self, steps):
+        '''
+        Build a Realization. Each entry of `steps` is one chain link:
+
+          - a nested list of `mnemonic` steps  -> a single gadget whose
+            instructions must appear together (one Set);
+          - a single `mnemonic` step           -> a one-instruction gadget;
+          - an `operation` step                -> an OpRef (recurses into
+            another operation), replacing the old `compose:` mechanism.
+
+        Successive links are distinct gadgets in the chain. To place several
+        instructions in the *same* gadget, nest them in a list.
+        '''
+        real = operation.Realization()
+
+        for entry in steps:
+            if isinstance(entry, list):
+                s = operation.Set()
+                for step in entry:
+                    s.add(self._build_instruction(step))
+                real.add(s)
+            elif 'mnemonic' in entry:
+                s = operation.Set()
+                s.add(self._build_instruction(entry))
+                real.add(s)
+            elif 'operation' in entry:
+                bindings = {
+                    k: self._resolve_alias(v)
+                    for k, v in entry.items() if _OP_KEY_RE.match(k)
+                }
+                real.add(operation.OpRef(entry['operation'], bindings))
+
+        return real
+
+    def _build_instruction(self, step):
+        ins = operation.Instruction(step['mnemonic'])
+        op_keys = sorted((k for k in step if _OP_KEY_RE.match(k)),
+                         key=lambda k: int(k[2:]))
+        for key in op_keys:
+            ins.add(operation.Operand(self._resolve_alias(step[key])))
+        return ins
 
