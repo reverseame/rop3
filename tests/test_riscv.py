@@ -295,8 +295,6 @@ def _s(op, f3, rs1, rs2, imm):
     ('lc',  ['a0'],       _i(0x03, 3, 10, 2, 16)),          # ld a0,16(sp)
     ('ld',  ['a0', 'a1'], _i(0x03, 3, 10, 11, 0)),          # ld a0,0(a1)
     ('st',  ['a1', 'a0'], _s(0x23, 3, 11, 10, 0)),          # sd a0,0(a1) -> [a1]<-a0
-    ('spa', ['a0'],       _r(0x33, 0, 0x00, 2, 2, 10)),     # add sp,sp,a0
-    ('sps', ['a0'],       _r(0x33, 0, 0x20, 2, 2, 10)),     # sub sp,sp,a0
     # immediate forms: addi/andi/ori/xori reg, reg, #imm  ==  op(reg, #imm)
     ('add', ['a0', '8'],  _i(0x13, 0, 10, 10, 8)),          # addi a0,a0,8
     ('add', ['a0', '8'],  b'\x21\x05'),                     # c.addi a0,8
@@ -332,13 +330,16 @@ def test_riscv_jmp_is_a_stack_pivot(tmp_path):
     assert any('mv sp, a0' in t for t in texts)
 
 
-def test_riscv_roplang_skips_flag_and_relative_ops():
-    ''' Operations that do not translate to RISC-V expose no realizations. '''
+def test_riscv_roplang_skips_flag_ops():
+    ''' The carry/flag operations do not translate to RISC-V (no condition or
+        carry flags) and expose no realizations. jmp-rel is *not* in this set:
+        it reuses lc + spa, both of which RISC-V supports, so it stays a
+        realizable compound (see the cross-arch matrix). '''
     import rop3.parser as parser
     from rop3.arch import arch_singleton
     arch_singleton.reset()
     arch_singleton.initialize(RISCV_Architecture())
-    for name in ('gcf-eqc', 'gcf-ltc', 'jmp-rel'):
+    for name in ('gcf-eqc', 'gcf-ltc'):
         assert parser.Parser().get_op(name).realizations == []
 
 

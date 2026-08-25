@@ -95,12 +95,6 @@ class YamlParser:
               <arch>:
                 - steps: [ {mnemonic|operation, op1, op2, ...}, ... ]
         '''
-        if not isinstance(content, dict):
-            # Legacy list-format definition not yet migrated to the multi-arch
-            # schema: expose it as a known-but-empty operation so the loader
-            # keeps working while the rest are ported in a follow-up.
-            return operation.OperationDef(op)
-
         defn = operation.OperationDef(
             op,
             operands=content.get('operands', 0),

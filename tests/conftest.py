@@ -179,41 +179,105 @@ def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
     return header + payload + b''.join(section_headers)
 
 
-# --- Minimal in-memory Mach-O (thin) builder ------------------------------
+# --- Minimal in-memory Mach-O (thin + fat) builder ------------------------
 
 MH_MAGIC_64 = 0xFEEDFACF
+FAT_MAGIC = 0xCAFEBABE
 LC_SEGMENT_64 = 0x19
+LC_SYMTAB = 0x2
 MH_EXECUTE = 2
 VM_PROT_READ = 0x1
 VM_PROT_EXECUTE = 0x4
 S_ATTR_SOME_INSTRUCTIONS = 0x400
+N_SECT = 0xe
+N_EXT = 0x1
 CPU_TYPE_X86_64 = 0x01000007
 CPU_TYPE_ARM64 = 0x0100000C
 
 
 def build_minimal_macho(cputype: int, text_bytes: bytes,
-                        text_addr: int = 0x100000000, cpusubtype: int = 0) -> bytes:
+                        text_addr: int = 0x100000000, cpusubtype: int = 0,
+                        symbols=None) -> bytes:
     '''
     Produce a tiny thin (non-fat) 64-bit Mach-O that macholib parses: a
     mach_header_64 and one LC_SEGMENT_64 (__TEXT) carrying a single executable
-    __text section. Enough to exercise architecture detection and
-    executable-section extraction without a committed binary.
+    __text section. With `symbols` (a list of (name, value)), it also emits an
+    LC_SYMTAB so symbol parsing can be exercised. Enough to exercise
+    architecture detection and executable/symbol extraction without a
+    committed binary.
     '''
+    symbols = symbols or []
     seg_fmt = '<II16sQQQQiiII'      # segment_command_64 (72 bytes)
     sec_fmt = '<16s16sQQIIIIIIII'   # section_64 (80 bytes)
-    cmdsize = struct.calcsize(seg_fmt) + struct.calcsize(sec_fmt)
-    text_off = 32 + cmdsize         # after header + load command
+    symtab_fmt = '<IIIIII'          # symtab_command (24 bytes)
+    nlist_fmt = '<IBBHQ'            # nlist_64 (16 bytes)
+
+    seg_cmdsize = struct.calcsize(seg_fmt) + struct.calcsize(sec_fmt)
+    has_syms = bool(symbols)
+    ncmds = 2 if has_syms else 1
+    sizeofcmds = seg_cmdsize + (struct.calcsize(symtab_fmt) if has_syms else 0)
+    text_off = 32 + sizeofcmds      # after header + load commands
+
+    # Symbol table (nlist_64 array) and its string table, laid out after __text.
+    strtab = b'\x00'
+    sym_entries = b''
+    for name, value in symbols:
+        n_strx = len(strtab)
+        strtab += name.encode() + b'\x00'
+        sym_entries += struct.pack(nlist_fmt, n_strx, N_SECT | N_EXT, 1, 0, value)
+    symoff = text_off + len(text_bytes)
+    stroff = symoff + len(sym_entries)
 
     header = struct.pack('<IiiIIIII', MH_MAGIC_64, cputype, cpusubtype,
-                         MH_EXECUTE, 1, cmdsize, 0, 0)
+                         MH_EXECUTE, ncmds, sizeofcmds, 0, 0)
     prot = VM_PROT_READ | VM_PROT_EXECUTE
-    segment = struct.pack(seg_fmt, LC_SEGMENT_64, cmdsize, b'__TEXT',
+    segment = struct.pack(seg_fmt, LC_SEGMENT_64, seg_cmdsize, b'__TEXT',
                           text_addr, len(text_bytes), text_off, len(text_bytes),
                           prot, prot, 1, 0)
     section = struct.pack(sec_fmt, b'__text', b'__TEXT', text_addr,
                           len(text_bytes), text_off, 2, 0, 0,
                           S_ATTR_SOME_INSTRUCTIONS, 0, 0, 0)
-    return header + segment + section + text_bytes
+    blob = header + segment + section
+    if has_syms:
+        blob += struct.pack(symtab_fmt, LC_SYMTAB, struct.calcsize(symtab_fmt),
+                            symoff, len(symbols), stroff, len(strtab))
+    blob += text_bytes
+    if has_syms:
+        blob += sym_entries + strtab
+    return blob
+
+
+def build_minimal_fat_macho(slices, align: int = 0x4000) -> bytes:
+    '''
+    Wrap several thin Mach-O slices into a fat (universal) binary that
+    macholib parses, so fat-only behaviour (default-slice pick, --arch
+    selection, absent-arch errors) can be tested without a committed macOS
+    binary. `slices` is a list of dicts forwarded to build_minimal_macho
+    (e.g. {'cputype': CPU_TYPE_X86_64, 'text_bytes': b'\\xc3'}); their order is
+    the file order the default-slice logic sees. The fat header is big-endian.
+    '''
+    fat_arch_fmt = '>iiIII'          # cputype, cpusubtype, offset, size, align
+    header_size = 8 + struct.calcsize(fat_arch_fmt) * len(slices)
+    align_log2 = align.bit_length() - 1
+
+    def roundup(x):
+        return (x + align - 1) & ~(align - 1)
+
+    arches, payload = [], b''
+    cursor = roundup(header_size)
+    for spec in slices:
+        thin = build_minimal_macho(**spec)
+        offset = cursor
+        payload += b'\x00' * (offset - (header_size + len(payload)))   # pad to offset
+        payload += thin
+        arches.append((spec['cputype'], spec.get('cpusubtype', 0),
+                       offset, len(thin), align_log2))
+        cursor = roundup(offset + len(thin))
+
+    out = struct.pack('>II', FAT_MAGIC, len(slices))
+    for cputype, cpusubtype, offset, size, al in arches:
+        out += struct.pack(fat_arch_fmt, cputype, cpusubtype, offset, size, al)
+    return out + payload
 
 
 # --- Minimal in-memory PE (PE32+) builder ---------------------------------

@@ -42,9 +42,9 @@ gcf-ltc:
         - operation: ltc
           op1: op2
           op2: op3
-        - operation: adc
+        - mnemonic: adc
           op1: op1
-          op1: REG10
+          op2: REG10
 
   riscv:
     available: false

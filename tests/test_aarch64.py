@@ -189,8 +189,6 @@ def _aarch64_op_matches(op, operands, body):
     ('ld',  ['x0', 'x1'], bytes.fromhex('200040f9')),   # ldr x0, [x1]
     ('st',  ['x0', 'x1'], bytes.fromhex('010000f9')),   # str x1, [x0] -> [x0]<-x1
     ('lc',  ['x0'],       bytes.fromhex('e00340f9')),   # ldr x0, [sp]
-    ('spa', ['x0'],       bytes.fromhex('ff63208b')),   # add sp, sp, x0
-    ('sps', ['x0'],       bytes.fromhex('ff6320cb')),   # sub sp, sp, x0
     ('sc',  ['x0'], bytes.fromhex('e00300f9')),        # str x0, [sp] (direct stack store)
 ])
 def test_aarch64_roplang_patterns_match(op, operands, body):

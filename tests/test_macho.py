@@ -15,8 +15,6 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import os
-
 import capstone
 import pytest
 
@@ -26,7 +24,8 @@ from rop3 import Rop3
 from rop3.archs.x86_arch import X64_Architecture
 from rop3.archs.aarch64_arch import AArch64_Architecture
 
-from conftest import build_minimal_macho, CPU_TYPE_ARM64, CPU_TYPE_X86_64
+from conftest import (build_minimal_macho, build_minimal_fat_macho,
+                      CPU_TYPE_ARM64, CPU_TYPE_X86_64)
 
 RET_ARM = bytes.fromhex('c0035fd6')          # ret
 LDP_FRAME = bytes.fromhex('fd7bc1a8')         # ldp x29, x30, [sp], #16
@@ -85,50 +84,52 @@ def test_inmemory_arm64_end_to_end_framed_gadget(tmp_path):
     assert 'ret' not in reprs                                  # bare ret dropped
 
 
-# --- Real fat Mach-O (macOS /bin/ls: x86_64 + arm64e) ---------------------
+# --- Synthetic fat Mach-O (x86_64 + arm64, no committed binary) -----------
+# A real macOS universal binary (e.g. /bin/ls: x86_64 + arm64e) is not
+# available on the CI hosts, so fat-only behaviour is exercised against an
+# in-memory fat header wrapping two thin slices, mirroring that layout: an
+# x86_64 slice first (so it is the default pick) and an arm64 slice second.
 
-FAT = '/bin/ls'
-requires_fat = pytest.mark.skipif(
-    not os.path.exists(FAT) or open(FAT, 'rb').read(4) != b'\xca\xfe\xba\xbe',
-    reason='requires a fat Mach-O binary (macOS /bin/ls)')
+def _fat():
+    return build_minimal_fat_macho([
+        {'cputype': CPU_TYPE_X86_64, 'text_bytes': b'\xc3\xc3',
+         'symbols': [('_main', 0x100000f00)]},
+        {'cputype': CPU_TYPE_ARM64, 'text_bytes': RET_ARM * 2},
+    ])
 
 
-def _data():
-    with open(FAT, 'rb') as f:
-        return f.read()
+def test_fat_magic_is_universal():
+    # Sanity-check the synthetic wrapper really is a fat binary (FAT_MAGIC).
+    assert _fat()[:4] == b'\xca\xfe\xba\xbe'
 
 
-@requires_fat
 def test_default_slice_is_x86_64():
-    assert isinstance(machomod.MachO(_data(), None).get_arch(), X64_Architecture)
+    assert isinstance(machomod.MachO(_fat(), None).get_arch(), X64_Architecture)
 
 
-@requires_fat
 def test_explicit_arch_x86_64():
-    assert isinstance(machomod.MachO(_data(), None, 'x86_64').get_arch(), X64_Architecture)
+    assert isinstance(machomod.MachO(_fat(), None, 'x86_64').get_arch(), X64_Architecture)
 
 
-@requires_fat
+@_arm64
 def test_explicit_arch_arm64_selects_aarch64():
-    # /bin/ls ships an arm64e slice; it shares the ARM64 cputype, so --arch
-    # arm64 selects it now that AArch64 is supported.
-    assert isinstance(machomod.MachO(_data(), None, 'arm64').get_arch(), AArch64_Architecture)
+    # The arm64 slice shares the ARM64 cputype with arm64e, so --arch arm64
+    # selects it now that AArch64 is supported.
+    assert isinstance(machomod.MachO(_fat(), None, 'arm64').get_arch(), AArch64_Architecture)
 
 
-@requires_fat
 def test_unsupported_arch_raises():
     with pytest.raises(binary.BinaryException):
-        machomod.MachO(_data(), None, 'ppc')       # not a supported arch name
+        machomod.MachO(_fat(), None, 'ppc')        # not a supported arch name
 
 
-@requires_fat
 def test_absent_arch_raises():
     with pytest.raises(binary.BinaryException):
-        machomod.MachO(_data(), None, 'i386')      # supported but not present in /bin/ls
+        machomod.MachO(_fat(), None, 'i386')       # supported but not present in binary
 
 
-@requires_fat
 def test_get_symbols_returns_list():
-    syms = machomod.MachO(_data(), None).get_symbols()
+    syms = machomod.MachO(_fat(), None).get_symbols()
     assert isinstance(syms, list)
     assert all(isinstance(a, int) and isinstance(n, str) for a, n in syms)
+    assert ('_main', 0x100000f00) in {(n, a) for a, n in syms}

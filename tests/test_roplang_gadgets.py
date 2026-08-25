@@ -277,6 +277,89 @@ def test_every_roplang_op_is_covered(arch_id):
         assert defn.unavailable_reason
 
 
+# --- Compound operations: the whole reuse chain is realizable -----------------
+#
+# A compound operation (spa, sps, gsp, jmp, jmp-rel, lsd, eqc, ltc, gcf-*) is
+# not a single gadget: it reuses one or more other operations via `operation:`
+# steps (OpRef links). It can therefore never be found by the single-gadget
+# path exercised above, so instead of searching for one gadget we verify that
+# every operation it references exists, is available on this architecture, and
+# -- followed transitively -- bottoms out in real, single-gadget primitives.
+
+def _op_refs(defn):
+    ''' Every OpRef (reused-operation step) across a definition's realizations. '''
+    return [link for real in defn.realizations for link in real.links
+            if isinstance(link, operation.OpRef)]
+
+
+def _is_compound(defn):
+    ''' A compound operation reuses at least one other operation, so it can
+        never be realized by a single gadget. '''
+    return bool(_op_refs(defn))
+
+
+@pytest.mark.parametrize('arch_id', ARCH_CASES)
+def test_compound_ops_resolve_to_available_primitives(arch_id):
+    ''' Counterpart to test_primitive_operation_is_found_as_gadget: for every
+        compound operation available on this architecture, walk its reuse chain
+        and assert each referenced operation is available and eventually reduces
+        to single-gadget primitives (no dangling reference, no cycle, no reuse
+        of an operation that is unavailable here). '''
+    spec = ARCH_BY_ID[arch_id]
+    spec.initialize()
+    p = parser.Parser()
+    by_name = {defn.name: defn for defn in p.get_ops()}
+
+    compounds = sorted(name for name, defn in by_name.items()
+                       if _is_compound(defn) and defn.available)
+    assert compounds, f'no compound operations discovered on {arch_id}'
+
+    def resolve(name, chain):
+        assert name in by_name, f'{chain[-1]} reuses unknown operation {name}'
+        assert name not in chain, f'reuse cycle on {arch_id}: {" -> ".join(chain + [name])}'
+        sub = by_name[name]
+        assert sub.available, \
+            f'{chain[0]} on {arch_id} reuses unavailable operation {name}'
+        assert sub.realizations, f'{name} has no realization on {arch_id}'
+        for ref in _op_refs(sub):
+            resolve(ref.name, chain + [name])
+
+    for name in compounds:
+        defn = by_name[name]
+        assert defn.realizations, f'{name} has no realization on {arch_id}'
+        # A compound must reduce to primitives; assert every leaf of the reuse
+        # tree is a real single-gadget op (the recursion also catches cycles).
+        for ref in _op_refs(defn):
+            resolve(ref.name, [name])
+        assert any(not r.is_single_gadget for r in defn.realizations), \
+            f'{name} is classified compound but has only single-gadget realizations'
+
+
+def test_primitive_tables_list_only_single_gadget_ops():
+    ''' Regression guard for the split the two matrix halves rely on: an op in a
+        hand-written primitive table must be a genuine single-gadget op and
+        never a reuse-based compound -- so it belongs in the gadget-finding test,
+        not the compound test. spa/sps in particular are compounds (they reuse
+        add/sub on the stack pointer) and must stay out of the primitive tables,
+        which is exactly why they were removed from the per-arch pattern tests. '''
+    for spec in ARCHES:
+        if spec.skip:
+            continue
+        spec.initialize()
+        by_name = {d.name: d for d in parser.Parser().get_ops()}
+        for op in spec.primitives:
+            defn = by_name[op]
+            assert defn.available, f'{op} unavailable on {spec.id}'
+            assert not _is_compound(defn), \
+                f'{op} is a compound; drop it from the {spec.id} primitive table'
+            assert any(r.is_single_gadget for r in defn.realizations), \
+                f'{op} has no single-gadget realization on {spec.id}'
+        for op in ('spa', 'sps'):
+            assert op not in spec.primitives, \
+                f'{op} is a compound; it must not be in the {spec.id} primitive table'
+            assert _is_compound(by_name[op]), f'{op} should be compound on {spec.id}'
+
+
 def test_matrix_covers_all_architectures():
     ''' The matrix must span every architecture rop3 implements. '''
     assert {spec.id for spec in ARCHES} == {'x86', 'x64', 'aarch64', 'riscv'}
