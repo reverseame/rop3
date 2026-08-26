@@ -307,15 +307,15 @@ class Tree:
 
         def backtrack(index: int, current: dict[str, str]) -> None:
             if index == len(items):
-                if self._check_pairs(current, op_pairs):
-                    results.append(current.copy())
+                results.append(current.copy())
                 return
 
             key, possible_values = items[index]
 
             for val in possible_values:
                 current[key] = val
-                backtrack(index + 1, current)
+                if self._check_pairs(current, op_pairs):
+                    backtrack(index + 1, current)
                 del current[key]
 
         backtrack(0, {})
