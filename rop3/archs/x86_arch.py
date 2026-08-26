@@ -170,6 +170,10 @@ class X86_Architecture(Architecture):
     def bp(self) -> str:
         return 'ebp'
 
+    @property
+    def flags(self) -> str:
+        return 'eflags'
+
     def first_insn_has_complex_mem(self, decodes) -> bool:
         first = decodes[0]
         for op in first.operands:
@@ -222,6 +226,10 @@ class X64_Architecture(X86_Architecture):
     @property
     def bp(self) -> str:
         return 'rbp'
+
+    @property
+    def flags(self) -> str:
+        return 'rflags'
 
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """

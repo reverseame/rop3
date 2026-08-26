@@ -189,6 +189,10 @@ def _inline_operation_def(set_):
     operation with positional operands op1, op2, ...: operand 0 is the
     destination, all operands count as sources (accumulator-safe). Its operands
     are renamed to op1/op2/... so it matches like any other 2-operand primitive.
+
+    A Set may also declare extra implicit registers via `extra_writes` /
+    `extra_reads` (concrete names such as 'rflags').
+
     Returns (defn, original_names), the original operand names in position order.
     '''
     names = _operand_names(set_)
@@ -196,8 +200,10 @@ def _inline_operation_def(set_):
     positional = list(rename.values())
     renamed = set_.renamed(rename)
     mnemonic = renamed.items[0].mnemonic if renamed.items else 'inline'
+    dst_roles = positional[:1] + list(getattr(set_, 'extra_writes', None) or [])
+    src_roles = positional + list(getattr(set_, 'extra_reads', None) or [])
     defn = OperationDef(mnemonic, operands=len(positional),
-                        dst_roles=positional[:1], src_roles=positional)
+                        dst_roles=dst_roles, src_roles=src_roles)
     real = Realization()
     real.add(renamed)
     defn.add(real)
@@ -319,6 +325,8 @@ class Set:
     ''' A gadget-pattern: consecutive instructions matched within one gadget. '''
     def __init__(self):
         self.items = []
+        self.extra_writes: list = []
+        self.extra_reads: list = []
 
     def __str__(self):
         return ' ; '.join(str(item) for item in self.items)

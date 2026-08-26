@@ -8,43 +8,51 @@ gcf-ltc:
     - steps:
         - operation: lc
           op1: REG10
-        - operation: ltc
+        - mnemonic: sub
           op1: op2
           op2: op3
+          writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
           op2: REG10
+          reads: [REG_FLAGS]
     - steps:
         - operation: lc
           op1: REG10
-        - operation: ltc
+        - mnemonic: sub
           op1: op2
           op2: op3
+          writes: [REG_FLAGS]
         - mnemonic: sbb
           op1: op1
           op2: REG10
-        - operation: neg
+          reads: [REG_FLAGS]
+        - mnemonic: neg
           op1: op1
     - steps:
         - operation: lc
           op1: op1
-        - operation: ltc
+        - mnemonic: sub
           op1: op2
           op2: op3
+          writes: [REG_FLAGS]
         - mnemonic: rcl
           op1: op1
           op2: 1
+          reads: [REG_FLAGS]
 
   arm:
     - steps:
         - operation: lc
           op1: REG10
-        - operation: ltc
+        - mnemonic: sub
           op1: op2
           op2: op3
+          writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
           op2: REG10
+          reads: [REG_FLAGS]
 
   riscv:
     available: false

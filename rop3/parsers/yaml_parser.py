@@ -70,8 +70,17 @@ class YamlParser:
         aliases = {
             'REG_SP': arch.sp,
             'REG_BP': arch.bp,
+            'REG_FLAGS': arch.flags,
         }
         return aliases.get(value, value)
+
+    def _resolve_roles(self, roles):
+        ''' Resolve a dst/src role list, mapping arch-independent register
+            aliases (REG_FLAGS, REG_SP, REG_BP) to concrete register names while
+            leaving operand slots (op1, REG10, ...) untouched. '''
+        if not roles:
+            return []
+        return [self._resolve_alias(r) for r in roles]
 
     def _arch_family(self) -> str:
         ''' YAML architecture block key for the current architecture. '''
@@ -98,8 +107,8 @@ class YamlParser:
         defn = operation.OperationDef(
             op,
             operands=content.get('operands', 0),
-            dst_roles=content.get('dst') or [],
-            src_roles=content.get('src') or [],
+            dst_roles=self._resolve_roles(content.get('dst')),
+            src_roles=self._resolve_roles(content.get('src')),
         )
 
         arch_block = content.get(self._arch_family())
@@ -142,6 +151,8 @@ class YamlParser:
             elif 'mnemonic' in entry:
                 s = operation.Set()
                 s.add(self._build_instruction(entry))
+                s.extra_writes = self._resolve_roles(entry.get('writes'))
+                s.extra_reads = self._resolve_roles(entry.get('reads'))
                 real.add(s)
             elif 'operation' in entry:
                 bindings = {

@@ -1,7 +1,7 @@
-# Less-than comparison: op1 <- op1 - op2
+# Less-than comparison: flags <- (op1 - op2)
 ltc:
   operands: 2
-  dst: [op1]
+  dst: [REG_FLAGS]
   src: [op1, op2]
 
   x86:

@@ -264,6 +264,25 @@ def test_search_compound_op_gcf_eqc(x64):
     ]
 
 
+def test_gcf_ltc_rejects_flag_clobbering_comparison(x64):
+    '''
+    The carry flag the final adc/sbb/rcl consumes is produced by the comparison
+    (an inlined `sub`, which now `writes: [REG_FLAGS]`). A comparison gadget
+    that overwrites the flags before its `ret` (here a trailing `test`) is
+    contradictory -- its carry never reaches the consumer -- so with only such a
+    `sub` available, gcf-ltc must not assemble.
+    '''
+    gadgets = [
+        make_gadget(b'\x5a\xc3', 0x10),                       # pop rdx ; ret
+        # sub rbx, rcx ; test rdx, rdx ; ret  -- `test` clobbers the flags
+        make_gadget(b'\x48\x29\xcb\x48\x85\xd2\xc3', 0x20),
+        make_gadget(b'\x48\x11\xd0\xc3', 0x40),               # adc rax, rdx ; ret
+    ]
+    step = {'op': 'gcf-ltc', 'op1': None, 'op2': None, 'data': 'gcf-ltc()'}
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(gadgets, [step]))
+
+
 def test_search_compound_op_with_generic_operands(x64):
     '''
     Regression: searching a multi-operand compound with no operands must treat

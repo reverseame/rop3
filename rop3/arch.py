@@ -264,6 +264,15 @@ class Architecture(ABC):
     def bp(self) -> str:
         pass
 
+    @property
+    def flags(self) -> str | None:
+        """
+        Name of the architecture's condition/flags register, spelled as capstone
+        reports it (e.g. x86-64 'rflags', x86-32 'eflags', AArch64 'nzcv'), or
+        None when the architecture has no flags register (RISC-V).
+        """
+        return None
+
     def normalize_reg(self, name: str | int) -> str:
         """
         Standard instance method. Base implementation just returns the name,

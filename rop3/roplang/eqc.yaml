@@ -1,7 +1,7 @@
 # Equal comparison: flag <- (op1 == op2)
 eqc:
   operands: 2
-  dst: [op1]
+  dst: [REG_FLAGS]
   src: [op1, op2]
 
   x86:

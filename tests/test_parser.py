@@ -45,6 +45,21 @@ def test_operation_metadata_parsed(x64):
     assert add.src_roles == ['op1', 'op2']
 
 
+def test_ltc_eqc_declare_flags_destination(x64):
+    ''' A comparison writes the flags register, not a general register: ltc/eqc
+        declare dst=[rflags], src=[op1, op2]. The arch-independent REG_FLAGS
+        alias resolves to the concrete flags register (rflags on x64). '''
+    for name in ('ltc', 'eqc'):
+        defn = parser.Parser().get_op(name)
+        assert defn.dst_roles == ['rflags'], name
+        assert defn.src_roles == ['op1', 'op2'], name
+
+
+def test_reg_flags_resolves_per_arch_x86(x86):
+    ''' On 32-bit x86 the flags register capstone reports is eflags. '''
+    assert parser.Parser().get_op('ltc').dst_roles == ['eflags']
+
+
 def test_compound_op_has_operation_ref(x64):
     ''' eqc is a compound operation: a realization made of operation refs
         (replacing the old `compose:` mechanism). '''

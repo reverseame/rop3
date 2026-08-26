@@ -161,6 +161,10 @@ class AArch64_Architecture(Architecture):
     def bp(self) -> str:
         return 'x29'
 
+    @property
+    def flags(self) -> str:
+        return 'nzcv'
+
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         return str(name) in REGS
 
