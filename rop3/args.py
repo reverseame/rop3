@@ -52,6 +52,10 @@ class ArgumentParser:
         self.argparser.add_argument('--tuple', action='store_true', default=False, help='print each gadget as the tuple <op_name, op1[, op2], written registers, read registers> (overrides --output text)')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--operands', type=str, metavar='<reg>', nargs='+', help='operation operands, positionally (op1 op2 op3 ...); e.g. --op mov --operands rdi rax')
+        # LEGACY
+        self.argparser.add_argument('--dst', type=str, metavar='<reg>', default=None, help='[legacy] destination operand; maps to op1 on its own, or op1 when --src is also given. Prefer --operands')
+        # LEGACY
+        self.argparser.add_argument('--src', type=str, metavar='<reg>', default=None, help='[legacy] source operand; maps to op1 on its own, or op2 when --dst is also given. Prefer --operands')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
         self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
@@ -65,7 +69,31 @@ class ArgumentParser:
         self._check_args(args)
 
         args = self._convert_flags(args)
+        args = self._convert_operands(args)
         args = self._convert_base(args)
+
+        return args
+
+    def _convert_operands(self, args):
+        '''
+        LEGACY: --dst/--src predate the positional --operands. A lone --dst or
+        --src maps to op1; giving both maps --dst to op1 and --src to op2. Kept
+        for backward compatibility only -- prefer --operands.
+        '''
+        dst = getattr(args, 'dst', None)
+        src = getattr(args, 'src', None)
+        if dst is None and src is None:
+            return args
+
+        debug.warning('--dst/--src are legacy; use --operands (positional: op1 op2 ...) instead')
+
+        if args.operands:
+            debug.error('--dst/--src cannot be combined with --operands')
+
+        if dst is not None and src is not None:
+            args.operands = [dst, src]
+        else:
+            args.operands = [dst if dst is not None else src]
 
         return args
 

@@ -197,8 +197,8 @@ class RopChain:
             if match:
                 op_name = match.group('OP')
                 args = match.group('ARGS').strip()
-                operands = [a.strip() for a in args.split(',')] if args else []
-                operands = [a for a in operands if a]
+                raw = [a.strip() for a in args.split(',')] if args else []
+                operands = self._strip_legacy_commas(op_name, raw)
                 ret.append({
                     'data': match.group(0),
                     'op': op_name,
@@ -210,6 +210,27 @@ class RopChain:
                 debug.error(f'{ropfile}: Line {i}: {line}: Unable to parse operation')
 
         return ret
+
+    @staticmethod
+    def _strip_legacy_commas(op_name: str, raw: list[str]) -> list[str]:
+        '''
+        LEGACY: older ROPLang files used a comma's position to mark an operand's
+        role -- a comma *after* the first operand separated dst from src
+        (`op(dst, src)`), and a lone source could be written with a comma
+        *before* it (`op(, src)`) to push it into the src slot. Operands are now
+        purely positional (op1, op2, ...) and a lone operand is always op1, so
+        the empty slot such a comma produces is dropped. A comma before the
+        first operand is explicitly ignored -- it never shifts the operand into
+        op2 -- and warns. Kept only for backward compatibility.
+        '''
+        if raw and raw[0] == '':
+            debug.warning(f'{op_name}: a comma before the first operand is a legacy '
+                          f'dst/src marker; it is ignored (operands are positional: '
+                          f'op1, op2, ...)')
+        elif '' in raw:
+            debug.warning(f'{op_name}: an empty operand from a legacy dst/src comma '
+                          f'is ignored (operands are positional: op1, op2, ...)')
+        return [a for a in raw if a]
 
 
 class Tree:
