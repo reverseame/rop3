@@ -11,7 +11,6 @@ gcf-eqc:
         - mnemonic: sub
           op1: op2
           op2: op3
-          writes: [REG_FLAGS]
         - mnemonic: neg
           op1: op2
           writes: [REG_FLAGS]
@@ -25,7 +24,6 @@ gcf-eqc:
         - mnemonic: sub
           op1: op2
           op2: op3
-          writes: [REG_FLAGS]
         - mnemonic: neg
           op1: op2
           writes: [REG_FLAGS]
@@ -41,7 +39,6 @@ gcf-eqc:
         - mnemonic: sub
           op1: op2
           op2: op3
-          writes: [REG_FLAGS]
         - mnemonic: neg
           op1: op2
           writes: [REG_FLAGS]
@@ -57,7 +54,6 @@ gcf-eqc:
         - mnemonic: sub
           op1: op2
           op2: op3
-          writes: [REG_FLAGS]
         - mnemonic: neg
           op1: op2
           writes: [REG_FLAGS]
