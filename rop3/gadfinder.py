@@ -20,6 +20,7 @@ import math
 import bisect
 import capstone
 import multiprocessing
+from itertools import product, count
 
 from rop3.cache import GadgetCache
 import rop3.utils as utils
@@ -56,6 +57,11 @@ UNFRAMED = 1024
     0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
     terminators for gets() and alike) and 0xff (EOF). See issue #5. '''
 CANARY_BYTES = (0x00, 0x0a, 0x0d, 0xff)
+
+# Base for the fresh generic register slots that stand in for an operation's
+# unbound operands (see GadFinder.bind_step). Kept far above any REGn a ROPLang
+# definition uses so the two never collide.
+_FRESH_SLOT_BASE = 9000000
 
 class GadFinder:
     '''
@@ -176,8 +182,132 @@ class GadFinder:
                 return []
 
         # Operands are positional: op1, op2, op3, ...
+        return self.match_operation(gadgets, op, operands,
+                                    reject_clobbered=not self._keep_contradictory())
+
+    # --- ROP-chain classification -----------------------------------------
+    #
+    # ropchain.py hands over the parsed request ([{op, operands}]) and assembles
+    # chains from the classified gadget lists alone. Binding, expansion and
+    # matching (and the operation.py / arch_singleton knowledge they need) all
+    # happen here, so the assembler never touches the raw gadget list or an
+    # operation definition.
+
+    def classify_ropchain(self, gadgets, steps):
+        '''
+        Resolve a parsed ROP-chain request into the gadgets that realize it.
+
+        `steps` is the parsed request: a list of {'op', 'operands', 'data'}
+        dicts. Each step is bound and expanded into its alternative primitive
+        chains (a compound operation has several); the cartesian product across
+        steps enumerates the candidate realizations, and every 2-operand
+        primitive of a realization is matched against `gadgets`.
+
+        Returns a list of realizations, each a list of (primitive_step, gadgets)
+        pairs -- the per-step classified gadgets the assembler consumes.
+        Realizations in which some primitive matches no gadget are dropped.
+        '''
+        fresh = count()   # source of fresh generic slots for unbound operands
+        per_step_alternatives = []
+        for step in steps:
+            binding = self.bind_step(step, fresh)
+            alternatives = self.expand_operation(step['op'], binding)
+            if not alternatives:
+                from rop3.ropchain import RopChainNotFound
+                raise RopChainNotFound(
+                    f'{step.get("data", step["op"])}: no realization for operation')
+            per_step_alternatives.append(alternatives)
+
+        realizations = []
+        for combo in product(*per_step_alternatives):
+            primitives = [prim for chain in combo for prim in chain]
+            bundle = self._match_primitives(gadgets, primitives)
+            if bundle is not None:
+                realizations.append(bundle)
+        return realizations
+
+    def _match_primitives(self, gadgets, primitives):
+        ''' Match each primitive step against `gadgets`, returning a list of
+            (step, gadgets) pairs. None if any primitive matches no gadget (the
+            realization is infeasible and is skipped). '''
+        bundle = []
+        for prim in primitives:
+            operands = [self._resolve_operand(prim.get('op1')),
+                        self._resolve_operand(prim.get('op2'))]
+            gads = self.match_operation(gadgets, prim['defn'], operands)
+            if not gads:
+                debug.info(f'{prim["data"]}: no matching gadgets')
+                return None
+            debug.info(f'{prim["data"]}: {len(gads)} matching gadgets')
+            bundle.append((prim, gads))
+        return bundle
+
+    def _resolve_operand(self, val):
+        ''' Map a primitive operand to a match value: REG_SP/REG_BP -> the arch
+            pointer register, a generic REGn slot -> None (matches any register),
+            anything else -> itself. '''
+        if val is None:
+            return None
+        aliased = self.resolve_reg_alias(val)   # REG_SP/REG_BP -> sp/bp
+        if aliased != val:
+            return aliased
+        if isinstance(val, str) and val.lower().startswith('reg'):
+            return None
+        return val
+
+    def match_operation(self, gadgets, op, operands, reject_clobbered=True):
+        ''' Gadgets realizing operation `op` (a name or an OperationDef) with the
+            given positional operands. The single entry point for operation
+            matching, keeping operation.py behind gadfinder. '''
         return operation.Operation(op, operands).filter_gadgets(
-            gadgets, reject_clobbered=not self._keep_contradictory())
+            gadgets, reject_clobbered=reject_clobbered)
+
+    def bind_step(self, step, fresh):
+        '''
+        Resolve a requested chain step's operands to values, so a compound
+        operation can be searched as a single operation with unbound (None)
+        operands. Operands the user gave (positionally: an `operands` list or the
+        op1/op2 keys) become concrete registers; any unbound operand becomes a
+        fresh generic register slot drawn from `fresh` (a shared counter). So the
+        expanded steps -- and thus ropchain construction -- only ever contain
+        concrete registers and generic (REGn) slots, never the operation's opN
+        names, regardless of how many operands it has.
+
+        Raises parser.ParserException if the operation is undefined.
+        '''
+        defn = parser.Parser().get_op(step['op'])
+        operands = step.get('operands')
+        if operands is None:
+            operands = [step.get('op1'), step.get('op2')]
+        binding = {}
+        for i in range(defn.operands):
+            value = operands[i] if i < len(operands) else None
+            if value is None:
+                value = f'REG{_FRESH_SLOT_BASE + next(fresh)}'
+            binding[f'op{i + 1}'] = value
+        return binding
+
+    def expand_operation(self, op, binding):
+        ''' Flatten a ROPLang operation into its alternative 2-operand primitive
+            step chains (see operation.expand_steps). An undefined operation
+            surfaces as RopChainNotFound, the assembler's own error type. '''
+        from rop3.ropchain import RopChainNotFound
+        try:
+            return operation.expand_steps(op, binding)
+        except parser.ParserException as exc:
+            raise RopChainNotFound(str(exc))
+
+    def is_abstract_reg(self, reg):
+        ''' Whether `reg` may fill an abstract operand slot (a canonical-width
+            register for the scanned architecture). '''
+        return arch_singleton.arch.is_valid_abstract_reg(reg)
+
+    def resolve_reg_alias(self, name):
+        ''' Map the ROPLang stack/base-pointer aliases (REG_SP/REG_BP) to the
+            architecture's concrete pointer registers; any other name passes
+            through unchanged. '''
+        arch = arch_singleton.arch
+        return {'REG_SP': arch.sp, 'REG_BP': arch.bp}.get(name, name)
 
     def _search_gadgets(self, binary, badchars, badchar_bytes=None, symbol_table=None):
         '''
@@ -329,7 +459,7 @@ class GadFinder:
         if self._rop():
             ret.extend(arch.get_rop_terminations(include_ret_imm=ret_imm))
         if self._retf():
-            ret.extend(arch.get_rop_terminations(include_extra=True, include_ret_imm=ret_imm))
+            ret.extend(arch.get_rop_terminations(include_retf=True, include_ret_imm=ret_imm))
         if self._jop():
             ret.extend(arch.get_jop_terminations())
 
@@ -381,7 +511,7 @@ class GadFinder:
         if self._rop():
             ret |= arch.is_valid_rop_gadget(decodes, allow_undeterministic=allow_undeterministic, allow_ret_imm=allow_ret_imm)
         if self._retf():
-            ret |= arch.is_valid_rop_gadget(decodes, include_extra=True, allow_undeterministic=allow_undeterministic, allow_ret_imm=allow_ret_imm)
+            ret |= arch.is_valid_rop_gadget(decodes, include_retf=True, allow_undeterministic=allow_undeterministic, allow_ret_imm=allow_ret_imm)
         if not ret and self._jop():
             ret |= arch.is_valid_jop_gadget(decodes, allow_undeterministic=allow_undeterministic)
 

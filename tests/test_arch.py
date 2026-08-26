@@ -94,6 +94,31 @@ def test_rop_terminations_exclude_ret_imm_by_default():
     assert any(t['size'] == 3 for t in arch.get_rop_terminations(include_ret_imm=True))
 
 
+def test_x86_retf_terminator_only_with_include_retf():
+    ''' retf is recognized as a ROP terminator only when far-return gadgets are
+        requested (the x86-only include_retf option); plain ret always is. '''
+    arch = X64_Architecture()
+    assert 'ret' in arch._rop_terminations()
+    assert 'retf' not in arch._rop_terminations()
+    assert 'retf' in arch._rop_terminations(include_retf=True)
+
+
+def test_include_retf_adds_retf_termination():
+    arch = X64_Architecture()
+    without = arch.get_rop_terminations()
+    with_retf = arch.get_rop_terminations(include_retf=True)
+    assert b'\xcb' in {t['bytes'] for t in with_retf}   # retf byte present
+    assert b'\xcb' not in {t['bytes'] for t in without}
+
+
+def test_is_valid_rop_gadget_retf_gating():
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
+    arch = X64_Architecture()
+    retf = list(md.disasm(b'\x58\xcb', 0))              # pop rax ; retf
+    assert not arch.is_valid_rop_gadget(retf)           # retf is not a plain ret
+    assert arch.is_valid_rop_gadget(retf, include_retf=True)
+
+
 def test_is_valid_rop_gadget_ret_imm_gating():
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
     arch = X64_Architecture()

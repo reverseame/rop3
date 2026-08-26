@@ -27,6 +27,16 @@ TEXT = b'\x58\xc3'   # pop rax ; ret
 SYMS = [('funcA', 0x1000), ('funcB', 0x1100)]
 
 
+def test_retf_gadgets_x86_gated_by_flag(tmp_path):
+    ''' `retf` gadgets are only searched when retf=True; on x86 the flag is
+        accepted (unlike non-x86, where it raises). '''
+    from rop3 import Rop3
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, b'\x58\xcb', 0x1000, ET_DYN))  # pop rax ; retf
+    assert not any('retf' in g.text_repr for g in Rop3(str(path)).gadgets())
+    assert any('retf' in g.text_repr for g in Rop3(str(path), retf=True).gadgets())
+
+
 def test_elf_detects_x64():
     data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN)
     assert isinstance(elfmod.ELF(data, None).get_arch(), X64_Architecture)

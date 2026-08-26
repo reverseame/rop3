@@ -18,6 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import re
 import copy
 import dataclasses
+from itertools import product
 
 from rop3.arch import arch_singleton
 
@@ -149,6 +150,125 @@ class Operation:
         matched.disp_op2 = self._as_operand('op2', binds)
         matched.calculate_side_effects()
         return matched
+
+
+# --- Operation expansion --------------------------------------------------
+#
+# Operations are *defined* with N named operands (opN), but a ROP chain is
+# *constructed* only from 2-operand primitives. `expand_steps` resolves an
+# operation into a flat list of 2-operand primitive steps:
+#
+#   - a "primitive" operation (all realizations are single gadgets) becomes one
+#     step referencing that operation; its alternative single-gadget
+#     realizations are resolved later by Operation.filter_gadgets;
+#   - a "compound" operation is flattened by walking its realization's links,
+#     recursing into operation references and emitting inline raw-gadget links
+#     (e.g. the `leave`/`adc` mnemonics) as synthetic single-gadget primitives.
+#
+# It lives here (not in ropchain.py) because it works entirely on the operation
+# definition structures above; the assembler reaches it via GadFinder.
+
+def _is_primitive(defn) -> bool:
+    return bool(defn.realizations) and all(r.is_single_gadget for r in defn.realizations)
+
+
+def _operand_names(set_) -> list:
+    ''' Abstract operand names appearing in a gadget-pattern, in order. '''
+    names = []
+    for ins in set_.items:
+        for op in ins.operands:
+            if op.abstract and op.reg not in names:
+                names.append(op.reg)
+    return names
+
+
+def _inline_operation_def(set_):
+    '''
+    Wrap an inline raw-gadget link (a Set of mnemonics used directly inside a
+    compound, e.g. `leave` or `adc op1, REG1`) as a synthetic single-gadget
+    operation with positional operands op1, op2, ...: operand 0 is the
+    destination, all operands count as sources (accumulator-safe). Its operands
+    are renamed to op1/op2/... so it matches like any other 2-operand primitive.
+    Returns (defn, original_names), the original operand names in position order.
+    '''
+    names = _operand_names(set_)
+    rename = {orig: f'op{i + 1}' for i, orig in enumerate(names)}
+    positional = list(rename.values())
+    renamed = set_.renamed(rename)
+    mnemonic = renamed.items[0].mnemonic if renamed.items else 'inline'
+    defn = OperationDef(mnemonic, operands=len(positional),
+                        dst_roles=positional[:1], src_roles=positional)
+    real = Realization()
+    real.add(renamed)
+    defn.add(real)
+    return defn, names
+
+
+def _primary_operands(defn, binding):
+    ''' The two operand-slot values of a primitive under `binding`: the primary
+        destination operand (op1) and the primary non-accumulator source operand
+        (op2). Unbound operands are None (matches any register). '''
+    op1 = binding.get(defn.dst_roles[0]) if defn.dst_roles else None
+    op2_name = next((r for r in defn.src_roles if r not in defn.dst_roles), None)
+    op2 = binding.get(op2_name) if op2_name is not None else None
+    return op1, op2
+
+
+def _format(op, op1, op2) -> str:
+    inside = '' if op1 is None else str(op1)
+    if op2 is not None:
+        inside += f', {op2}'
+    return f'{op}({inside})'
+
+
+def expand_steps(op: str, binding: dict) -> list[list[dict]]:
+    '''
+    Expand an operation into its alternative realizations, each a flat list of
+    2-operand primitive steps. A compound operation yields one chain per
+    realization, and one per combination of its operation references' own
+    alternatives (cartesian product): every possibility is a distinct ROP chain.
+    A primitive yields a single chain of one step (its single-gadget
+    realizations are resolved later by Operation.filter_gadgets).
+
+    Raises parser.ParserException if `op` (or a referenced sub-operation) is
+    undefined; GadFinder.expand_operation translates that to RopChainNotFound.
+    '''
+    try:
+        defn = parser.Parser().get_op(op)
+    except parser.ParserException as exc:
+        raise parser.ParserException(f'{op}: undefined operation referenced') from exc
+
+    if _is_primitive(defn):
+        op1, op2 = _primary_operands(defn, binding)
+        return [[{'data': _format(op, op1, op2), 'op': op, 'defn': defn,
+                  'op1': op1, 'op2': op2}]]
+
+    chains: list[list[dict]] = []
+    for real in defn.realizations:
+        # Each link contributes a list of alternative sub-chains; the cartesian
+        # product over the links yields this realization's chains.
+        link_alternatives = []
+        for link in real.links:
+            if isinstance(link, OpRef):
+                sub_binding = {slot: binding.get(expr, expr)
+                               for slot, expr in link.bindings.items()}
+                link_alternatives.append(expand_steps(link.name, sub_binding))
+            else:   # inline Set
+                syn, names = _inline_operation_def(link)
+                # Step operand values are the resolved original operands, in the
+                # same positional order as the synthetic op's op1/op2.
+                values = [binding.get(name, name) for name in names]
+                op1 = values[0] if len(values) > 0 else None
+                op2 = values[1] if len(values) > 1 else None
+                link_alternatives.append([[{'data': _format(syn.name, op1, op2),
+                                            'op': syn.name, 'defn': syn,
+                                            'op1': op1, 'op2': op2}]])
+        if any(not alt for alt in link_alternatives):
+            continue   # some link cannot be realized on this architecture
+        for combo in product(*link_alternatives):
+            chains.append([step for part in combo for step in part])
+
+    return chains
 
 
 class OperationDef:

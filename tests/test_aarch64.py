@@ -53,6 +53,23 @@ def test_elf_detects_aarch64_and_selects_aligned():
     assert not arch.parallelizable
 
 
+def test_aarch64_retf_option_is_silently_ignored():
+    ''' retf / ret-imm are x86-only; a non-x86 arch accepts the keyword options
+        (passed through by GadFinder) and returns its ordinary ROP terminations
+        unchanged. '''
+    arch = AArch64_Architecture()
+    assert arch.get_rop_terminations(include_retf=True, include_ret_imm=True) \
+        == arch.get_rop_terminations()
+
+
+def test_retf_on_aarch64_scans_normally(tmp_path):
+    ''' Asking for retf gadgets on a non-x86 binary does not raise: the option
+        is silently dropped and the ordinary ROP gadgets are returned. '''
+    path = _elf(tmp_path, ADD + RET)
+    gadgets = Rop3(path, retf=True, framed=False).gadgets()
+    assert any('ret' in g.text_repr for g in gadgets)
+
+
 def test_aarch64_finds_intended_rop_gadgets(tmp_path):
     path = _elf(tmp_path, ADD + ADD + RET)
     reprs = {g.text_repr for g in Rop3(path, depth=16, framed=False).gadgets()}

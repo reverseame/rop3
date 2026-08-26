@@ -59,7 +59,7 @@ MNEMONIC_PREFIXES: tuple[str, ...] = (
 )
 
 UNCONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
-    'jmp', 'call',
+    'jmp', 'call', 'ret', 'retf'
 )
 
 CONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
@@ -78,10 +78,6 @@ class X86_Architecture(Architecture):
     @property
     def rop_termination_mnemonics(self) -> tuple[str, ...]:
         return ('ret',)
-
-    @property
-    def rop_extra_termination_mnemonics(self) -> tuple[str, ...]:
-        return ('retf',)
 
     @property
     def jop_termination_mnemonics(self) -> tuple[str, ...]:
@@ -112,18 +108,25 @@ class X86_Architecture(Architecture):
         # target is not a usable indirect branch.
         return bool(insn.operands) and insn.operands[0].type != x86_const.X86_OP_IMM
 
-    def get_rop_terminations(self, include_extra: bool = False, include_ret_imm: bool = False):
+    def _rop_terminations(self, include_retf: bool = False, **kwargs) -> tuple[str, ...]:
+        # retf is a valid ROP terminator only when far-return gadgets are asked
+        # for; x86 is the only architecture with this form.
+        if include_retf:
+            return self.rop_termination_mnemonics + ('retf',)
+        return self.rop_termination_mnemonics
+
+    def get_rop_terminations(self, include_retf: bool = False, include_ret_imm: bool = False, **kwargs):
         ret = [{'bytes': b'\xc3', 'size': 1}]              # ret
         if include_ret_imm:
             ret.append({'bytes': b'\xc2[\x00-\xff]{2}', 'size': 3})   # ret <imm>
-        if include_extra:
+        if include_retf:
             ret.append({'bytes': b'\xcb', 'size': 1})     # retf
             if include_ret_imm:
                 ret.append({'bytes': b'\xca[\x00-\xff]{2}', 'size': 3})   # retf <imm>
 
         return ret
 
-    def get_jop_terminations(self, include_extra: bool = False):
+    def get_jop_terminations(self):
         return [
             {'bytes': b'\xff[\x20\x21\x22\x23\x26\x27]{1}', 'size': 2},        # jmp  [reg]
             {'bytes': b'\xff[\xe0\xe1\xe2\xe3\xe4\xe6\xe7]{1}', 'size': 2},    # jmp  [reg]

@@ -128,7 +128,7 @@ class RISCV_Architecture(Architecture):
 
     # --- Byte-level gadget terminations -------------------------------------
 
-    def get_rop_terminations(self, include_extra: bool = False, include_ret_imm: bool = False):
+    def get_rop_terminations(self, **kwargs):
         # `ret` is the canonical return, encoded as `jalr x0, 0(ra)` (0x00008067)
         # or, with the C extension, `c.jr ra` (0x8082).
         ret = [{'bytes': b'\x67\x80\x00\x00', 'size': 4}]      # jalr x0, 0(ra)
@@ -136,7 +136,7 @@ class RISCV_Architecture(Architecture):
             ret.append({'bytes': b'\x82\x80', 'size': 2})     # c.jr ra
         return ret
 
-    def get_jop_terminations(self, include_extra: bool = False):
+    def get_jop_terminations(self):
         # `jalr rd, imm(rs1)` has opcode 0b1100111 (0x67) in the low 7 bits, so
         # its first byte is 0x67 or 0xe7 (rd bit 0 sits at bit 7). The candidate
         # is re-validated after disassembly, so a broad match is safe.

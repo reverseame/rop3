@@ -34,11 +34,11 @@ class Architecture(ABC):
     # --- Byte-level gadget terminations (architecture specific) -------------
 
     @abstractmethod
-    def get_rop_terminations(self, include_extra: bool = False, include_ret_imm: bool = False) -> List[dict]:
+    def get_rop_terminations(self, **kwargs) -> List[dict]:
         pass
 
     @abstractmethod
-    def get_jop_terminations(self, include_extra: bool = False) -> List[dict]:
+    def get_jop_terminations(self) -> List[dict]:
         pass
 
     # --- Mnemonic classification (data supplied by each architecture) -------
@@ -48,12 +48,6 @@ class Architecture(ABC):
     def rop_termination_mnemonics(self) -> tuple[str, ...]:
         ''' Mnemonics that legitimately terminate a ROP gadget (e.g. ret). '''
         pass
-
-    @property
-    def rop_extra_termination_mnemonics(self) -> tuple[str, ...]:
-        ''' Extra ROP terminations enabled by `include_extra` (e.g. x86 retf).
-            Architectures without any (RISC-V) inherit the empty default. '''
-        return ()
 
     @property
     @abstractmethod
@@ -107,17 +101,18 @@ class Architecture(ABC):
             (i.e. through a register/memory operand, not an immediate). '''
         return True
 
+    def _rop_terminations(self, **kwargs) -> tuple[str, ...]:
+        return self.rop_termination_mnemonics
+
     # --- Shared gadget-validity algorithm (template methods) ----------------
 
-    def is_valid_rop_gadget(self, decodes: Any, include_extra: bool = False,
+    def is_valid_rop_gadget(self, decodes: Any,
                             allow_undeterministic: bool = False,
-                            allow_ret_imm: bool = False) -> bool:
+                            allow_ret_imm: bool = False, **kwargs) -> bool:
         if not decodes:
             return False
 
-        terminations = self.rop_termination_mnemonics
-        if include_extra:
-            terminations = terminations + self.rop_extra_termination_mnemonics
+        terminations = self._rop_terminations(**kwargs)
 
         if not self._terminates_rop(decodes[-1], terminations):
             return False
@@ -142,7 +137,7 @@ class Architecture(ABC):
             return False
         return True
 
-    def is_valid_jop_gadget(self, decodes: Any, include_extra: bool = False,
+    def is_valid_jop_gadget(self, decodes: Any,
                             allow_undeterministic: bool = False) -> bool:
         if not decodes:
             return False

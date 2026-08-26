@@ -28,7 +28,7 @@ REGS: frozenset[str] = frozenset(
 
 # Direct (b/bl) and indirect (br/blr) branches. All split a gadget.
 UNCONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
-    'b', 'bl', 'br', 'blr',
+    'b', 'bl', 'br', 'blr', 'ret'
 )
 
 # Indirect branches usable as JOP terminations (a `ret` is handled as ROP).
@@ -97,11 +97,11 @@ class AArch64_Architecture(Architecture):
     # Only consulted if this architecture is ever routed through Galileo; the
     # legal scan finds terminations by disassembly. Provided for completeness.
 
-    def get_rop_terminations(self, include_extra: bool = False, include_ret_imm: bool = False):
+    def get_rop_terminations(self, **kwargs):
         # RET Rn = 0xD65F0000 | (Rn << 5); defaults to x30 (0xD65F03C0).
         return [{'bytes': _RN_LOW + b'[\x00-\x03]\x5f\xd6', 'size': 4}]
 
-    def get_jop_terminations(self, include_extra: bool = False):
+    def get_jop_terminations(self):
         # BR Rn = 0xD61F0000 | (Rn << 5); BLR Rn = 0xD63F0000 | (Rn << 5).
         return [{'bytes': _RN_LOW + b'[\x00-\x03][\x1f\x3f]\xd6', 'size': 4}]
 
