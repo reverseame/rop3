@@ -20,6 +20,9 @@ import pytest
 import rop3.ropchain as ropchain_mod
 from rop3.ropchain import RopChain
 from rop3.gadfinder import GadFinder
+from rop3.archs.x86_arch import X64_Architecture
+from rop3.archs.aarch64_arch import AArch64_Architecture
+from rop3.archs.riscv_arch import RISCV_Architecture
 
 from conftest import make_gadget
 
@@ -202,16 +205,84 @@ def test_reg_aliases_unify_across_chain_steps(x64):
         arch_singleton.allow_reg_aliases = False
 
 
-def test_compound_yields_one_chain_per_realization(x64):
-    ''' A compound with multiple realizations expands to one distinct ropchain
-        per realization (gcf-eqc has several). '''
+# Full expansion of every compound (compose:) operation, per architecture, as
+# the complete set of primitive-step chains realize() must produce. Whenever a
+# roplang/*.yaml file is modified (a realization added, removed, reordered, or
+# its operands changed), update this constant to the new complete set for every
+# architecture the operation touches -- see CLAUDE.md. Each nested `lc` op stays
+# a single step (it is primitive; its own single-gadget variants are matched
+# later), so the only multiplicity here is the compound's own alternatives. An
+# empty set means the operation is unavailable on that architecture (realize
+# yields nothing and defn.available is False), e.g. no carry flag on RISC-V.
+#
+# `arch` maps a name to (Architecture factory, operand binding); `chains` maps
+# each compound op to its expected realization set under that binding.
+_COMPOUND_ARCHES = {
+    'x86-64': {
+        'arch': lambda: X64_Architecture(),
+        'operands': {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'},
+        'chains': {
+            'gcf-eqc': {
+                ('lc(REG10)', 'sub(rbx, rcx)', 'neg(rbx)', 'adc(rax, REG10)'),
+                ('lc(REG10)', 'sub(rbx, rcx)', 'neg(rbx)', 'sbb(rax, REG10)', 'neg(rax)'),
+                ('lc(rax)', 'sub(rbx, rcx)', 'neg(rbx)', 'rcl(rax)'),
+            },
+            'gcf-ltc': {
+                ('lc(REG10)', 'sub(rbx, rcx)', 'adc(rax, REG10)'),
+                ('lc(REG10)', 'sub(rbx, rcx)', 'sbb(rax, REG10)', 'neg(rax)'),
+                ('lc(rax)', 'sub(rbx, rcx)', 'rcl(rax)'),
+            },
+        },
+    },
+    'aarch64': {
+        'arch': lambda: AArch64_Architecture(),
+        'operands': {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'},
+        'chains': {
+            'gcf-eqc': {
+                ('lc(REG10)', 'sub(x1, x2)', 'neg(x1)', 'lc(x0)', 'adc(x0, REG10)'),
+            },
+            'gcf-ltc': {
+                ('lc(REG10)', 'sub(x1, x2)', 'adc(x0, REG10)'),
+            },
+        },
+    },
+    'riscv': {
+        'arch': lambda: RISCV_Architecture(),
+        'operands': {'op1': 'a0', 'op2': 'a1', 'op3': 'a2'},
+        'chains': {
+            'gcf-eqc': set(),   # unavailable: RISC-V has no carry/condition flags
+            'gcf-ltc': set(),
+        },
+    },
+}
+
+COMPOUND_CHAIN_REALIZATIONS = [
+    (arch_name, op, cfg['arch'], cfg['operands'], expected)
+    for arch_name, cfg in _COMPOUND_ARCHES.items()
+    for op, expected in cfg['chains'].items()
+]
+
+
+@pytest.mark.parametrize('arch_name, op, make_arch, operands, expected',
+                         COMPOUND_CHAIN_REALIZATIONS,
+                         ids=[f'{a}-{o}' for a, o, *_ in COMPOUND_CHAIN_REALIZATIONS])
+def test_compound_yields_every_realization(arch_name, op, make_arch, operands, expected):
+    ''' A compound operation expands to *every* possible chain realization on
+        each architecture, and exactly those: the full sets are pinned in
+        _COMPOUND_ARCHES so any roplang/*.yaml change surfaces here. An empty
+        expected set asserts the operation is unavailable on that arch. '''
     import rop3.parser as parser
-    from rop3.operation import expand_steps
-    defn = parser.Parser().get_op('gcf-eqc')
-    chains = expand_steps('gcf-eqc', {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'})
-    assert len(chains) == len(defn.realizations) >= 2
-    signatures = {tuple(s['op'] for s in ch) for ch in chains}
-    assert len(signatures) == len(chains)     # each realization is distinct
+    from rop3.operation import realize
+    from rop3.arch import arch_singleton
+    arch_singleton.reset()
+    arch_singleton.initialize(make_arch())
+
+    defn = parser.Parser().get_op(op)
+    chains = realize(defn, dict(operands))
+    produced = {tuple(s['data'] for s in ch) for ch in chains}
+    assert produced == expected
+    assert len(chains) == len(expected)       # no duplicate realizations
+    assert defn.available is bool(expected)   # empty set <=> unavailable arch
 
 
 def test_search_tries_every_realization(x64):

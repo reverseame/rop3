@@ -22,7 +22,7 @@ import rop3.gadfinder as gadfinder
 from rop3.archs.riscv_arch import RISCV_Architecture
 from rop3.binaries.elf import ELF
 
-from conftest import build_minimal_elf, EM_RISCV, EF_RISCV_RVC, ET_DYN
+from conftest import build_minimal_elf, EM_RISCV, EF_RISCV_RVC, ET_DYN, make_operation
 
 # jalr x0, 0(ra)  == ret            (0x00008067, little-endian)
 RET = b'\x67\x80\x00\x00'
@@ -191,17 +191,17 @@ def test_riscv_written_registers_from_encoding():
     # register set or slot_op2, and an immediate query must not match a register
     # add gadget (mirrors the x86 immediate handling).
     imm = gadget(LD_RA_SP + _i(0x13, 0, 10, 10, 8) + RET)       # ld ra ; addi a0,a0,8 ; ret
-    matched = operation.Operation('add', ['a0', '8']).filter_gadgets([imm])
+    matched = make_operation('add', ['a0', '8']).filter_gadgets([imm])
     assert matched and matched[0].src == {'a0'} and matched[0].slot_op2 is None
     reg = gadget(LD_RA_SP + _r(0x33, 0, 0x00, 10, 10, 11) + RET)  # ld ra ; add a0,a0,a1 ; ret
-    assert operation.Operation('add', ['a0', '8']).filter_gadgets([reg]) == []
+    assert make_operation('add', ['a0', '8']).filter_gadgets([reg]) == []
 
     # (2) A store writes no register (its result is in memory), so reusing its
     # address register afterwards does not make the gadget contradictory.
     sd = _s(0x23, 3, 11, 10, 0)                                 # sd a0, 0(a1)
     mv = _i(0x13, 0, 11, 12, 0)                                 # mv a1, a2 (reuses a1)
     reuse = gadget(LD_RA_SP + sd + mv + RET)
-    assert operation.Operation('st', ['a1', 'a0']).filter_gadgets([reuse])
+    assert make_operation('st', ['a1', 'a0']).filter_gadgets([reuse])
 
 
 def test_riscv_calculate_side_effects_without_regs_access():
@@ -259,7 +259,7 @@ def _riscv_op_matches(op, operands, body):
     code = LD_RA_SP + body + RET
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
                     vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
-    return bool(operation.Operation(op, operands).filter_gadgets([gadget]))
+    return bool(make_operation(op, operands).filter_gadgets([gadget]))
 
 
 def _r(op, f3, f7, rd, rs1, rs2):
@@ -358,7 +358,7 @@ def test_riscv_gcf_ops_marked_not_available():
         assert defn.available is False
         assert defn.unavailable_reason            # a human-readable reason
         with pytest.raises(parser.OperationNotAvailable):
-            operation.Operation(name)
+            make_operation(name)
 
 
 def test_gcf_ops_still_available_on_x86(x86):
@@ -368,7 +368,7 @@ def test_gcf_ops_still_available_on_x86(x86):
     import rop3.parser as parser
     defn = parser.Parser().get_op('gcf-eqc')
     assert defn.available is True and defn.realizations
-    operation.Operation('gcf-eqc')                # must not raise
+    make_operation('gcf-eqc')                # must not raise
 
 
 def test_gadfinder_compressed_2byte_ra_restore(tmp_path):

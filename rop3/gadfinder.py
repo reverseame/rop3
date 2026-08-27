@@ -26,7 +26,7 @@ from rop3.cache import GadgetCache
 import rop3.utils as utils
 import rop3.debug as debug
 import rop3.binary
-import rop3.operation as operation
+from rop3.operation import OperationDef, match_gadgets, realize
 from rop3.arch import arch_singleton, DEFAULT_DEPTH
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.archs.riscv_arch import RISCV_Architecture
@@ -182,16 +182,10 @@ class GadFinder:
                 return []
 
         # Operands are positional: op1, op2, op3, ...
-        return self.match_operation(gadgets, op, operands,
+        return self.match_operation(gadgets, resolved, operands,
                                     reject_clobbered=not self._keep_contradictory())
 
     # --- ROP-chain classification -----------------------------------------
-    #
-    # ropchain.py hands over the parsed request ([{op, operands}]) and assembles
-    # chains from the classified gadget lists alone. Binding, expansion and
-    # matching (and the operation.py / arch_singleton knowledge they need) all
-    # happen here, so the assembler never touches the raw gadget list or an
-    # operation definition.
 
     def classify_ropchain(self, gadgets, steps):
         '''
@@ -255,12 +249,13 @@ class GadFinder:
             return None
         return val
 
-    def match_operation(self, gadgets, op, operands, reject_clobbered=True):
-        ''' Gadgets realizing operation `op` (a name or an OperationDef) with the
-            given positional operands. The single entry point for operation
-            matching, keeping operation.py behind gadfinder. '''
-        return operation.Operation(op, operands).filter_gadgets(
-            gadgets, reject_clobbered=reject_clobbered)
+    def match_operation(self, gadgets: list[Gadget], defn: OperationDef,
+                        operands, reject_clobbered: bool = True) -> list[Gadget]:
+        ''' Gadgets realizing operation definition `defn` with the given
+            positional operands. The single entry point for operation matching;
+            the ROPLang name is resolved to `defn` here in gadfinder (via the
+            parser), keeping the matcher free of name lookups. '''
+        return match_gadgets(defn, operands, gadgets, reject_clobbered=reject_clobbered)
 
     def bind_step(self, step, fresh):
         '''
@@ -287,13 +282,14 @@ class GadFinder:
             binding[f'op{i + 1}'] = value
         return binding
 
-    def expand_operation(self, op, binding):
-        ''' Flatten a ROPLang operation into its alternative 2-operand primitive
-            step chains (see operation.expand_steps). An undefined operation
-            surfaces as RopChainNotFound, the assembler's own error type. '''
+    def expand_operation(self, op: str, binding: dict) -> list[list[dict]]:
+        ''' Flatten a ROPLang operation (named `op`) into its alternative
+            2-operand primitive step chains. The name is resolved to its
+            definition here (via the parser); an undefined operation surfaces as
+            RopChainNotFound, the assembler's own error type. '''
         from rop3.ropchain import RopChainNotFound
         try:
-            return operation.expand_steps(op, binding)
+            return realize(parser.Parser().get_op(op), binding)
         except parser.ParserException as exc:
             raise RopChainNotFound(str(exc))
 

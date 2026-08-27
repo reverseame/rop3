@@ -107,6 +107,46 @@ class Gadget:
                     return True
         return False
 
+    def result_clobbered(self, matched_indices, dst_regs) -> bool:
+        ''' Whether this gadget overwrites an operation's result before its
+            terminator -- a "contradictory" gadget (e.g.
+            `add rax, rbx ; mov rax, rcx ; ret`) whose result never reaches the
+            ret. `matched_indices` are the positions of the operation's matched
+            instructions and `dst_regs` its declared destination registers.
+
+            `dst_regs` are intersected with the registers the matched
+            instructions actually write, so a store (whose result is in memory)
+            protects nothing and is never falsely rejected. A gadget is
+            contradictory when an instruction between the last matched one and
+            the terminator writes such a register.
+
+            The final (terminating) instruction is excluded: it is control flow,
+            and its incidental write to the stack pointer (an x86 `ret` pops) is
+            the gadget's exit mechanism, not a clobber of the result -- so a
+            stack-pointer operation like `add rsp, 8 ; ret` is not
+            contradictory.
+
+            `matched_indices` are contiguous (Set.is_equal matches a consecutive
+            run), so only the tail after `max(matched_indices)` needs scanning;
+            a clobber can never hide between two matched instructions. '''
+        if not dst_regs:
+            return False
+
+        arch = arch_singleton.arch
+
+        def writes(insn):
+            return {arch.normalize_reg(insn.reg_name(r))
+                    for r in arch.written_registers(insn)}
+
+        produced = {reg for i in matched_indices for reg in writes(self.decodes[i])}
+        guarded = set(dst_regs) & produced
+        if not guarded:
+            return False
+
+        last = max(matched_indices)
+        clobbered = {reg for insn in self.decodes[last + 1:-1] for reg in writes(insn)}
+        return bool(guarded & clobbered)
+
     def subsumes(self, rhs) -> bool:
         if (self.dst or set()) != (rhs.dst or set()):
             return False

@@ -28,6 +28,11 @@ logging.basicConfig(level=logging.WARNING, format='%(name)s: %(levelname)s: %(me
 def set_verbose():
     logger.setLevel(logging.INFO)
 
+def is_verbose() -> bool:
+    ''' Whether INFO-level (--verbose) messages are enabled. Lets callers skip
+        building trace strings that would be discarded when verbosity is off. '''
+    return logger.isEnabledFor(logging.INFO)
+
 def debug(msg):
     log(logging.DEBUG, msg)
 

@@ -49,6 +49,7 @@ import rop3.parser as parser
 from rop3.arch import arch_singleton
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.gadget import Gadget
+from conftest import make_operation
 
 # --- The set of all ROPLang operations, straight from the YAML directory ------
 
@@ -238,7 +239,7 @@ def test_primitive_operation_is_found_as_gadget(arch_id, op):
     spec = ARCH_BY_ID[arch_id]
     spec.initialize()
     operands, body = spec.primitives[op]
-    matched = operation.Operation(op, operands).filter_gadgets([spec.gadget(body)])
+    matched = make_operation(op, operands).filter_gadgets([spec.gadget(body)])
     assert matched, f'{op} not found on {arch_id}'
     assert matched[0].op == op
 

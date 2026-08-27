@@ -23,7 +23,7 @@ from rop3 import Rop3
 from rop3.archs.aarch64_arch import AArch64_Architecture
 from rop3.binaries.elf import ELF
 
-from conftest import build_minimal_elf, ET_DYN
+from conftest import build_minimal_elf, ET_DYN, make_operation
 
 EM_AARCH64 = 183
 
@@ -189,7 +189,7 @@ def _aarch64_op_matches(op, operands, body):
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_ARM64,
                     mode=capstone.CS_MODE_ARM, vaddr=0x1000,
                     decodes=list(md.disasm(code, 0x1000)), bytes=code)
-    return bool(operation.Operation(op, operands).filter_gadgets([gadget]))
+    return bool(make_operation(op, operands).filter_gadgets([gadget]))
 
 
 @pytest.mark.parametrize('op,operands,body', [

@@ -17,7 +17,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 import rop3.operation as operation
 
-from conftest import make_gadget
+from conftest import make_gadget, make_operation
 
 
 def test_lc_matches_pop_reg(x64):
@@ -27,7 +27,7 @@ def test_lc_matches_pop_reg(x64):
         make_gadget(b'\x5b\xc3', 0x1010),   # pop rbx ; ret
         make_gadget(b'\x90\xc3', 0x1020),   # nop ; ret  (no match)
     ]
-    matched = operation.Operation('lc').filter_gadgets(gadgets)
+    matched = make_operation('lc').filter_gadgets(gadgets)
     texts = {g.text_repr for g in matched}
     assert 'pop rax ; ret' in texts
     assert 'pop rbx ; ret' in texts
@@ -39,20 +39,20 @@ def test_lc_with_dst_filter(x64):
         make_gadget(b'\x58\xc3', 0x1000),   # pop rax ; ret
         make_gadget(b'\x5b\xc3', 0x1010),   # pop rbx ; ret
     ]
-    matched = operation.Operation('lc', ['rax']).filter_gadgets(gadgets)
+    matched = make_operation('lc', ['rax']).filter_gadgets(gadgets)
     assert [g.text_repr for g in matched] == ['pop rax ; ret']
     assert matched[0].dst == {'rax'}
 
 
 def test_filter_gadgets_empty_input(x64):
-    assert operation.Operation('lc').filter_gadgets([]) == []
+    assert make_operation('lc').filter_gadgets([]) == []
 
 
 def test_filter_gadgets_does_not_mutate_input(x64):
     ''' filter_gadgets must annotate copies, not the shared input gadgets. '''
     g = make_gadget(b'\x58\xc3', 0x1000)             # pop rax ; ret
     assert g.op is None and g.dst is None
-    matched = operation.Operation('lc', ['rax']).filter_gadgets([g])
+    matched = make_operation('lc', ['rax']).filter_gadgets([g])
     assert matched and matched[0] is not g           # a copy was returned
     assert matched[0].op == 'lc' and matched[0].dst == {'rax'}
     # original is untouched
@@ -63,26 +63,30 @@ def test_filter_gadgets_rejects_leading_junk_on_x86(x64):
     ''' x86 has no frame prologue, so the operation's instruction must be the
         gadget's first: a `pop rbx` behind a `mov` is not matched. '''
     g = make_gadget(b'\x48\x89\xc7\x5b\xc3', 0x1000)   # mov rdi, rax ; pop rbx ; ret
-    assert operation.Operation('lc', ['rbx']).filter_gadgets([g]) == []
+    assert make_operation('lc', ['rbx']).filter_gadgets([g]) == []
     # the same pop, as the first instruction, does match
     g2 = make_gadget(b'\x5b\xc3', 0x1000)              # pop rbx ; ret
-    assert [x.text_repr for x in operation.Operation('lc', ['rbx']).filter_gadgets([g2])] \
+    assert [x.text_repr for x in make_operation('lc', ['rbx']).filter_gadgets([g2])] \
         == ['pop rbx ; ret']
 
 
-def test_filter_gadgets_allows_gaps_within_operation_body(x64):
-    ''' Only the first instruction is anchored; the rest of a multi-instruction
-        pattern may be separated (`push src ; nop ; pop dst`). '''
-    g = make_gadget(b'\x53\x90\x58\xc3', 0x1000)       # push rbx ; nop ; pop rax ; ret
-    matched = operation.Operation('mov', ['rax', 'rbx']).filter_gadgets([g])
-    assert [x.text_repr for x in matched] == ['push rbx ; nop ; pop rax ; ret']
+def test_filter_gadgets_requires_consecutive_operation_body(x64):
+    ''' A multi-instruction pattern must match a consecutive run: an
+        intervening instruction (`push src ; nop ; pop dst`) is not a match,
+        while the adjacent form (`push src ; pop dst`) is. '''
+    gapped = make_gadget(b'\x53\x90\x58\xc3', 0x1000)   # push rbx ; nop ; pop rax ; ret
+    assert make_operation('mov', ['rax', 'rbx']).filter_gadgets([gapped]) == []
+
+    consecutive = make_gadget(b'\x53\x58\xc3', 0x1010)  # push rbx ; pop rax ; ret
+    matched = make_operation('mov', ['rax', 'rbx']).filter_gadgets([consecutive])
+    assert [x.text_repr for x in matched] == ['push rbx ; pop rax ; ret']
 
 
 def test_filter_gadgets_rejects_junk_before_first_of_multi(x64):
     ''' Junk before the first instruction of a multi-instruction pattern is
         rejected even though the pattern is otherwise present. '''
     g = make_gadget(b'\x90\x53\x58\xc3', 0x1000)       # nop ; push rbx ; pop rax ; ret
-    assert operation.Operation('mov', ['rax', 'rbx']).filter_gadgets([g]) == []
+    assert make_operation('mov', ['rax', 'rbx']).filter_gadgets([g]) == []
 
 
 def test_filter_gadgets_clobbered_destination(x64):
@@ -98,20 +102,20 @@ def test_filter_gadgets_clobbered_destination(x64):
     '''
     good = make_gadget(b'\x48\x01\xd8\xc3', 0x1000)              # add rax, rbx ; ret
     bad = make_gadget(b'\x48\x01\xd8\x48\x89\xc8\xc3', 0x1010)   # add rax, rbx ; mov rax, rcx ; ret
-    op = operation.Operation('add', ['rax', 'rbx'])
+    op = make_operation('add', ['rax', 'rbx'])
     assert [g.text_repr for g in op.filter_gadgets([good, bad])] == ['add rax, rbx ; ret']
     kept = {g.text_repr for g in op.filter_gadgets([good, bad], reject_clobbered=False)}
     assert kept == {'add rax, rbx ; ret', 'add rax, rbx ; mov rax, rcx ; ret'}
 
     # clobbering a register other than the destination is fine
     other = make_gadget(b'\x48\x01\xd8\x48\x31\xc9\xc3', 0x1020)  # add rax, rbx ; xor rcx, rcx ; ret
-    assert [x.text_repr for x in operation.Operation('add', ['rax', 'rbx']).filter_gadgets([other])] \
+    assert [x.text_repr for x in make_operation('add', ['rax', 'rbx']).filter_gadgets([other])] \
         == ['add rax, rbx ; xor rcx, rcx ; ret']
 
     # the terminator's incidental rsp write does not make a stack-pointer op
     # contradictory
     spa = make_gadget(b'\x48\x83\xc4\x08\xc3', 0x1030)           # add rsp, 8 ; ret
-    assert [x.text_repr for x in operation.Operation('add', ['rsp', '8']).filter_gadgets([spa])] \
+    assert [x.text_repr for x in make_operation('add', ['rsp', '8']).filter_gadgets([spa])] \
         == ['add rsp, 8 ; ret']
 
 
@@ -133,7 +137,7 @@ def test_ld_with_src_matches_memory_not_register(x64):
         make_gadget(b'\x48\x8b\x03\xc3', 0x1000),   # mov rax, [rbx] ; ret
         make_gadget(b'\x48\x89\xd8\xc3', 0x1010),   # mov rax, rbx ; ret (must NOT match)
     ]
-    matched = operation.Operation('ld', [None, 'rbx']).filter_gadgets(gadgets)
+    matched = make_operation('ld', [None, 'rbx']).filter_gadgets(gadgets)
     assert [g.text_repr for g in matched] == ['mov rax, qword ptr [rbx] ; ret']
 
 
@@ -145,7 +149,7 @@ def test_ld_does_not_match_immediate_load(x64):
     gadgets = [
         make_gadget(b'\x48\xc7\xc0\xfe\xca\x00\x00\xc3', 0x1000),   # mov rax, 0xcafe ; ret
     ]
-    assert operation.Operation('ld').filter_gadgets(gadgets) == []
+    assert make_operation('ld').filter_gadgets(gadgets) == []
 
 
 def test_set_binding_preserves_memory_type(x64):
@@ -186,7 +190,7 @@ def test_xchg_src_counted_as_side_effect(x64):
     must be reported as a side effect (it was wrongly excluded before).
     '''
     gadget = make_gadget(b'\x48\x93\xc3', 0x1000)   # xchg rbx, rax ; ret
-    matched = operation.Operation('mov', ['rbx', 'rax']).filter_gadgets([gadget])
+    matched = make_operation('mov', ['rbx', 'rax']).filter_gadgets([gadget])
     assert len(matched) == 1
     assert 'rax' in matched[0].side_regs
 
@@ -197,7 +201,7 @@ def test_mov_matches_clc_cmovae(x64):
     `cmovae`/`cmovb` (not `cmovc`), so `clc ; cmovae dst, src` is a valid mov.
     '''
     gadget = make_gadget(b'\xf8\x48\x0f\x43\xc3\xc3', 0x1000)   # clc ; cmovae rax, rbx ; ret
-    matched = operation.Operation('mov', ['rax', 'rbx']).filter_gadgets([gadget])
+    matched = make_operation('mov', ['rax', 'rbx']).filter_gadgets([gadget])
     assert [g.text_repr for g in matched] == ['clc ; cmovae rax, rbx ; ret']
 
 
@@ -208,7 +212,7 @@ def test_add_reports_set_valued_dst_and_src(x64):
     `add rdx, rax` yields dst={rdx}, src={rax, rdx} (rdx is read and written).
     '''
     gadget = make_gadget(b'\x48\x01\xc2\xc3', 0x1000)   # add rdx, rax ; ret
-    matched = operation.Operation('add', ['rdx', 'rax']).filter_gadgets([gadget])
+    matched = make_operation('add', ['rdx', 'rax']).filter_gadgets([gadget])
     assert len(matched) == 1
     assert matched[0].dst == {'rdx'}
     assert matched[0].src == {'rax', 'rdx'}
@@ -221,7 +225,7 @@ def test_same_gadget_group_requires_all_instructions(x64):
     '''
     both = make_gadget(b'\x53\x58\xc3', 0x1000)    # push rbx ; pop rax ; ret
     only_push = make_gadget(b'\x53\xc3', 0x1010)   # push rbx ; ret
-    matched = operation.Operation('mov', ['rax', 'rbx']).filter_gadgets([both, only_push])
+    matched = make_operation('mov', ['rax', 'rbx']).filter_gadgets([both, only_push])
     assert [g.text_repr for g in matched] == ['push rbx ; pop rax ; ret']
 
 
@@ -234,13 +238,13 @@ def test_register_second_operand_is_detected(x64):
     r8 = make_gadget(b'\x4c\x01\xc4\xc3', 0x1000)    # add rsp, r8 ; ret
     imm = make_gadget(b'\x48\x83\xc4\x08\xc3', 0x1010)   # add rsp, 8 ; ret
 
-    assert [g.text_repr for g in operation.Operation('add', ['rsp', 'r8']).filter_gadgets([r8, imm])] \
+    assert [g.text_repr for g in make_operation('add', ['rsp', 'r8']).filter_gadgets([r8, imm])] \
         == ['add rsp, r8 ; ret']
     # unconstrained destination, concrete register source
-    assert [g.text_repr for g in operation.Operation('add', [None, 'r8']).filter_gadgets([r8, imm])] \
+    assert [g.text_repr for g in make_operation('add', [None, 'r8']).filter_gadgets([r8, imm])] \
         == ['add rsp, r8 ; ret']
     # the immediate query must not pick up the r8 register gadget
-    assert [g.text_repr for g in operation.Operation('add', ['rsp', '8']).filter_gadgets([r8, imm])] \
+    assert [g.text_repr for g in make_operation('add', ['rsp', '8']).filter_gadgets([r8, imm])] \
         == ['add rsp, 8 ; ret']
 
 
@@ -248,11 +252,11 @@ def test_reg_alias_substitution_flag(x64):
     from rop3.arch import arch_singleton
     pop_ax = make_gadget(b'\x66\x58\xc3', 0x1000)   # pop ax ; ret  (alias of rax)
     # default: a sub-register does not satisfy a generic register operand
-    assert operation.Operation('lc', [None]).filter_gadgets([pop_ax]) == []
+    assert make_operation('lc', [None]).filter_gadgets([pop_ax]) == []
     # with aliases enabled it matches and normalizes to the full register
     arch_singleton.allow_reg_aliases = True
     try:
-        matched = operation.Operation('lc', [None]).filter_gadgets([pop_ax])
+        matched = make_operation('lc', [None]).filter_gadgets([pop_ax])
         assert [g.text_repr for g in matched] == ['pop ax ; ret']
         assert matched[0].slot_op1 == 'rax'
         assert matched[0].dst == {'rax'}

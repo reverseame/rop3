@@ -15,6 +15,8 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+from __future__ import annotations
+
 import re
 import copy
 import dataclasses
@@ -22,6 +24,7 @@ from itertools import product
 
 from rop3.arch import arch_singleton
 
+import rop3.debug as debug
 import rop3.parser as parser
 
 from .gadget import Gadget
@@ -47,126 +50,139 @@ def is_immediate(value) -> bool:
         return False
 
 
-class Operation:
-    '''
-    Matcher for a single-gadget realization of an operation. The operation's
-    operands are given explicitly and positionally as `operands` = [op1, op2,
-    op3, ...] (an operation has 1, 2 or 3 of them); a value of None leaves that
-    operand unconstrained (matches any register).
-    '''
-    def __init__(self, op, operands=None):
-        self.defn = op if isinstance(op, OperationDef) else parser.Parser().get_op(op)
-        if not self.defn.available:
-            reason = self.defn.unavailable_reason or 'not available for this architecture'
-            raise parser.OperationNotAvailable(f'{self.defn.name}: {reason}')
-        self.name = self.defn.name
-        self.bindings: dict = {}
-        for i, value in enumerate(operands or ()):
-            if value is not None:
-                self.bindings[f'op{i + 1}'] = value
+# --- Operation matching ---------------------------------------------------
+#
+# Match single-gadget realizations of an operation against a gadget list. The
+# operation's operands are given positionally as `operands` = [op1, op2, op3,
+# ...] (an operation has 1, 2 or 3 of them); a value of None leaves that operand
+# unconstrained (matches any register). Callers resolve a ROPLang name to its
+# OperationDef (via the parser) before calling, so this module never does name
+# lookups for matching.
 
-    def filter_gadgets(self, gadgets, reject_clobbered=True) -> list[Gadget]:
-        ''' Gadgets whose instructions realize this operation. The operation's
-            first instruction must be the gadget's first instruction after the
-            architecture's frame prologue (Set.is_equal); its remaining
-            instructions may be separated by other instructions.
+def match_gadgets(defn: OperationDef, operands: list | None,
+                  gadgets: list[Gadget], reject_clobbered: bool = True) -> list[Gadget]:
+    ''' Gadgets whose instructions realize `defn` with the given positional
+        operands. The operation's instructions must be a consecutive run, the
+        first sitting right after the architecture's frame prologue
+        (Set.is_equal).
 
-            With `reject_clobbered` (the default), a gadget is discarded when
-            its destination register is overwritten before the terminator (a
-            "contradictory" gadget that does not actually realize the
-            operation). The check runs inside the match, so clobbered gadgets
-            are rejected before the (more expensive) annotation. '''
-        ret = []
-        if not gadgets:
-            return ret
+        With `reject_clobbered` (the default), a gadget is discarded when its
+        destination register is overwritten before the terminator (a
+        "contradictory" gadget that does not actually realize the operation),
+        via Gadget.result_clobbered -- before the (more expensive) annotation. '''
+    if not defn.available:
+        reason = defn.unavailable_reason or 'not available for this architecture'
+        raise parser.OperationNotAvailable(f'{defn.name}: {reason}')
 
-        protect = self._destination_registers if reject_clobbered else None
-        for real in self.defn.realizations:
-            if not real.is_single_gadget:
-                continue
-            set_ = real.links[0].bound(self.bindings)
-            for gadget in gadgets:
-                (equal, binds) = set_.is_equal(gadget.decodes, protect=protect)
-                if not equal:
-                    continue
-                ret.append(self._annotate(gadget, binds))
-
+    bindings = _operand_bindings(operands)
+    ret: list[Gadget] = []
+    if not gadgets:
         return ret
 
-    def _as_register(self, name, binds):
-        ''' The concrete register bound to an operand name, following one level
-            of placeholder indirection (opN -> free REGn -> concrete). None if
-            the operand is an immediate or is unbound. '''
-        arch = arch_singleton.arch
-        val = self.bindings.get(name, name)
-        if isinstance(val, str) and is_abstract_name(val):
-            val = binds.get(val, val)
-        if not isinstance(val, str) or is_abstract_name(val) or is_immediate(val):
-            return None
-        return arch.normalize_reg(val)
+    for real in defn.realizations:
+        # Realizations must be single gadgets (no references)
+        if not real.is_single_gadget:
+            continue
+        set_ = real.links[0].bound(bindings)
+        for gadget in gadgets:
+            (equal, binds, indices) = set_.is_equal(gadget.decodes)
+            if not equal:
+                continue
+            if reject_clobbered and gadget.result_clobbered(
+                    indices, _destination_registers(defn, bindings, binds)):
+                continue
+            ret.append(_annotate(defn, bindings, gadget, binds))
 
-    def _as_operand(self, name, binds):
-        ''' Display value bound to an operand name: a concrete register (like
-            _as_register) or, when the operand bound to a numeric literal, that
-            immediate formatted as a string. None if the operand is an unbound
-            placeholder or is unused. '''
-        val = self.bindings.get(name, name)
-        if isinstance(val, str) and is_abstract_name(val):
-            val = binds.get(val, val)
-        if isinstance(val, str) and is_abstract_name(val):
-            return None                         # still an unbound placeholder
-        if is_immediate(val):
-            return self._format_imm(val)
-        if isinstance(val, str):
-            return arch_singleton.arch.normalize_reg(val)
+    return ret
+
+
+def _operand_bindings(operands: list | None) -> dict:
+    ''' Map the positional operands to op1/op2/... slots, dropping None
+        (unconstrained) operands. '''
+    bindings: dict = {}
+    for i, value in enumerate(operands or ()):
+        if value is not None:
+            bindings[f'op{i + 1}'] = value
+    return bindings
+
+
+def _as_register(bindings: dict, name, binds: dict):
+    ''' The concrete register bound to an operand name, following one level of
+        placeholder indirection (opN -> free REGn -> concrete). None if the
+        operand is an immediate or is unbound. '''
+    arch = arch_singleton.arch
+    val = bindings.get(name, name)
+    if isinstance(val, str) and is_abstract_name(val):
+        val = binds.get(val, val)
+    if not isinstance(val, str) or is_abstract_name(val) or is_immediate(val):
         return None
-
-    @staticmethod
-    def _format_imm(val) -> str:
-        ''' Render an immediate the way the disassembly does: small magnitudes
-            in decimal (e.g. -1), larger ones in hex (e.g. 0x1000). '''
-        n = int(str(val).lstrip('#'), 0) if not isinstance(val, int) else val
-        return str(n) if -256 < n < 256 else hex(n)
-
-    def _destination_registers(self, binds):
-        ''' The concrete destination register(s) this operation writes, under
-            the given match bindings. Passed to Set.is_equal so the match can
-            reject gadgets that overwrite the result before returning. '''
-        return {r for r in (self._as_register(n, binds) for n in self.defn.dst_roles) if r}
-
-    def _annotate(self, gadget, binds) -> Gadget:
-        ''' Annotate a copy so the shared input gadget is not mutated. '''
-        def as_register(name):
-            return self._as_register(name, binds)
-
-        matched = dataclasses.replace(gadget, op=self.name)
-        # dst/src register sets come from the operation's role metadata (which
-        # operands it writes / reads); the two solver slots are just op1 and op2.
-        matched.dst = {r for r in map(as_register, self.defn.dst_roles) if r}
-        matched.src = {r for r in map(as_register, self.defn.src_roles) if r}
-        matched.slot_op1 = as_register('op1')
-        matched.slot_op2 = as_register('op2')
-        matched.disp_op1 = self._as_operand('op1', binds)
-        matched.disp_op2 = self._as_operand('op2', binds)
-        matched.calculate_side_effects()
-        return matched
+    return arch.normalize_reg(val)
 
 
-# --- Operation expansion --------------------------------------------------
+def _as_operand(bindings: dict, name, binds: dict):
+    ''' Display value bound to an operand name: a concrete register (like
+        _as_register) or, when the operand bound to a numeric literal, that
+        immediate formatted as a string. None if the operand is an unbound
+        placeholder or is unused. '''
+    val = bindings.get(name, name)
+    if isinstance(val, str) and is_abstract_name(val):
+        val = binds.get(val, val)
+    if isinstance(val, str) and is_abstract_name(val):
+        return None                             # still an unbound placeholder
+    if is_immediate(val):
+        return _format_imm(val)
+    if isinstance(val, str):
+        return arch_singleton.arch.normalize_reg(val)
+    return None
+
+
+def _format_imm(val) -> str:
+    ''' Render an immediate the way the disassembly does: small magnitudes in
+        decimal (e.g. -1), larger ones in hex (e.g. 0x1000). '''
+    n = int(str(val).lstrip('#'), 0) if not isinstance(val, int) else val
+    return str(n) if -256 < n < 256 else hex(n)
+
+
+def _destination_registers(defn: OperationDef, bindings: dict, binds: dict) -> set:
+    ''' The concrete destination register(s) the operation writes, under the
+        given match bindings. Handed to Gadget.result_clobbered to reject
+        gadgets that overwrite the result before returning. '''
+    return {r for r in (_as_register(bindings, n, binds) for n in defn.dst_roles) if r}
+
+
+def _annotate(defn: OperationDef, bindings: dict, gadget: Gadget, binds: dict) -> Gadget:
+    ''' Annotate a copy so the shared input gadget is not mutated. '''
+    def as_register(name):
+        return _as_register(bindings, name, binds)
+
+    matched = dataclasses.replace(gadget, op=defn.name)
+    # dst/src register sets come from the operation's role metadata (which
+    # operands it writes / reads); the two solver slots are just op1 and op2.
+    matched.dst = {r for r in map(as_register, defn.dst_roles) if r}
+    matched.src = {r for r in map(as_register, defn.src_roles) if r}
+    matched.slot_op1 = as_register('op1')
+    matched.slot_op2 = as_register('op2')
+    matched.disp_op1 = _as_operand(bindings, 'op1', binds)
+    matched.disp_op2 = _as_operand(bindings, 'op2', binds)
+    matched.calculate_side_effects()
+    return matched
+
+
+# --- Operation realization ------------------------------------------------
 #
 # Operations are *defined* with N named operands (opN), but a ROP chain is
-# *constructed* only from 2-operand primitives. `expand_steps` resolves an
-# operation into a flat list of 2-operand primitive steps:
+# *constructed* only from 2-operand primitives. `realize` resolves an operation
+# into a flat list of 2-operand primitive steps:
 #
 #   - a "primitive" operation (all realizations are single gadgets) becomes one
 #     step referencing that operation; its alternative single-gadget
-#     realizations are resolved later by Operation.filter_gadgets;
+#     realizations are matched later by match_gadgets;
 #   - a "compound" operation is flattened by walking its realization's links,
 #     recursing into operation references and emitting inline raw-gadget links
 #     (e.g. the `leave`/`adc` mnemonics) as synthetic single-gadget primitives.
 #
 # It lives here (not in ropchain.py) because it works entirely on the operation
-# definition structures above; the assembler reaches it via GadFinder.
+# definition structures below; the assembler reaches it via GadFinder.
 
 def _is_primitive(defn) -> bool:
     return bool(defn.realizations) and all(r.is_single_gadget for r in defn.realizations)
@@ -227,30 +243,55 @@ def _format(op, op1, op2) -> str:
     return f'{op}({inside})'
 
 
-def expand_steps(op: str, binding: dict) -> list[list[dict]]:
-    '''
-    Expand an operation into its alternative realizations, each a flat list of
-    2-operand primitive steps. A compound operation yields one chain per
-    realization, and one per combination of its operation references' own
-    alternatives (cartesian product): every possibility is a distinct ROP chain.
-    A primitive yields a single chain of one step (its single-gadget
-    realizations are resolved later by Operation.filter_gadgets).
-
-    Raises parser.ParserException if `op` (or a referenced sub-operation) is
-    undefined; GadFinder.expand_operation translates that to RopChainNotFound.
-    '''
+def _resolve_ref(name: str) -> OperationDef:
+    ''' Resolve a referenced operation name to its definition during
+        realization, raising a clear error for the recursive case. Realization
+        is a traversal of the operation catalog by name, so it consults the
+        parser here. '''
     try:
-        defn = parser.Parser().get_op(op)
+        return parser.Parser().get_op(name)
     except parser.ParserException as exc:
-        raise parser.ParserException(f'{op}: undefined operation referenced') from exc
+        raise parser.ParserException(f'{name}: undefined operation referenced') from exc
+
+
+def realize(defn: OperationDef, binding: dict, _depth: int = 0) -> list[list[dict]]:
+    '''
+    Realize an operation definition into its alternative realizations, each a
+    flat list of 2-operand primitive steps. A compound operation yields one
+    chain per realization, and one per combination of its operation references'
+    own alternatives (cartesian product): every possibility is a distinct ROP
+    chain. A primitive yields a single chain of one step (its single-gadget
+    realizations are matched later by match_gadgets).
+
+    Nested operation references are resolved by name against the parser catalog;
+    a missing one raises parser.ParserException, which
+    GadFinder.expand_operation translates to RopChainNotFound.
+
+    `_depth` is only for indenting the --verbose expansion trace and is set by
+    the recursive calls; callers pass the default.
+    '''
+    op = defn.name
+    # The expansion trace is built only under --verbose; guarding on `verbose`
+    # keeps the f-strings and _describe_link/_fmt_binding calls off the hot path.
+    verbose = debug.is_verbose()
+    pad = '  ' * _depth   # verbose-trace indentation for this recursion level
 
     if _is_primitive(defn):
         op1, op2 = _primary_operands(defn, binding)
-        return [[{'data': _format(op, op1, op2), 'op': op, 'defn': defn,
+        step = _format(op, op1, op2)
+        if verbose:
+            debug.info(f'{pad}expand {op}({_fmt_binding(binding)}): primitive -> {step}')
+        return [[{'data': step, 'op': op, 'defn': defn,
                   'op1': op1, 'op2': op2}]]
 
+    if verbose:
+        debug.info(f'{pad}expand {op}({_fmt_binding(binding)}): compound, '
+                   f'{len(defn.realizations)} realization(s)')
     chains: list[list[dict]] = []
-    for real in defn.realizations:
+    for ridx, real in enumerate(defn.realizations):
+        if verbose:
+            debug.info(f'{pad}  realization #{ridx}: '
+                       f'[{" ; ".join(_describe_link(link) for link in real.links)}]')
         # Each link contributes a list of alternative sub-chains; the cartesian
         # product over the links yields this realization's chains.
         link_alternatives = []
@@ -258,7 +299,8 @@ def expand_steps(op: str, binding: dict) -> list[list[dict]]:
             if isinstance(link, OpRef):
                 sub_binding = {slot: binding.get(expr, expr)
                                for slot, expr in link.bindings.items()}
-                link_alternatives.append(expand_steps(link.name, sub_binding))
+                link_alternatives.append(
+                    realize(_resolve_ref(link.name), sub_binding, _depth + 2))
             else:   # inline Set
                 syn, names = _inline_operation_def(link)
                 # Step operand values are the resolved original operands, in the
@@ -266,15 +308,40 @@ def expand_steps(op: str, binding: dict) -> list[list[dict]]:
                 values = [binding.get(name, name) for name in names]
                 op1 = values[0] if len(values) > 0 else None
                 op2 = values[1] if len(values) > 1 else None
-                link_alternatives.append([[{'data': _format(syn.name, op1, op2),
+                inline_step = _format(syn.name, op1, op2)
+                if verbose:
+                    debug.info(f'{pad}    inline gadget -> {inline_step}')
+                link_alternatives.append([[{'data': inline_step,
                                             'op': syn.name, 'defn': syn,
                                             'op1': op1, 'op2': op2}]])
         if any(not alt for alt in link_alternatives):
+            if verbose:
+                debug.info(f'{pad}  realization #{ridx}: dropped '
+                           '(a link is not realizable on this architecture)')
             continue   # some link cannot be realized on this architecture
         for combo in product(*link_alternatives):
-            chains.append([step for part in combo for step in part])
+            chain = [step for part in combo for step in part]
+            if verbose:
+                debug.info(f'{pad}  chain: {" ; ".join(s["data"] for s in chain)}')
+            chains.append(chain)
 
+    if verbose:
+        debug.info(f'{pad}expand {op}: -> {len(chains)} chain(s)')
     return chains
+
+
+def _fmt_binding(binding: dict) -> str:
+    ''' Compact `slot=value` view of an operand binding for verbose traces. '''
+    return ', '.join(f'{slot}={value}' for slot, value in binding.items())
+
+
+def _describe_link(link) -> str:
+    ''' One-line description of a realization link for the verbose trace: an
+        operation reference with its bindings, or an inline gadget's mnemonics. '''
+    if isinstance(link, OpRef):
+        args = ', '.join(f'{slot}={expr}' for slot, expr in link.bindings.items())
+        return f'{link.name}({args})'
+    return ' ; '.join(ins.mnemonic for ins in link.items)
 
 
 class OperationDef:
@@ -298,6 +365,38 @@ class OperationDef:
 
     def add(self, realization):
         self.realizations.append(realization)
+
+    def mark_unavailable(self, reason=None):
+        ''' Flag this operation as not realizable on the current architecture. '''
+        self.available = False
+        self.unavailable_reason = reason
+
+    def add_realization(self, links):
+        '''
+        Append a realization built from neutral link data, so callers (the
+        format parsers) construct definitions through OperationDef alone and
+        never touch the internal Realization/Set/OpRef/Instruction/Operand
+        nodes. `links` is an ordered list; each link is either:
+
+          {'gadget': [{'mnemonic': str, 'operands': [str, ...]}, ...],
+           'writes': [...], 'reads': [...]}   -- instructions of one gadget
+          {'opref': str, 'bindings': {slot: value, ...}}  -- reuse another op
+        '''
+        real = Realization()
+        for link in links:
+            if 'opref' in link:
+                real.add(OpRef(link['opref'], link.get('bindings') or {}))
+                continue
+            s = Set()
+            for insn in link['gadget']:
+                ins = Instruction(insn['mnemonic'])
+                for operand in insn.get('operands') or ():
+                    ins.add(Operand(operand))
+                s.add(ins)
+            s.extra_writes = list(link.get('writes') or [])
+            s.extra_reads = list(link.get('reads') or [])
+            real.add(s)
+        self.realizations.append(real)
 
 
 class Realization:
@@ -356,34 +455,28 @@ class Set:
                     operand.reg = mapping[operand.reg]
         return clone
 
-    def is_equal(self, decodes, protect=None):
+    def is_equal(self, decodes):
         '''
         Match this pattern against a gadget's decoded instructions.
 
         The gadget is viewed as [frame prologue] [operation body] [epilogue].
         The architecture's frame prologue (Architecture.is_frame_prefix) -- a
         leading run of framing instructions, e.g. the RISC-V `ld ra, off(sp)`
-        restore; empty on x86/AArch64 -- is skipped, and the operation's FIRST
-        instruction must sit right after it (position 0 when the prologue is
-        empty). This anchors detection to real gadgets instead of matching an
-        operation buried behind arbitrary leading instructions.
+        restore; empty on x86/AArch64 -- is skipped, and the operation's
+        instructions must then match a *consecutive* run starting right after it
+        (position 0 when the prologue is empty). This anchors detection to real
+        gadgets instead of matching an operation buried behind arbitrary leading
+        instructions, and requires the pattern instructions to be adjacent:
+        `push src ; pop dst` realizes `mov(dst, src)`, but
+        `push src ; nop ; pop dst` does not. Instructions after the run form the
+        epilogue.
 
-        The remaining pattern instructions then match as an ordered subsequence:
-        they must appear in order but may be separated by other instructions
-        (e.g. `push rbx ; nop ; pop rax` still realizes `push ; pop`). Trailing
-        instructions after the last matched one form the epilogue.
-
-        `protect`, if given, is a callable (bindings) -> set of the operation's
-        destination registers. A match is rejected when any epilogue instruction
-        overwrites a destination the operation actually produces -- a
-        "contradictory" gadget (e.g. `add rax, rbx ; mov rax, rcx ; ret`) whose
-        result never reaches the terminator. Doing this here fails fast, before
-        the gadget is annotated.
-
-        Returns (matched, bindings) with the first consistent binding found.
+        Returns (matched, bindings, indices); `indices` are the (contiguous)
+        positions of the matched pattern instructions, used by the caller
+        (Gadget.result_clobbered) to reject contradictory gadgets.
         '''
         if not self.items:
-            return (True, {})
+            return (True, {}, [])
 
         arch = arch_singleton.arch
         start = 0
@@ -391,87 +484,23 @@ class Set:
             start += 1
 
         if len(decodes) - start < len(self.items):
-            return (False, {})
+            return (False, {}, [])
 
-        # The operation's first instruction is anchored at `start`; the rest
-        # follow as an ordered subsequence.
-        (equal, binds) = self.items[0].is_equal(decodes[start])
-        if not equal:
-            return (False, {})
+        # The pattern matches a consecutive run anchored at `start`.
         bindings: dict = {}
-        if not self._merge(bindings, binds):
-            return (False, {})
-
-        (ok, bindings, indices) = self._match_subsequence(1, decodes, start + 1,
-                                                          bindings, [start])
-        if not ok:
-            return (False, {})
-        if protect is not None and self._result_clobbered(decodes, indices, protect(bindings)):
-            return (False, {})
-        return (True, bindings)
-
-    def _match_subsequence(self, item_idx, decodes, start, bindings, indices):
-        ''' Place self.items[item_idx:] onto increasing positions of `decodes`
-            (>= start), backtracking on binding conflicts. `indices` collects
-            the matched instruction positions. '''
-        if item_idx == len(self.items):
-            return (True, bindings, indices)
-        item = self.items[item_idx]
-        remaining = len(self.items) - item_idx
-        # Leave room for the remaining items at strictly increasing positions.
-        for i in range(start, len(decodes) - remaining + 1):
-            (equal, binds) = item.is_equal(decodes[i])
+        indices = []
+        for offset, item in enumerate(self.items):
+            pos = start + offset
+            (equal, binds) = item.is_equal(decodes[pos])
             if not equal:
-                continue
-            merged = dict(bindings)
-            if not self._merge(merged, binds):
-                continue
-            (ok, result, idxs) = self._match_subsequence(item_idx + 1, decodes,
-                                                         i + 1, merged, indices + [i])
-            if ok:
-                return (ok, result, idxs)
-        return (False, {}, [])
+                return (False, {}, [])
+            for name, val in binds.items():   # fold in per-instruction bindings
+                if name in bindings and bindings[name] != val:
+                    return (False, {}, [])    # conflicting operand reassignment
+                bindings[name] = val
+            indices.append(pos)
 
-    def _result_clobbered(self, decodes, indices, dst_regs):
-        ''' Whether the operation's destination is overwritten before the
-            terminator. `dst_regs` are the operation's declared destinations;
-            they are intersected with the registers the matched instructions
-            actually write (so a store, whose result is in memory, protects
-            nothing and is never falsely rejected). A gadget is contradictory if
-            an instruction between the last matched one and the terminator
-            writes such a register.
-
-            The final (terminating) instruction is excluded: it is control flow,
-            and its incidental write to the stack pointer (an x86 `ret` pops) is
-            the gadget's exit mechanism, not a clobber of the result -- so a
-            stack-pointer operation like `add rsp, 8 ; ret` is not contradictory. '''
-        if not dst_regs:
-            return False
-
-        arch = arch_singleton.arch
-
-        def writes(insn):
-            return {arch.normalize_reg(insn.reg_name(r))
-                    for r in arch.written_registers(insn)}
-
-        produced = {reg for i in indices for reg in writes(decodes[i])}
-        guarded = dst_regs & produced
-        if not guarded:
-            return False
-
-        last = max(indices)
-        clobbered = {reg for insn in decodes[last + 1:-1] for reg in writes(insn)}
-        return bool(guarded & clobbered)
-
-    @staticmethod
-    def _merge(bindings: dict, binds: dict) -> bool:
-        ''' Fold `binds` into `bindings` in place; False on a conflicting
-            reassignment of an abstract operand. '''
-        for name, val in binds.items():
-            if name in bindings and bindings[name] != val:
-                return False
-            bindings[name] = val
-        return True
+        return (True, bindings, indices)
 
 
 class Instruction:

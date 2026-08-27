@@ -20,9 +20,35 @@ import struct
 import capstone
 import pytest
 
+import rop3.operation as operation
+import rop3.parser as parser
 from rop3.arch import arch_singleton
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.gadget import Gadget
+
+
+class _OpMatcher:
+    ''' Test shim standing in for the former Operation class: it resolves a
+        ROPLang name to its OperationDef and matches gadgets via
+        operation.match_gadgets, so tests keep the compact
+        `make_operation(name, operands).filter_gadgets(gadgets)` form while the
+        production API is plain functions. '''
+    def __init__(self, name, operands):
+        self.defn = parser.Parser().get_op(name)
+        if not self.defn.available:
+            reason = self.defn.unavailable_reason or 'not available for this architecture'
+            raise parser.OperationNotAvailable(f'{self.defn.name}: {reason}')
+        self.operands = operands
+
+    def filter_gadgets(self, gadgets, reject_clobbered=True):
+        return operation.match_gadgets(self.defn, self.operands, gadgets,
+                                       reject_clobbered=reject_clobbered)
+
+
+def make_operation(name, operands=None):
+    ''' Resolve a named ROPLang op (as gadfinder does) and return a matcher whose
+        .filter_gadgets(gadgets) delegates to operation.match_gadgets. '''
+    return _OpMatcher(name, operands)
 
 
 @pytest.fixture(autouse=True)

@@ -22,7 +22,7 @@ import glob
 import capstone
 
 import rop3.parser as parser
-import rop3.operation as operation
+from rop3.operation import OperationDef
 
 from rop3.arch import arch_singleton
 
@@ -104,7 +104,7 @@ class YamlParser:
               <arch>:
                 - steps: [ {mnemonic|operation, op1, op2, ...}, ... ]
         '''
-        defn = operation.OperationDef(
+        defn = OperationDef(
             op,
             operands=content.get('operands', 0),
             dst_roles=self._resolve_roles(content.get('dst')),
@@ -118,56 +118,54 @@ class YamlParser:
             #     available: false
             #     reason: RISC-V has no condition/carry flags
             if arch_block.get('available', True) is False:
-                defn.available = False
-                defn.unavailable_reason = arch_block.get('reason')
+                defn.mark_unavailable(arch_block.get('reason'))
         elif arch_block:
             for entry in arch_block:
                 steps = entry.get('steps', []) if isinstance(entry, dict) else entry
-                defn.add(self._parse_realization(steps))
+                defn.add_realization(self._realization_links(steps))
 
         return defn
 
-    def _parse_realization(self, steps):
+    def _realization_links(self, steps):
         '''
-        Build a Realization. Each entry of `steps` is one chain link:
+        Translate the YAML steps of one realization into the neutral link data
+        that OperationDef.add_realization consumes. Each entry of `steps` is one
+        chain link:
 
           - a nested list of `mnemonic` steps  -> a single gadget whose
-            instructions must appear together (one Set);
-          - a single `mnemonic` step           -> a one-instruction gadget;
-          - an `operation` step                -> an OpRef (recurses into
-            another operation), replacing the old `compose:` mechanism.
+            instructions must appear together;
+          - a single `mnemonic` step           -> a one-instruction gadget
+            (with optional implicit `writes`/`reads`);
+          - an `operation` step                -> a reference into another
+            operation (replacing the old `compose:` mechanism).
 
         Successive links are distinct gadgets in the chain. To place several
         instructions in the *same* gadget, nest them in a list.
         '''
-        real = operation.Realization()
-
+        links = []
         for entry in steps:
             if isinstance(entry, list):
-                s = operation.Set()
-                for step in entry:
-                    s.add(self._build_instruction(step))
-                real.add(s)
+                links.append({'gadget': [self._instruction_data(s) for s in entry]})
             elif 'mnemonic' in entry:
-                s = operation.Set()
-                s.add(self._build_instruction(entry))
-                s.extra_writes = self._resolve_roles(entry.get('writes'))
-                s.extra_reads = self._resolve_roles(entry.get('reads'))
-                real.add(s)
+                links.append({
+                    'gadget': [self._instruction_data(entry)],
+                    'writes': self._resolve_roles(entry.get('writes')),
+                    'reads': self._resolve_roles(entry.get('reads')),
+                })
             elif 'operation' in entry:
                 bindings = {
                     k: self._resolve_alias(v)
                     for k, v in entry.items() if _OP_KEY_RE.match(k)
                 }
-                real.add(operation.OpRef(entry['operation'], bindings))
+                links.append({'opref': entry['operation'], 'bindings': bindings})
 
-        return real
+        return links
 
-    def _build_instruction(self, step):
-        ins = operation.Instruction(step['mnemonic'])
+    def _instruction_data(self, step):
+        ''' One instruction as neutral data: its mnemonic and its alias-resolved
+            operands in positional (op1, op2, ...) order. '''
         op_keys = sorted((k for k in step if _OP_KEY_RE.match(k)),
                          key=lambda k: int(k[2:]))
-        for key in op_keys:
-            ins.add(operation.Operand(self._resolve_alias(step[key])))
-        return ins
+        return {'mnemonic': step['mnemonic'],
+                'operands': [self._resolve_alias(step[key]) for key in op_keys]}
 
