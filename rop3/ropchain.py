@@ -21,29 +21,24 @@ from typing import Iterator
 
 import rop3.debug as debug
 import rop3.utils as utils
-import rop3.operation as operation
-
-import rop3.parser as parser
-
-from rop3.arch import arch_singleton
 
 from .gadget import Gadget, heuristic_basic_count
 
 '''
-Matches the following with OP, DST and SRC placeholders:
+Matches an operation line with an arbitrary number of comma-separated operands:
 
-lc()            -> OP: lc,  DST: None, SRC: None
-neg(reg1)       -> OP: neg, DST: reg1, SRC: None
-sc(,reg1)       -> OP: sc,  DST: None, SRC: reg1
-mov(reg3,reg2)  -> OP: mov, DST: reg3, SRC: reg2
-mov(reg3, reg2) -> OP: mov, DST: reg3, SRC: reg2
+    neg(reg1)              -> OP: neg, ARGS: 'reg1'
+    mov(reg3, reg2)        -> OP: mov, ARGS: 'reg3, reg2'
+    gcf-ltc(r1, r2, r3)    -> OP: gcf, ARGS: 'r1, r2, r3'
+    sub(rax, -1)           -> OP: sub, ARGS: 'rax, -1'
 '''
 REGEX_OP = re.compile(
-    r'^(?P<OP>[a-zA-Z0-9-]+)' + \
-    r'\((?P<DST>[a-zA-Z0-9-]+)?(, ?(?P<SRC>[a-zA-Z0-9-]+))?\)' + \
+    r'^(?P<OP>[a-zA-Z0-9-]+)'
+    r'\((?P<ARGS>[^)]*)\)'
     r'(?:\s*;.*)?$'
 )
 COMMENT = re.compile(r'^(?:\s*;.*)?$')
+
 
 class RopChain:
     '''
@@ -63,77 +58,33 @@ class RopChain:
         return self.search(gadgets, ropchain)
 
     def search(self, gadgets, ropchain, prune_equivalent=True) -> Iterator[list[Gadget]]:
-        return self._get_pruned_ropchain_iterator(gadgets, ropchain, prune_equivalent)
+        '''
+        `ropchain` is the parsed request: a list of steps ({op, operands}). The
+        gadfinder classifies it into realizations -- one per compound-operation
+        alternative -- each a list of (primitive_step, gadgets) pairs; every
+        realization is resolved by Tree and assembled by DFS.
+        '''
+        realizations = self.gadfinder.classify_ropchain(gadgets, ropchain)
+        found = False
+        for bundle in realizations:
+            try:
+                for solution in self._assemble(bundle, prune_equivalent):
+                    found = True
+                    yield solution
+            except RopChainNotFound:
+                continue
+        if not found:
+            raise RopChainNotFound('no suitable ropchain combination found')
 
-    def _get_pruned_ropchain_iterator(self, gadgets, ropchain, prune_equivalent) -> Iterator[list[Gadget]]:
-        tree = Tree(ropchain)
-        (combinations, ops_gadgets) = tree.traverse(gadgets)
-        per_comb = self._build_per_comb_gadgets(ropchain, combinations, ops_gadgets, prune_equivalent)
-        ops_gadgets = None
-        return self._construct_ropchain(ropchain, per_comb, combinations)
-
-    def expand_steps(self, steps: list[dict], dst, src) -> list[dict]:
-        """
-        Expands ROPLang complex OPs into ROPChains
-        """
-        dst_key = dst if dst is not None else 'reg_dst'
-        src_key = src if src is not None else 'reg_src'
-
-        expanded = []
-        for step in steps:
-            step_op1 = step.get('op1')
-            step_op2 = step.get('op2')
-    
-            def resolve(placeholder, _dst=dst_key, _src=src_key):
-                if placeholder == 'dst': return _dst
-                if placeholder == 'src': return _src
-                return placeholder
-    
-            sub_op  = step['operation']
-            sub_dst = resolve(step_op1) if step_op1 else None
-            sub_src = resolve(step_op2) if step_op2 else None
-    
-            resolved = parser.Parser().get_op(sub_op)
-            if isinstance(resolved, parser.CompositeOperation):
-                expanded.extend(self.expand_steps(resolved.steps, sub_dst, sub_src))
-            else:
-                expanded.append({
-                    'data': f'{sub_op}({sub_dst or ""},{sub_src or ""})',
-                    'op':   sub_op,
-                    'dst':  sub_dst,
-                    'src':  sub_src,
-                })
-    
-        return expanded
-
-    def _parse_ropfile(self, ropfile: str) -> list[dict[str, str]]:
-        ret = []
-    
-        data = utils.read_file(ropfile).splitlines()
-        for i, line in enumerate(data, start=1):
-            match = REGEX_OP.search(line)
-            if match:
-                op_name = match.group('OP')
-                dst     = match.group('DST')
-                src     = match.group('SRC')
-                resolved = parser.Parser().get_op(op_name)
-    
-                if isinstance(resolved, parser.CompositeOperation):
-                    ret.extend(self.expand_steps(resolved.steps, dst, src))
-                else:
-                    ret.append({
-                        'data': match.group(0),
-                        'op':   op_name,
-                        'dst':  dst,
-                        'src':  src,
-                    })
-    
-            elif COMMENT.search(line):
-                pass
-            else:
-                debug.error(f'{ropfile}: Line {i}: {line}: Unable to parse operation')
-    
-        return ret
+    def _assemble(self, bundle, prune_equivalent) -> Iterator[list[Gadget]]:
+        ''' Resolve one realization's register slots and assemble it by DFS.
+            `bundle` is a list of (primitive_step, classified_gadgets) pairs. '''
+        steps = [step for step, _ in bundle]
+        ops_gadgets = [gadgets for _, gadgets in bundle]
+        tree = Tree(steps, ops_gadgets, self.gadfinder)
+        combinations = tree.traverse()
+        per_comb = self._build_per_comb_gadgets(steps, combinations, ops_gadgets, prune_equivalent)
+        return self._construct_ropchain(steps, per_comb, combinations)
 
     def _build_per_comb_gadgets(
         self,
@@ -142,29 +93,23 @@ class RopChain:
         ops_gadgets: list[list[Gadget]],
         prune_equivalent: bool,
     ) -> list[list[list[Gadget]]]:
-        """
-        For each combination, produce a per-step gadget list that is already:
-          - filtered to gadgets matching the combination's req_dst / req_src
-          - sorted by heuristic_basic_count (fewest side effects first)
-          - pruned of subsumed gadgets (when prune_equivalent), exploiting sort order
-        Returns an array indexed [comb_idx][step_idx].
-
-        Each operation's gadget list is sorted once up front, and the
-        filter+prune result is memoized per (step, req_dst, req_src): different
-        combinations frequently request the same concrete registers for a given
-        step, so this avoids recomputing the same filtered list repeatedly.
-        """
+        '''
+        For each register combination, produce a per-step gadget list already
+        filtered to the combination's concrete slot registers, sorted by
+        heuristic_basic_count, and (optionally) pruned of subsumed gadgets. The
+        filter+prune result is memoized per (step, req_dst, req_src).
+        '''
         sorted_gadgets = [sorted(gl, key=heuristic_basic_count) for gl in ops_gadgets]
         cache: dict = {}
 
-        def build_step(i, req_dst, req_src):
+        def build_step(i, req_op1, req_op2):
             key = (i,
-                   None if req_dst is None else str(req_dst),
-                   None if req_src is None else str(req_src))
+                   None if req_op1 is None else str(req_op1),
+                   None if req_op2 is None else str(req_op2))
             if key not in cache:
-                filtered = [ gad for gad in sorted_gadgets[i] \
-                        if (req_dst is None or str(gad.dst) == str(req_dst)) \
-                        and (req_src is None or str(gad.src) == str(req_src)) ]
+                filtered = [gad for gad in sorted_gadgets[i]
+                            if (req_op1 is None or str(gad.slot_op1) == str(req_op1))
+                            and (req_op2 is None or str(gad.slot_op2) == str(req_op2))]
                 cache[key] = self._prune(filtered) if prune_equivalent else filtered
             return cache[key]
 
@@ -173,19 +118,19 @@ class RopChain:
             per_step = []
             for i in range(len(sorted_gadgets)):
                 op = ropchain[i]
-                req_dst = comb.get(op.get('dst'))
-                req_src = comb.get(op.get('src'))
-                per_step.append(build_step(i, req_dst, req_src))
+                req_op1 = comb.get(op.get('op1'))
+                req_op2 = comb.get(op.get('op2'))
+                per_step.append(build_step(i, req_op1, req_op2))
             result.append(per_step)
 
         return result
 
     def _prune(self, gadget_list: list[Gadget]) -> list[Gadget]:
-        """
+        '''
         Remove gadgets subsumed by an earlier gadget in the list. Assumes all
-        gadgets share the same (dst, src) pair and are sorted ascending by
-        heuristic_basic_count
-        """
+        gadgets share the same (slot_op1, slot_op2) and are sorted ascending by
+        heuristic_basic_count.
+        '''
         ret: list[Gadget] = []
         for gad in gadget_list:
             if not any(kept.subsumes(gad) for kept in ret):
@@ -198,63 +143,43 @@ class RopChain:
         per_comb_gadgets: list[list[list[Gadget]]],
         combinations: list[dict],
     ) -> Iterator[list[Gadget]]:
-        """
-        DFS over per-combination gadget lists.
-        Each per_comb_gadgets[i] is already filtered and optionally pruned
-        """
+        '''
+        DFS over per-combination gadget lists. Side effects are tracked with the
+        gadgets' dst/src register *sets*: a register a step reads must not be
+        clobbered, a register a step writes gets a fresh value (clearing an
+        earlier clobber), and a store's address register (read, not written)
+        keeps its clobber (issue #36).
+        '''
         found_any = False
-        arch = arch_singleton.arch
 
         for comb, comb_gadgets in zip(combinations, per_comb_gadgets):
-            # Precompute the effective src register per step for the side-effect guard.
-            effective_srcs: list = []
-            for op in ops_ropchain:
-                src_key = op.get('src')
-                req_src = comb.get(src_key)
-                if req_src is not None:
-                    effective_srcs.append(arch.normalize_reg(req_src))
-                elif src_key and not (isinstance(src_key, str) and src_key.lower().startswith('reg')):
-                    effective_srcs.append(arch.normalize_reg(src_key))
-                else:
-                    effective_srcs.append(None)
 
-            def backtrack(
-                index: int,
-                ropchain: list[Gadget],
-                side_effected: Counter[str],
-            ) -> Iterator[list[Gadget]]:
+            def backtrack(index: int, chain: list[Gadget],
+                          clobbered: Counter) -> Iterator[list[Gadget]]:
                 if index == len(ops_ropchain):
-                    yield ropchain.copy()
-                    return
-
-                effective_src = effective_srcs[index]
-                if effective_src and side_effected.get(effective_src, 0) > 0:
+                    yield chain.copy()
                     return
 
                 for gad in comb_gadgets[index]:
-                    for side_reg in gad.side_regs:
-                        side_effected[side_reg] += 1
+                    if any(clobbered.get(reg, 0) > 0 for reg in gad.src):
+                        continue
 
-                    # A gadget that explicitly writes its dst produces a fresh
-                    # value there, so clear any earlier clobber on it. Skip this
-                    # for store operations (mov [dst], src): there dst is the
-                    # address base register, which is read (not written), so its
-                    # clobber state must be preserved (issue #36).
-                    norm_dst = arch.normalize_reg(gad.dst) if gad.dst else None
-                    refresh_dst = bool(norm_dst) and gad.writes_reg(norm_dst)
-                    saved_dst = side_effected[norm_dst] if refresh_dst else 0
-                    if saved_dst:
-                        side_effected[norm_dst] = 0
+                    for reg in gad.side_regs:
+                        clobbered[reg] += 1
+                    refreshed = {}
+                    for reg in gad.dst:
+                        if gad.writes_reg(reg):
+                            refreshed[reg] = clobbered.get(reg, 0)
+                            clobbered[reg] = 0
 
-                    ropchain.append(gad)
-                    yield from backtrack(index + 1, ropchain, side_effected)
-                    ropchain.pop()
+                    chain.append(gad)
+                    yield from backtrack(index + 1, chain, clobbered)
+                    chain.pop()
 
-                    if saved_dst:
-                        side_effected[norm_dst] = saved_dst
-
-                    for side_reg in gad.side_regs:
-                        side_effected[side_reg] -= 1
+                    for reg, old in refreshed.items():
+                        clobbered[reg] = old
+                    for reg in gad.side_regs:
+                        clobbered[reg] -= 1
 
             for valid_chain in backtrack(0, [], Counter()):
                 found_any = True
@@ -263,100 +188,103 @@ class RopChain:
         if not found_any:
             raise RopChainNotFound('no suitable ropchain combination found in DFS')
 
-
-class Tree:
-
-    def __init__(self, ropchain):
-        self.ropchain = ropchain
-        self.op_ropchain = self._parse_ropchain()
-
-    def traverse(self, gadgets: list[Gadget]):
-        """
-        Gadgets are the actual rop gadgets present in the binary.
-        Returns (combinations, ops_gadgets) where each combination is a flat
-        dict mapping every abstract-register name to a normalized concrete reg.
-        """
-        (state, ops_gadgets, op_pairs) = self._get_initial_state(gadgets)
-        combinations = self._traverse(state, op_pairs)
-        debug.info(f'Exploring {len(combinations)} register combinations')
-        return (combinations, ops_gadgets)
-
-    def _parse_ropchain(self) -> list[operation.Operation]:
+    def _parse_ropfile(self, ropfile: str) -> list[dict]:
         ret = []
-        arch = arch_singleton.arch
-    
-        arch_aliases = {
-            'REG_SP': arch.sp,
-            'REG_BP': arch.bp,
-        }
 
-        def resolve(val):
-            if val is None:
-                return None
-            if val in arch_aliases:
-                return arch_aliases[val]
-            if isinstance(val, str) and val.lower().startswith('reg'):
-                return None
-            return val
-    
-        for item in self.ropchain:
-            dst = item['dst']
-            src = item['src']
-   
-            ret.append(operation.Operation(item['op'], resolve(dst), resolve(src)))
-    
+        data = utils.read_file(ropfile).splitlines()
+        for i, line in enumerate(data, start=1):
+            match = REGEX_OP.search(line)
+            if match:
+                op_name = match.group('OP')
+                args = match.group('ARGS').strip()
+                raw = [a.strip() for a in args.split(',')] if args else []
+                operands = self._strip_legacy_commas(op_name, raw)
+                ret.append({
+                    'data': match.group(0),
+                    'op': op_name,
+                    'operands': operands,
+                })
+            elif COMMENT.search(line):
+                pass
+            else:
+                debug.error(f'{ropfile}: Line {i}: {line}: Unable to parse operation')
+
         return ret
 
-    def _get_initial_state(self, gadgets: list[Gadget]):
-        """
-        Build the constraint state.
+    @staticmethod
+    def _strip_legacy_commas(op_name: str, raw: list[str]) -> list[str]:
+        '''
+        LEGACY: older ROPLang files used a comma's position to mark an operand's
+        role -- a comma *after* the first operand separated dst from src
+        (`op(dst, src)`), and a lone source could be written with a comma
+        *before* it (`op(, src)`) to push it into the src slot. Operands are now
+        purely positional (op1, op2, ...) and a lone operand is always op1, so
+        the empty slot such a comma produces is dropped. A comma before the
+        first operand is explicitly ignored -- it never shifts the operand into
+        op2 -- and warns. Kept only for backward compatibility.
+        '''
+        if raw and raw[0] == '':
+            debug.warning(f'{op_name}: a comma before the first operand is a legacy '
+                          f'dst/src marker; it is ignored (operands are positional: '
+                          f'op1, op2, ...)')
+        elif '' in raw:
+            debug.warning(f'{op_name}: an empty operand from a legacy dst/src comma '
+                          f'is ignored (operands are positional: op1, op2, ...)')
+        return [a for a in raw if a]
 
-        state maps each abstract-reg name (str) to the list of possible
-        concrete registers seen across all gadgets for that slot.
-        """
+
+class Tree:
+    '''
+    Resolves the concrete register assignments for the generic register slots
+    (regN) shared across the (already expanded, 2-operand) chain steps. Works
+    from the per-step classified gadgets the gadfinder produced; `gadfinder` is
+    consulted only for the arch's abstract-register predicate.
+    '''
+    def __init__(self, steps, ops_gadgets, gadfinder):
+        self.ropchain = steps
+        self.ops_gadgets = ops_gadgets
+        self.gadfinder = gadfinder
+
+    def traverse(self):
+        (state, op_pairs) = self._get_initial_state()
+        combinations = self._traverse(state, op_pairs)
+        debug.info(f'Exploring {len(combinations)} register combinations')
+        return combinations
+
+    def _get_initial_state(self):
         state: dict[str, list[str]] = {}
-        ops_gadgets: list[list[Gadget]] = []
         op_pairs: list = []
-
-        arch = arch_singleton.arch
 
         def is_generic(key):
             return key is not None and isinstance(key, str) and key.lower().startswith('reg')
 
-        for item, op in zip(self.ropchain, self.op_ropchain):
-            op_gadgets = op.filter_gadgets(gadgets)
-            if not op_gadgets:
-                raise RopChainNotFound(f'{item["data"]}: Unable to find gadgets for operation')
-            debug.info(f'{item["data"]}: {len(op_gadgets)} matching gadgets')
+        for item, op_gadgets in zip(self.ropchain, self.ops_gadgets):
+            op1_key, op2_key = item.get('op1'), item.get('op2')
 
-            ops_gadgets.append(op_gadgets)
-
-            dst_key, src_key = item.get('dst'), item.get('src')
-
-            if is_generic(dst_key) and is_generic(src_key):
+            if is_generic(op1_key) and is_generic(op2_key):
                 pairs = frozenset(
-                    (g.dst, g.src)
+                    (g.slot_op1, g.slot_op2)
                     for g in op_gadgets
-                    if g.has_dst() and g.has_src()
-                    and arch.is_valid_abstract_reg(g.dst)
-                    and arch.is_valid_abstract_reg(g.src)
+                    if g.slot_op1 and g.slot_op2
+                    and self.gadfinder.is_abstract_reg(g.slot_op1)
+                    and self.gadfinder.is_abstract_reg(g.slot_op2)
                 )
-                op_pairs.append((dst_key, src_key, pairs))
-                dst_vals = sorted({p[0] for p in pairs})
-                src_vals = sorted({p[1] for p in pairs})
+                op_pairs.append((op1_key, op2_key, pairs))
+                op1_vals = sorted({p[0] for p in pairs})
+                op2_vals = sorted({p[1] for p in pairs})
             else:
                 op_pairs.append(None)
-                dst_vals = sorted({
-                    g.dst for g in op_gadgets
-                    if g.has_dst() and arch.is_valid_abstract_reg(g.dst)
-                }) if is_generic(dst_key) else []
+                op1_vals = sorted({
+                    g.slot_op1 for g in op_gadgets
+                    if g.slot_op1 and self.gadfinder.is_abstract_reg(g.slot_op1)
+                }) if is_generic(op1_key) else []
 
-                src_vals = sorted({
-                    g.src for g in op_gadgets
-                    if g.has_src() and arch.is_valid_abstract_reg(g.src)
-                }, key=str) if is_generic(src_key) else []
+                op2_vals = sorted({
+                    g.slot_op2 for g in op_gadgets
+                    if g.slot_op2 and self.gadfinder.is_abstract_reg(g.slot_op2)
+                }, key=str) if is_generic(op2_key) else []
 
-            for key, vals in ((dst_key, dst_vals), (src_key, src_vals)):
+            for key, vals in ((op1_key, op1_vals), (op2_key, op2_vals)):
                 if key is None or not is_generic(key):
                     continue
                 if key in state:
@@ -364,44 +292,44 @@ class Tree:
                 else:
                     state[key] = vals
 
-        return (state, ops_gadgets, op_pairs)
+        return (state, op_pairs)
 
     def _traverse(self, state: dict[str, list[str]], op_pairs: list) -> list[dict[str, str]]:
-        """
-        Returns a list of dicts: { abstract_name -> concrete_reg }.
-        """
+        '''
+        Enumerate the register assignments for the abstract slots. Distinct
+        slots MAY share a register: an operation can legitimately alias its
+        operands (e.g. `sub op1, op2 ; adc op1, REGn` with op1 == op2). Validity
+        is enforced by _check_pairs (only real gadget pairs) and, later, by the
+        DFS side-effect tracking -- not by forcing every slot to differ.
+        '''
         items = list(state.items())
         results: list[dict[str, str]] = []
 
-        def backtrack(index: int, current: dict[str, str], used: set[str]) -> None:
+        def backtrack(index: int, current: dict[str, str]) -> None:
             if index == len(items):
-                if self._check_pairs(current, op_pairs):
-                    results.append(current.copy())
+                results.append(current.copy())
                 return
 
             key, possible_values = items[index]
 
             for val in possible_values:
-                if val in used:
-                    continue
                 current[key] = val
-                used.add(val)
-                backtrack(index + 1, current, used)
+                if self._check_pairs(current, op_pairs):
+                    backtrack(index + 1, current)
                 del current[key]
-                used.remove(val)
 
-        backtrack(0, {}, set())
+        backtrack(0, {})
         return results
 
     def _check_pairs(self, combo: dict[str, str], op_pairs: list) -> bool:
         for entry in op_pairs:
             if entry is None:
                 continue
-            dst_key, src_key, pairs = entry
-            dst_val = combo.get(dst_key)
-            src_val = combo.get(src_key)
-            if dst_val is not None and src_val is not None:
-                if (dst_val, src_val) not in pairs:
+            op1_key, op2_key, pairs = entry
+            op1_val = combo.get(op1_key)
+            op2_val = combo.get(op2_key)
+            if op1_val is not None and op2_val is not None:
+                if (op1_val, op2_val) not in pairs:
                     return False
         return True
 

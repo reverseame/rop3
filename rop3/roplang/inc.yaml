@@ -1,13 +1,36 @@
+# Increment: op1 <- op1 + 1
 inc:
-  -
-    - mnemonic: add
-      op1: dst
-      op2: 1
-  -
-    - mnemonic: sub
-      op1: dst
-      op2: -1
-  -
-    - mnemonic: inc
-      op1: dst
+  operands: 1
+  dst: [op1]
+  src: [op1]
 
+  x86:
+    # add op1, 1
+    - steps:
+        - mnemonic: add
+          op1: op1
+          op2: 1
+    # sub op1, -1
+    - steps:
+        - mnemonic: sub
+          op1: op1
+          op2: -1
+    # inc op1
+    - steps:
+        - mnemonic: inc
+          op1: op1
+
+  arm:
+    - steps:
+        - mnemonic: add
+          op1: op1
+          op2: op1
+          op3: '#1'
+
+  riscv:
+    # addi op1, op1, 1
+    - steps:
+        - mnemonic: addi
+          op1: op1
+          op2: op1
+          op3: 1

@@ -18,6 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import rop3.gadfinder as gadfinder
 from rop3.gadfinder import GadFinder
 from rop3.ropchain import RopChain
+from rop3.binary import Binary
 
 
 class Rop3:
@@ -28,16 +29,17 @@ class Rop3:
         from rop3 import Rop3
         r = Rop3("libc.so.6", base="0x7f0000000000")
         r.gadgets()                       # list[Gadget]
-        r.find_op("mov", dst="rdi", src="rax")
+        r.find_op("mov", ["rdi", "rax"])
         r.ropchain("chain.txt")
 
     The discovered gadgets are scanned once and cached on the instance, so
     repeated queries (and the interactive mode) do not re-scan the binary.
     '''
 
-    def __init__(self, binaries, *, depth=gadfinder.DEPTH, rop=True, jop=False,
+    def __init__(self, binaries, *, depth=None, rop=True, jop=False,
                  retf=False, all=False, allow_undeterministic=False,
-                 allow_complex_mem=False, avoid_canary=True, base=None,
+                 allow_complex_mem=False, avoid_canary=True, ret_imm=False,
+                 reg_aliases=False, keep_contradictory=False, framed=True, base=None,
                  badchars=None, badchar_bytes=None, arch=None, symbols=False,
                  cache=False, cache_dir=None, jobs=1):
         self.binaries = [binaries] if isinstance(binaries, str) else list(binaries)
@@ -62,6 +64,14 @@ class Rop3:
             flags |= gadfinder.ALLOW_COMPLEX_MEM
         if avoid_canary:
             flags |= gadfinder.AVOID_CANARY
+        if ret_imm:
+            flags |= gadfinder.ALLOW_RET_IMM
+        if reg_aliases:
+            flags |= gadfinder.ALLOW_REG_ALIASES
+        if keep_contradictory:
+            flags |= gadfinder.KEEP_CONTRADICTORY
+        if not framed:
+            flags |= gadfinder.UNFRAMED
 
         self._finder = GadFinder(depth, flags, cache=cache, cache_dir=cache_dir,
                                  jobs=jobs)
@@ -97,9 +107,19 @@ class Rop3:
                 symbols=self.symbols)
         return self._gadgets
 
-    def find_op(self, op, dst=None, src=None):
-        ''' Gadgets (or ROP chains, for composite ops) implementing `op`. '''
-        return self._finder.find_op_from_gadgets(self.gadgets(), op, dst, src)
+    def describe(self):
+        ''' One metadata dict per input binary (format, architecture, pointer
+            width, instruction alignment, executable sections). Used for
+            verbose reporting; does not scan for gadgets. '''
+        bases = self.base if isinstance(self.base, list) \
+            else [self.base] * len(self.binaries)
+        return [Binary(fn, b, self.arch).describe()
+                for fn, b in zip(self.binaries, bases)]
+
+    def find_op(self, op, operands=None):
+        ''' Gadgets (or ROP chains, for compound ops) implementing `op`.
+            `operands` are positional: op1, op2, op3, ... '''
+        return self._finder.find_op_from_gadgets(self.gadgets(), op, operands)
 
     def ropchain(self, ropfile):
         ''' Iterator over ROP chains satisfying the operations in `ropfile`. '''

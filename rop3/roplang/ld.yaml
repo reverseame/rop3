@@ -1,7 +1,27 @@
-# Load
+# Load from memory: op1 <- [op2]
 ld:
-  # mov dst, [src]
-  -
-    - mnemonic: mov
-      op1: dst
-      op2: '[src]'
+  operands: 2
+  dst: [op1]
+  src: [op2]
+
+  x86:
+    - steps:
+        - mnemonic: mov
+          op1: op1
+          op2: '[op2]'
+
+  arm:
+    - steps:
+        - mnemonic: ldr
+          op1: op1
+          op2: '[op2]'
+
+  riscv:
+    - steps:
+        - mnemonic: ld
+          op1: op1
+          op2: '[op2]'
+    - steps:
+        - mnemonic: lw
+          op1: op1
+          op2: '[op2]'

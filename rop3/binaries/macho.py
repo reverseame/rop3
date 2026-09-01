@@ -29,15 +29,25 @@ from macholib.mach_o import (
 import rop3.binary as binary
 
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+from rop3.archs.aarch64_arch import AArch64_Architecture
 
 VM_PROT_EXECUTE = 0x04
 S_INSTRUCTION_ATTRS = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
 
 # Mach-O architecture name -> (rop3 architecture class)
+# Keyed by the lowercased macholib CPU_TYPE_NAMES value (which spells arm64
+# 'ARM64'); an arm64e slice shares the ARM64 cputype, so it maps here too.
 SUPPORTED_ARCHS = {
     'x86_64': X64_Architecture,
     'i386': X86_Architecture,
+    'arm64': AArch64_Architecture,
 }
+
+
+def _arch_name(cputype):
+    ''' Lowercased architecture name for a Mach-O cputype (None if unknown). '''
+    name = CPU_TYPE_NAMES.get(cputype)
+    return name.lower() if name is not None else None
 
 class MachO:
     def __init__(self, data, base, arch=None):
@@ -66,7 +76,7 @@ class MachO:
         '''
         available = {}   # arch name -> header (first occurrence)
         for header in self._macho.headers:
-            name = CPU_TYPE_NAMES.get(header.header.cputype)
+            name = _arch_name(header.header.cputype)
             if name is not None:
                 available.setdefault(name, header)
 
@@ -82,7 +92,7 @@ class MachO:
             return available[arch], SUPPORTED_ARCHS[arch]()
 
         for header in self._macho.headers:
-            name = CPU_TYPE_NAMES.get(header.header.cputype)
+            name = _arch_name(header.header.cputype)
             if name in SUPPORTED_ARCHS:
                 return header, SUPPORTED_ARCHS[name]()
 
@@ -132,7 +142,7 @@ class MachO:
             as the sections. macholib does not expand the nlist array, so it is
             parsed here from the file. Stripped binaries yield none. '''
         ret = []
-        is64 = self._arch.mode == capstone.CS_MODE_64
+        is64 = self._arch.address_size == 8
         entry_fmt = '<IBBHQ' if is64 else '<IBBhI'   # nlist_64 / nlist
         entry_size = struct.calcsize(entry_fmt)
         slice_off = self._header.offset

@@ -43,51 +43,114 @@ class Gadget:
     bytes: str = None
     count: int = None
     op: str = None
-    dst: str = None
-    src: str = None
+    dst: set = None    # concrete register names written (may overlap src)
+    src: set = None    # concrete register names read (may overlap dst)
     symbol: str = None
     side_regs: set[str] = field(init=False, default_factory=set)
-    side_mem: set[str] = field(init=False, default_factory=set)
+    # Concrete registers bound to the operation's two operand slots.
+    slot_op1: str = field(init=False, default=None)
+    slot_op2: str = field(init=False, default=None)
+    # Display form of the same two operand slot.
+    disp_op1: str = field(init=False, default=None)
+    disp_op2: str = field(init=False, default=None)
 
     def __post_init__(self):
         self.text_repr = ' ; '.join([f'{d.mnemonic} {d.op_str}' if d.op_str else \
                 d.mnemonic for d in self.decodes])
 
-    def has_dst(self) -> bool:
-        return self.dst is not None
-
-    def has_src(self) -> bool:
-        return self.src is not None
-
     def calculate_side_effects(self) -> None:
         arch = arch_singleton.arch
-        excluded = {arch.normalize_reg(r) for r in (self.dst, arch.sp) if r is not None}
+        excluded = {arch.normalize_reg(arch.sp)}
+        excluded |= {arch.normalize_reg(r) for r in (self.dst or ())}
 
         for decode in self.decodes:
-            explicit = {decode.reg_name(r) for r in decode.regs_write}
-            _, implicit_ids = decode.regs_access()
-            implicit = {decode.reg_name(r) for r in implicit_ids}
-            for reg in explicit | implicit:
-                normalized = arch.normalize_reg(reg)
+            for reg in arch.written_registers(decode):
+                normalized = arch.normalize_reg(decode.reg_name(reg))
                 if normalized not in excluded:
                     self.side_regs.add(normalized)
+
+    def _register_set(self, accessor) -> set[str]:
+        ''' Normalized registers accessed by the whole gadget via `accessor`
+            (arch.written_registers / arch.read_registers), excluding the stack
+            pointer (every ret/pop touches it, so it is noise). '''
+        arch = arch_singleton.arch
+        sp = arch.normalize_reg(arch.sp)
+        regs = set()
+        for decode in self.decodes:
+            for reg in accessor(decode):
+                normalized = arch.normalize_reg(decode.reg_name(reg))
+                if normalized != sp:
+                    regs.add(normalized)
+        return regs
+
+    def tuple_repr(self) -> str:
+        ''' Formal tuple representation of the gadget:
+            <op_name, op1[, op2], written registers, read registers> '''
+        arch = arch_singleton.arch
+        written = self._register_set(arch.written_registers)
+        read = self._register_set(arch.read_registers)
+
+        parts = [self.op or '']
+        for operand in (self.disp_op1, self.disp_op2):
+            if operand is not None:
+                parts.append(str(operand))
+        parts.append('{' + ', '.join(sorted(written)) + '}')
+        parts.append('{' + ', '.join(sorted(read)) + '}')
+        return '\u27e8' + ', '.join(parts) + '\u27e9'
 
     def writes_reg(self, normalized_reg: str) -> bool:
         ''' Whether the gadget explicitly or implicitly writes normalized_reg. '''
         arch = arch_singleton.arch
         for decode in self.decodes:
-            explicit = {decode.reg_name(r) for r in decode.regs_write}
-            _, implicit_ids = decode.regs_access()
-            implicit = {decode.reg_name(r) for r in implicit_ids}
-            for reg in explicit | implicit:
-                if arch.normalize_reg(reg) == normalized_reg:
+            for reg in arch.written_registers(decode):
+                if arch.normalize_reg(decode.reg_name(reg)) == normalized_reg:
                     return True
         return False
 
-    def subsumes(self, rhs) -> bool:
-        if str(self.dst) != str(rhs.dst):
+    def result_clobbered(self, matched_indices, dst_regs) -> bool:
+        ''' Whether this gadget overwrites an operation's result before its
+            terminator -- a "contradictory" gadget (e.g.
+            `add rax, rbx ; mov rax, rcx ; ret`) whose result never reaches the
+            ret. `matched_indices` are the positions of the operation's matched
+            instructions and `dst_regs` its declared destination registers.
+
+            `dst_regs` are intersected with the registers the matched
+            instructions actually write, so a store (whose result is in memory)
+            protects nothing and is never falsely rejected. A gadget is
+            contradictory when an instruction between the last matched one and
+            the terminator writes such a register.
+
+            The final (terminating) instruction is excluded: it is control flow,
+            and its incidental write to the stack pointer (an x86 `ret` pops) is
+            the gadget's exit mechanism, not a clobber of the result -- so a
+            stack-pointer operation like `add rsp, 8 ; ret` is not
+            contradictory.
+
+            `matched_indices` are contiguous (Set.is_equal matches a consecutive
+            run), so only the tail after `max(matched_indices)` needs scanning;
+            a clobber can never hide between two matched instructions. '''
+        if not dst_regs:
             return False
-        if str(self.src) != str(rhs.src):
+
+        arch = arch_singleton.arch
+
+        def writes(insn):
+            return {arch.normalize_reg(insn.reg_name(r))
+                    for r in arch.written_registers(insn)}
+
+        produced = {reg for i in matched_indices for reg in writes(self.decodes[i])}
+        guarded = set(dst_regs) & produced
+        if not guarded:
+            return False
+
+        last = max(matched_indices)
+        clobbered = {reg for insn in self.decodes[last + 1:-1] for reg in writes(insn)}
+        return bool(guarded & clobbered)
+
+    def subsumes(self, rhs) -> bool:
+        if (self.dst or set()) != (rhs.dst or set()):
+            return False
+        if (self.src or set()) != (rhs.src or set()):
             return False
         if self.side_regs.issubset(rhs.side_regs):
             return True
@@ -108,8 +171,6 @@ class Gadget:
             ret += f" (src = {self.src})"
         if self.side_regs:
             ret += f" (side regs = {self.side_regs})"
-        if self.side_mem:
-            ret += f" (side mem = {self.side_mem})"
         ret += f" (count: {self.count})"
 
         return ret
@@ -141,8 +202,8 @@ class Gadget:
             'count': self.count,
             'symbol': self.symbol,
             'op': self.op,
-            'dst': self.dst,
-            'src': self.src,
+            'dst': sorted(self.dst) if self.dst else None,
+            'src': sorted(self.src) if self.src else None,
             'modifies': sorted(self.side_regs),
         }
 

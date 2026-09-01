@@ -1,0 +1,59 @@
+# Get carry flag (less-than comparison).
+gcf-ltc:
+  operands: 3
+  dst: [op1]
+  src: [op2, op3]
+
+  x86:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - mnemonic: sub
+          op1: op2
+          op2: op3
+          writes: [REG_FLAGS]
+        - mnemonic: adc
+          op1: op1
+          op2: REG10
+          reads: [REG_FLAGS]
+    - steps:
+        - operation: lc
+          op1: REG10
+        - mnemonic: sub
+          op1: op2
+          op2: op3
+          writes: [REG_FLAGS]
+        - mnemonic: sbb
+          op1: op1
+          op2: REG10
+          reads: [REG_FLAGS]
+        - mnemonic: neg
+          op1: op1
+    - steps:
+        - operation: lc
+          op1: op1
+        - mnemonic: sub
+          op1: op2
+          op2: op3
+          writes: [REG_FLAGS]
+        - mnemonic: rcl
+          op1: op1
+          op2: 1
+          reads: [REG_FLAGS]
+
+  arm:
+    - steps:
+        - operation: lc
+          op1: REG10
+        - mnemonic: sub
+          op1: op2
+          op2: op3
+          writes: [REG_FLAGS]
+        - mnemonic: adc
+          op1: op1
+          op2: REG10
+          reads: [REG_FLAGS]
+
+  riscv:
+    available: false
+    reason: RISC-V has no condition/carry flags (adc/sbb/rcl do not translate)

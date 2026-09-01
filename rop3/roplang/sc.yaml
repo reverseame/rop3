@@ -1,11 +1,38 @@
+# Stack copy: place op1 on the stack. REG10 is an internal scratch register.
+#
+# On x86 a ROP gadget cannot address the stack directly, so the copy is a
+# push/pop round-trip (two realizations: popping back into op1 or into a
+# scratch REG1). AArch64 and RISC-V address the stack directly, so the copy is
+# a single store and there is one realization.
 sc:
-  -
-    - mnemonic: push
-      op1: src
-    - mnemonic: pop
-      op1: src
-  -
-    - mnemonic: push
-      op1: src
-    - mnemonic: pop
-      op1: REG1
+  operands: 1
+  dst: []
+  src: [op1]
+
+  x86:
+    # push op1 ; pop op1   (same gadget)
+    - steps:
+        - - mnemonic: push
+            op1: op1
+          - mnemonic: pop
+            op1: op1
+    # push op1 ; pop REG1   (same gadget)
+    - steps:
+        - - mnemonic: push
+            op1: op1
+          - mnemonic: pop
+            op1: REG10
+
+  arm:
+    # str op1, [sp]   (direct stack store; no push/pop on AArch64)
+    - steps:
+        - mnemonic: str
+          op1: op1
+          op2: '[sp]'
+
+  riscv:
+    # sd op1, off(sp)   (direct stack store; no push/pop on RISC-V)
+    - steps:
+        - mnemonic: sd
+          op1: op1
+          op2: '[sp]'

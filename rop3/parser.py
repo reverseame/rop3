@@ -17,13 +17,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 YAML = 0
 
-import rop3.debug as debug
 import rop3.parsers.yaml_parser as yaml_parser
-
-class CompositeOperation:
-    def __init__(self, name, steps):
-        self.name = name
-        self.steps = steps
 
 class Parser:
     def __init__(self, type_=YAML):
@@ -39,5 +33,10 @@ class Parser:
         return self.parser.get_ops()
 
 class ParserException(Exception):
+    pass
+
+class OperationNotAvailable(ParserException):
+    ''' Raised when an operation is explicitly marked unavailable for the
+        current architecture (`<arch>: {available: false}` in its YAML). '''
     pass
 

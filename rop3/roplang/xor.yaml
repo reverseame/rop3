@@ -1,7 +1,38 @@
-# XOR
+# Bitwise XOR: op1 <- op1 ^ op2
 xor:
-  # xor dst, src
-  -
-    - mnemonic: xor
-      op1: dst
-      op2: src
+  operands: 2
+  dst: [op1]
+  src: [op1, op2]
+
+  x86:
+    - steps:
+        - mnemonic: xor
+          op1: op1
+          op2: op2
+
+  arm:
+    - steps:
+        - mnemonic: eor
+          op1: op1
+          op2: op1
+          op3: op2
+
+  riscv:
+    # xor op1, op1, op2
+    - steps:
+        - mnemonic: xor
+          op1: op1
+          op2: op1
+          op3: op2
+    # c.xor op1, op2
+    - steps:
+        - mnemonic: c.xor
+          op1: op1
+          op2: op2
+    # xori op1, op1, imm   (op2 binds to the immediate; imm == -1 renders as
+    # `not`, which is covered by the not operation)
+    - steps:
+        - mnemonic: xori
+          op1: op1
+          op2: op1
+          op3: op2

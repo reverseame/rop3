@@ -15,7 +15,6 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import capstone
 import io
 
 from elftools.elf.elffile import ELFFile, ELFError
@@ -24,8 +23,13 @@ from elftools.elf.sections import SymbolTableSection
 import rop3.binary as binary
 
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+from rop3.archs.riscv_arch import RISCV_Architecture
+from rop3.archs.aarch64_arch import AArch64_Architecture
 
 SHF_EXECINSTR = 0x4
+# RISC-V ELF e_flags: bit 0 marks the presence of the C (compressed) extension,
+# which relaxes instruction alignment from 4 to 2 bytes (RISC-V psABI).
+EF_RISCV_RVC = 0x1
 
 
 class ELF:
@@ -46,6 +50,15 @@ class ELF:
                 return X86_Architecture()
             elif self._elf.elfclass == 64:
                 return X64_Architecture()
+        elif self._elf.header.e_machine in ['EM_RISCV']:
+            if self._elf.elfclass == 32:
+                raise NotImplementedError('ELF: RV32 is not supported yet')
+            elif self._elf.elfclass == 64:
+                compressed = bool(self._elf.header.e_flags & EF_RISCV_RVC)
+                return RISCV_Architecture(compressed=compressed)
+        elif self._elf.header.e_machine in ['EM_AARCH64']:
+            if self._elf.elfclass == 64:
+                return AArch64_Architecture()
         raise binary.BinaryException(
             'ELF: Unsupported architecture type')
 
@@ -70,10 +83,23 @@ class ELF:
             ''' SHF_EXECINSTR means section contains executable code '''
             if sec.header.sh_flags & SHF_EXECINSTR:
                 ret.append({
+                    'name': sec.name,
                     'vaddr': sec.header.sh_addr + self._base_delta,
                     'opcodes': sec.data()
                 })
         return ret
+
+    def get_info(self):
+        ''' Format-level metadata for verbose reporting. '''
+        h = self._elf.header
+        return {
+            'format': f'ELF{self._elf.elfclass}',
+            'endianness': 'little' if self._elf.little_endian else 'big',
+            'machine': h.e_machine,
+            'type': h.e_type,
+            'entry': h.e_entry + self._base_delta,
+            'image_base': self._image_base() + self._base_delta,
+        }
 
     def get_symbols(self):
         ''' Function/object symbols from .symtab and .dynsym, rebased by the

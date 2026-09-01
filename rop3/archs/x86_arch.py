@@ -59,7 +59,7 @@ MNEMONIC_PREFIXES: tuple[str, ...] = (
 )
 
 UNCONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
-    'jmp', 'call',
+    'jmp', 'call', 'ret', 'retf'
 )
 
 CONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
@@ -72,36 +72,71 @@ CONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
     'loop', 'loope', 'loopne',
 )
 
-def _base_mnemonic(mnemonic: str) -> str:
-    parts = mnemonic.split()
-    for part in parts:
-        if part not in MNEMONIC_PREFIXES:
-            return part
-    return mnemonic
-
-
 class X86_Architecture(Architecture):
-    def get_rop_terminations(self, include_extra: bool = False):
-        ret = []
-        ret.extend([
-            {'bytes': b'\xc3', 'size': 1},                 # ret
-            {'bytes': b'\xc2[\x00-\xff]{2}', 'size': 3},   # ret <imm>
-        ])
-        if include_extra:
-            ret.extend([
-                {'bytes': b'\xcb', 'size': 1},                 # retf
-                {'bytes': b'\xca[\x00-\xff]{2}', 'size': 3}    # retf <imm>
-            ])
+    # --- Mnemonic classification consumed by the shared validity algorithm ---
+
+    @property
+    def rop_termination_mnemonics(self) -> tuple[str, ...]:
+        return ('ret',)
+
+    @property
+    def jop_termination_mnemonics(self) -> tuple[str, ...]:
+        return ('jmp', 'call')
+
+    @property
+    def unconditional_branch_mnemonics(self) -> tuple[str, ...]:
+        return UNCONDITIONAL_BRANCH_MNEMONICS
+
+    @property
+    def conditional_branch_mnemonics(self) -> tuple[str, ...]:
+        return CONDITIONAL_BRANCH_MNEMONICS
+
+    @property
+    def mnemonic_prefixes(self) -> tuple[str, ...]:
+        return MNEMONIC_PREFIXES
+
+    def _has_ret_imm(self, decodes, terminations: tuple[str, ...]) -> bool:
+        # A `ret <imm>` / `retf <imm>` carries an immediate operand and returns
+        # at that point, so a gadget containing one anywhere behaves as a
+        # ret-imm gadget.
+        return any(self.base_mnemonic(ins.mnemonic) in terminations and ins.operands
+                   for ins in decodes)
+
+    def is_valid_jop_last(self, insn) -> bool:
+        # The \xff byte pattern can appear inside an imm operand of another
+        # instruction (e.g. e9 .. ff e0 ..). After disassembly, an immediate
+        # target is not a usable indirect branch.
+        return bool(insn.operands) and insn.operands[0].type != x86_const.X86_OP_IMM
+
+    def _rop_terminations(self, include_retf: bool = False, **kwargs) -> tuple[str, ...]:
+        # retf is a valid ROP terminator only when far-return gadgets are asked
+        # for; x86 is the only architecture with this form.
+        if include_retf:
+            return self.rop_termination_mnemonics + ('retf',)
+        return self.rop_termination_mnemonics
+
+    def get_rop_terminations(self, include_retf: bool = False, include_ret_imm: bool = False, **kwargs):
+        ret = [{'bytes': b'\xc3', 'size': 1}]              # ret
+        if include_ret_imm:
+            ret.append({'bytes': b'\xc2[\x00-\xff]{2}', 'size': 3})   # ret <imm>
+        if include_retf:
+            ret.append({'bytes': b'\xcb', 'size': 1})     # retf
+            if include_ret_imm:
+                ret.append({'bytes': b'\xca[\x00-\xff]{2}', 'size': 3})   # retf <imm>
 
         return ret
 
-    def get_jop_terminations(self, include_extra: bool = False):
+    def get_jop_terminations(self):
         return [
             {'bytes': b'\xff[\x20\x21\x22\x23\x26\x27]{1}', 'size': 2},        # jmp  [reg]
             {'bytes': b'\xff[\xe0\xe1\xe2\xe3\xe4\xe6\xe7]{1}', 'size': 2},    # jmp  [reg]
             {'bytes': b'\xff[\x10\x11\x12\x13\x16\x17]{1}', 'size': 2},        # jmp  [reg]
             {'bytes': b'\xff[\xd0\xd1\xd2\xd3\xd4\xd6\xd7]{1}', 'size': 2}     # call [reg]
         ]
+
+    @property
+    def name(self) -> str:
+        return 'x86'
 
     @property
     def arch(self):
@@ -111,53 +146,9 @@ class X86_Architecture(Architecture):
     def mode(self):
         return capstone.CS_MODE_32
 
-    def is_valid_rop_gadget(self, decodes, include_extra: bool = False, allow_undeterministic: bool = False):
-        if include_extra:
-            terminations = ('ret', 'retf')
-        else:
-            terminations = ('ret',)
-
-        if decodes[-1].mnemonic not in terminations:
-            return False
-
-        # Intermediate operation checks
-        intermediates = decodes[1:-1]
-
-        # Intermediate ret (there is already a shorter version of the gadget)
-        if [ins for ins in intermediates if _base_mnemonic(ins.mnemonic) in terminations]:
-            return False
-
-        # Multibranch unconditional (jmp, call)
-        if [ins for ins in intermediates if _base_mnemonic(ins.mnemonic) in UNCONDITIONAL_BRANCH_MNEMONICS]:
-            return False
-        # Multibranch conditional (je, jne)
-        if not allow_undeterministic and [ins for ins in intermediates if ins.mnemonic in CONDITIONAL_BRANCH_MNEMONICS]:
-            return False
-        return True
-
-    def is_valid_jop_gadget(self, decodes, include_extra: bool = False, allow_undeterministic: bool = False):
-        terminations = ('jmp', 'call')
-        last = decodes[-1]
-        
-        if _base_mnemonic(last.mnemonic) not in terminations:
-            return False
-
-        # The \xff byte pattern can appear inside an imm operand of another
-        # instruction (e.g. e9 .. ff e0 ..). After disassembly, filter those out.
-        if not last.operands or last.operands[0].type == x86_const.X86_OP_IMM:
-            return False
-
-        # Intermediate operation checks
-        intermediates = decodes[1:-1]
-
-        # Multibranch unconditional (jmp, call)
-        if [ins for ins in intermediates if _base_mnemonic(ins.mnemonic) in UNCONDITIONAL_BRANCH_MNEMONICS]:
-            return False
-        # Multibranch conditional (je, jne)
-        if not allow_undeterministic and [ins for ins in intermediates if ins.mnemonic in CONDITIONAL_BRANCH_MNEMONICS]:
-            return False
-
-        return True
+    @property
+    def address_size(self) -> int:
+        return 4
 
     @property
     def op_reg(self):
@@ -178,6 +169,10 @@ class X86_Architecture(Architecture):
     @property
     def bp(self) -> str:
         return 'ebp'
+
+    @property
+    def flags(self) -> str:
+        return 'eflags'
 
     def first_insn_has_complex_mem(self, decodes) -> bool:
         first = decodes[0]
@@ -209,8 +204,16 @@ class X86_Architecture(Architecture):
 
 class X64_Architecture(X86_Architecture):
     @property
+    def name(self) -> str:
+        return 'x86-64'
+
+    @property
     def mode(self):
         return capstone.CS_MODE_64
+
+    @property
+    def address_size(self) -> int:
+        return 8
 
     @property
     def _canonical_width(self) -> int:
@@ -223,6 +226,10 @@ class X64_Architecture(X86_Architecture):
     @property
     def bp(self) -> str:
         return 'rbp'
+
+    @property
+    def flags(self) -> str:
+        return 'rflags'
 
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """

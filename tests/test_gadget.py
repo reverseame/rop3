@@ -103,3 +103,23 @@ def test_str_includes_symbol(x64):
     g = make_gadget(b'\xc3', 0x1000)
     g.symbol = 'func+0x10'
     assert '<func+0x10>' in str(g)
+
+
+def test_result_clobbered(x64):
+    ''' Gadget.result_clobbered: True when a destination the operation produces
+        is overwritten before the terminator; False otherwise. Mirrors the
+        "contradictory gadget" rejection that operation.py delegates here. '''
+    ok = make_gadget(b'\x48\x01\xd8\xc3', 0x1000)             # add rax, rbx ; ret
+    bad = make_gadget(b'\x48\x01\xd8\x48\x89\xc8\xc3', 0x1010)  # add rax,rbx ; mov rax,rcx ; ret
+    other = make_gadget(b'\x48\x01\xd8\x48\x31\xc9\xc3', 0x1020)  # add rax,rbx ; xor rcx,rcx ; ret
+    spa = make_gadget(b'\x48\x83\xc4\x08\xc3', 0x1030)         # add rsp, 8 ; ret
+
+    # the operation is matched at index 0 (the `add`); rax is its destination
+    assert bad.result_clobbered([0], {'rax'}) is True         # rax overwritten before ret
+    assert ok.result_clobbered([0], {'rax'}) is False         # nothing after the add
+    assert other.result_clobbered([0], {'rax'}) is False      # clobbers rcx, not the dst
+    assert bad.result_clobbered([0], set()) is False          # no destinations to guard
+    # a store's dst (an address reg the matched insns don't write) guards nothing
+    assert bad.result_clobbered([0], {'rsi'}) is False
+    # the terminating ret's own rsp pop is control flow, not a clobber
+    assert spa.result_clobbered([0], {'rsp'}) is False

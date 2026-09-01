@@ -134,3 +134,13 @@ def test_symbol_annotation_exact_address(x86):
     gadgets = _run_find(gadfinder.ROP, buf, base, symbols=True,
                         symbols_table=[(0x10000, 'start')])
     assert gadgets[0].symbol == 'start'   # no +offset when offset is 0
+
+
+def test_ret_imm_gadgets_gated_by_flag(x86):
+    base = 0x12345600
+    buf = bytearray(0x40)
+    buf[0x10:0x14] = b'\x58\xc2\x08\x00'   # pop eax ; ret 8
+    default = [g.text_repr for g in _run_find(gadfinder.ROP, buf, base)]
+    assert not any('ret 8' in t for t in default)
+    with_imm = [g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ALLOW_RET_IMM, buf, base)]
+    assert 'pop eax ; ret 8' in with_imm

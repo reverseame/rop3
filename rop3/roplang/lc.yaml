@@ -1,6 +1,26 @@
-# Load constant
+# Load constant: op1 <- [stack]
 lc:
-  # pop dst
-  -
-    - mnemonic: pop
-      op1: dst
+  operands: 1
+  dst: [op1]
+  src: []
+
+  x86:
+    - steps:
+        - mnemonic: pop
+          op1: op1
+
+  arm:
+    - steps:
+        - mnemonic: ldr
+          op1: op1
+          op2: '[sp]'
+
+  riscv:
+    - steps:
+        - mnemonic: ld
+          op1: op1
+          op2: '[sp]'
+    - steps:
+        - mnemonic: lw
+          op1: op1
+          op2: '[sp]'

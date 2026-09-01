@@ -57,14 +57,19 @@ def show_version():
     print()
     print('Version: {0} v{1}'.format(TOOL_NAME, VERSION))
 
-def print_gadget(gadget):
-    print(gadget)
+def _gadget_tuple_line(gadget) -> str:
+    ''' "[file @ addr]: <op, op1[, op2], written, read>" for --tuple output. '''
+    return (f"[{os.path.basename(gadget.filename)} @ {hex(gadget.vaddr)}]: "
+            f"{gadget.tuple_repr()}")
 
-def print_ropchain(ropchain, idx=None):
+def print_gadget(gadget, fmt='text'):
+    print(_gadget_tuple_line(gadget) if fmt == 'tuple' else gadget)
+
+def print_ropchain(ropchain, idx=None, fmt='text'):
     if idx is not None:
         print('#' * 40 + f' Ropchain {idx} ' + '#' * 40)
     for gad in ropchain:
-        print(gad)
+        print_gadget(gad, fmt)
     if idx is not None:
         print()
 
@@ -87,6 +92,9 @@ def output_gadgets(gadgets, fmt='text'):
         writer.writeheader()
         for gadget in gadgets:
             writer.writerow(_csv_record(gadget))
+    elif fmt == 'tuple':
+        for gadget in gadgets:
+            print(_gadget_tuple_line(gadget))
     else:
         for gadget in gadgets:
             print(gadget)
@@ -95,10 +103,10 @@ def output_ropchains(chains, fmt='text', exhaustive=False):
     ''' Emit ROP chains (each a list of gadgets) in the requested format.
         For plain text without --exhaustive only the first chain is consumed,
         preserving the laziness of the search generator. '''
-    if fmt == 'text' and not exhaustive:
+    if fmt in ('text', 'tuple') and not exhaustive:
         first = next(iter(chains), None)
         if first is not None:
-            print_ropchain(first)
+            print_ropchain(first, fmt=fmt)
         return
 
     chains = list(chains)
@@ -113,30 +121,57 @@ def output_ropchains(chains, fmt='text', exhaustive=False):
                 record = _csv_record(gadget)
                 record['chain'] = idx
                 writer.writerow(record)
-    else:
+    else:  # 'text' or 'tuple'
         for idx, chain in enumerate(chains, 1):
-            print_ropchain(chain, idx)
+            print_ropchain(chain, idx, fmt=fmt)
+
+def binary_info_lines(info):
+    ''' Render a Binary.describe() dict as a list of human-readable lines for
+        verbose reporting. '''
+    fmt = info.get('format') or 'unknown'
+    head = f"{os.path.basename(info['filename'])}: {fmt}, {info['arch']}, {info['bits']}-bit"
+    if info.get('endianness'):
+        head += f", {info['endianness']}-endian"
+    lines = [head]
+
+    detail = f"instruction alignment: {info['alignment']} byte(s)"
+    if info.get('algorithm'):
+        detail += f", {info['algorithm']} scan"
+    if 'entry' in info:
+        detail = (f"entry: {hex(info['entry'])}, "
+                  f"image base: {hex(info['image_base'])}, " + detail)
+    lines.append(detail)
+
+    sections = info['sections']
+    total = sum(s['size'] for s in sections)
+    lines.append(f"{len(sections)} executable section(s), {total} bytes total")
+    for s in sections:
+        name = s['name'] or 'section'
+        lines.append(f"  {name} @ {hex(s['vaddr'])} ({s['size']} bytes)")
+    return lines
 
 def warning_text(text):
     return f'{WARNING_COLOR}{text}{END_COLOR}'
 
-def pretty_addr(addr, mode=capstone.CS_MODE_64):
-    if mode == capstone.CS_MODE_32:
+def pretty_addr(addr, size=8):
+    ''' `size` is the pointer width in bytes (4 for 32-bit, 8 for 64-bit). '''
+    if size == 4:
         padding = 8
-    elif mode == capstone.CS_MODE_64:
+    elif size == 8:
         padding = 16
     else:
-        raise ValueError(f'unsupported mode: {mode}')
+        raise ValueError(f'unsupported address size: {size}')
 
     return f'{int(addr):#0{padding}x}'
 
-def pack_addr(addr, mode=capstone.CS_MODE_64):
-    if mode == capstone.CS_MODE_32:
+def pack_addr(addr, size=8):
+    ''' `size` is the pointer width in bytes (4 for 32-bit, 8 for 64-bit). '''
+    if size == 4:
         formater = '<I'
-    elif mode == capstone.CS_MODE_64:
+    elif size == 8:
         formater = '<Q'
     else:
-        raise ValueError(f'unsupported mode: {mode}')
+        raise ValueError(f'unsupported address size: {size}')
 
     return struct.pack(formater, addr)
 

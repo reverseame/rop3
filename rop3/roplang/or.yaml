@@ -1,7 +1,37 @@
-# OR
+# Bitwise OR: op1 <- op1 | op2
 or:
-  # or dst, src
-  -
-    - mnemonic: or
-      op1: dst
-      op2: src
+  operands: 2
+  dst: [op1]
+  src: [op1, op2]
+
+  x86:
+    - steps:
+        - mnemonic: or
+          op1: op1
+          op2: op2
+
+  arm:
+    - steps:
+        - mnemonic: orr
+          op1: op1
+          op2: op1
+          op3: op2
+
+  riscv:
+    # or op1, op1, op2
+    - steps:
+        - mnemonic: or
+          op1: op1
+          op2: op1
+          op3: op2
+    # c.or op1, op2
+    - steps:
+        - mnemonic: c.or
+          op1: op1
+          op2: op2
+    # ori op1, op1, imm   (op2 binds to the immediate)
+    - steps:
+        - mnemonic: ori
+          op1: op1
+          op2: op1
+          op3: op2

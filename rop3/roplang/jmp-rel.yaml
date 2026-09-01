@@ -1,6 +1,26 @@
-# Unconditional branching
+# Unconditional relative branching
 jmp-rel:
-  # spa(src)
-  - compose:
-    - operation: spa
-      op1: src
+  operands: 1
+  dst: [op1]
+  src: []
+
+  x86:
+    - steps:
+        - operation: lc
+          op1: op1
+        - operation: spa
+          op1: op1
+
+  arm:
+    - steps:
+        - operation: lc
+          op1: op1
+        - operation: spa
+          op1: op1
+
+  riscv:
+    - steps:
+        - operation: lc
+          op1: op1
+        - operation: spa
+          op1: op1

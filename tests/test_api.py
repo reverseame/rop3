@@ -54,7 +54,7 @@ def test_rop3_accepts_single_path_or_list(elf_path):
 
 def test_rop3_find_op(elf_path):
     r = Rop3(elf_path)
-    matched = r.find_op('lc', dst='rax')
+    matched = r.find_op('lc', operands=['rax'])
     assert [g.text_repr for g in matched] == ['pop rax ; ret']
 
 
