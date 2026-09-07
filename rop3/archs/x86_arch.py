@@ -181,6 +181,18 @@ class X86_Architecture(Architecture):
                 return True
         return False
 
+    def is_return(self, insn) -> bool:
+        ''' An x86 gadget tail returns with a near or far return (ret/retf). '''
+        return self.base_mnemonic(insn.mnemonic) in ('ret', 'retf')
+
+    def is_stack_pivot(self, insn) -> bool:
+        m = self.base_mnemonic(insn.mnemonic)
+        if m == 'leave':          # mov rsp, rbp ; pop rbp -- an implicit sp write
+            return True
+        if m == 'push':           # push rsp reads sp as source; its adjust is implicit
+            return False
+        return super().is_stack_pivot(insn)
+
     @property
     def _canonical_width(self) -> int:
         """Register width (in bytes) used to display/normalize register names"""

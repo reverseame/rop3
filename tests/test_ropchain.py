@@ -371,3 +371,111 @@ def test_search_compound_op_with_generic_operands(x64):
     assert results
     assert [g.text_repr for g in results[0]] == [
         'pop rdx ; ret', 'sub rbx, rcx ; ret', 'adc rax, rdx ; ret']
+
+
+# --- Explicit (raw) gadget definitions ------------------------------------
+
+def test_parse_raw_gadget_single_instruction(x64, tmp_path):
+    ''' A raw gadget line builds a chain step carrying its own inline
+        OperationDef (name, dst/src roles, one single-gadget realization). '''
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('raw([pop, ret], [rdi], [rdi], [])\n')
+    parsed = RopChain(GadFinder())._parse_ropfile(str(ropfile))
+    assert len(parsed) == 1
+    step = parsed[0]
+    assert step['op'] == 'pop rdi ; ret'
+    defn = step['defn']
+    assert defn.operands == 0
+    assert defn.dst_roles == ['rdi'] and defn.src_roles == []
+    insns = [str(i) for i in defn.realizations[0].links[0].items]
+    assert insns == ['pop rdi', 'ret ']
+
+
+def test_parse_raw_gadget_ignores_trailing_comment(x64, tmp_path):
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('raw([pop, ret], [rdi], [rdi], [])  ; loads rdi\n')
+    parsed = RopChain(GadFinder())._parse_ropfile(str(ropfile))
+    assert parsed[0]['op'] == 'pop rdi ; ret'
+
+
+def test_search_raw_gadget_matches(x64):
+    ''' A raw gadget is matched exactly as written. '''
+    gadgets = [
+        make_gadget(b'\x5f\xc3', 0x1000),   # pop rdi ; ret
+        make_gadget(b'\x58\xc3', 0x1010),   # pop rax ; ret
+    ]
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_raw_line('raw([pop, ret], [rdi], [rdi], [])')]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    assert results[0][0].text_repr == 'pop rdi ; ret'
+
+
+def test_search_raw_gadget_with_memory_operand_annotates_dst_src(x64):
+    ''' A raw store gadget matches (memory base regardless of the operand-size
+        annotation) and its explicit dst/src drive the assembler's side-effect
+        sets. '''
+    gadgets = [make_gadget(b'\x48\x89\x07\xc3', 0x2000)]   # mov [rdi], rax ; ret
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_raw_line('raw([mov, ret], [[rdi], rax], [rdi], [rax])')]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    matched = results[0][0]
+    assert matched.text_repr == 'mov qword ptr [rdi], rax ; ret'
+    assert matched.dst == {'rdi'} and matched.src == {'rax'}
+
+
+def test_search_raw_gadget_multi_instruction_grouped_operands(x64):
+    ''' Parenthesised operand groups map operands to several instructions. '''
+    gadgets = [make_gadget(b'\x5f\x5e\xc3', 0x3000)]   # pop rdi ; pop rsi ; ret
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_raw_line('raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])')]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    assert results[0][0].text_repr == 'pop rdi ; pop rsi ; ret'
+
+
+def test_raw_gadget_side_effects_tracked_in_chain(x64):
+    '''
+    A raw gadget's declared dst registers participate in the assembler's clobber
+    tracking: `pop rdi ; pop rbx ; ret` clobbers rbx, so a later `mov(rdx, rbx)`
+    only assembles once rbx is reloaded in between.
+    '''
+    gadgets = [
+        make_gadget(b'\x5f\x5b\xc3', 0x1000),       # pop rdi ; pop rbx ; ret
+        make_gadget(b'\x5b\xc3', 0x1010),           # pop rbx ; ret
+        make_gadget(b'\x48\x89\xda\xc3', 0x1020),   # mov rdx, rbx ; ret
+    ]
+    rc = RopChain(GadFinder())
+    chain = [
+        rc._parse_raw_line('raw([pop, pop, ret], [(rdi), (rbx)], [rdi, rbx], [])'),
+        _op('lc', dst='rbx'),
+        _op('mov', dst='rdx', src='rbx'),
+    ]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    assert [g.text_repr for g in results[0]] == [
+        'pop rdi ; pop rbx ; ret',
+        'pop rbx ; ret',
+        'mov rdx, rbx ; ret',
+    ]
+
+
+def test_search_raw_gadget_no_match_raises(x64):
+    gadgets = [make_gadget(b'\x90\xc3', 0x1000)]   # nop ; ret
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_raw_line('raw([pop, ret], [rdi], [rdi], [])')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(rc.search(gadgets, chain, symbolic=False))
+
+
+@pytest.mark.parametrize('line, reason', [
+    ('raw([pop, ret], [rdi], [rdi])', 'four'),          # too few fields
+    ('raw(pop, rdi, rdi, )', 'wrapped in [ ]'),          # unbracketed fields
+    ('raw([], [], [], [])', 'at least one mnemonic'),    # no mnemonic
+    ('raw([pop, pop], [(a), (b), (c)], [], [])', 'operand groups'),  # too many groups
+])
+def test_parse_raw_gadget_malformed_raises(x64, line, reason):
+    with pytest.raises(ropchain_mod.RawGadgetError) as exc:
+        RopChain(GadFinder())._parse_raw_line(line)
+    assert reason in str(exc.value)

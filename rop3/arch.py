@@ -309,11 +309,30 @@ class Architecture(ABC):
 
     def is_return(self, insn) -> bool:
         """
-        Whether `insn` returns control the way a ROP gadget's tail does. The
-        framed scan uses this to require a preceding frame load. Default: no
-        architecture-specific return recognition (only framed-scan archs need it).
+        Whether `insn` returns control the way a ROP gadget's tail does (x86
+        ret/retf, AArch64/RISC-V `ret`). The framed scan uses it to require a
+        preceding frame load, and the symbolic analyzer to find each gadget's
+        terminator. Default: no return recognition; every architecture that has
+        a return overrides this.
         """
         return False
+
+    def is_stack_pivot(self, insn) -> bool:
+        """
+        Whether `insn` redirects the stack pointer other than by the implicit
+        adjustment of a natural stack operation. The architecture-neutral case
+        is an explicit stack-pointer *destination* operand -- `mov sp, *`,
+        `add/sub sp, *`, `pop rsp`, AArch64 `mov sp, x0`. Push/pop and the
+        load/store writeback that frames a gadget adjust the stack pointer
+        implicitly (their destination operand is another register) and are not
+        pivots. Architectures with an implicit pivot instruction (x86 `leave`)
+        override to add it.
+        """
+        ops = insn.operands
+        if not ops or ops[0].type != self.op_reg:
+            return False
+        return (self.normalize_reg(insn.reg_name(ops[0].reg))
+                == self.normalize_reg(self.sp))
 
     def is_frame_load(self, insn) -> bool:
         """

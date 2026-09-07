@@ -140,6 +140,27 @@ $ python rop3.py --binary libc.so.6 --cache        # first run scans and caches
 $ python rop3.py --binary libc.so.6 --cache --op mov --operands rdi rax   # reuses the cache
 ```
 
+### ROP chain files
+
+A `--ropchain` file is a plain-text list of steps, one per line; `;` starts a comment. Each step is either a high-level ROPLang operation with positional operands, or an **explicit (raw) gadget** matched exactly as written:
+
+```
+; high-level operations (resolved against the ROPLang catalog)
+mov(rdi, rax)
+lc(rsi)
+
+; explicit, architecture-specific gadgets:  raw([mnemonics], [operands], [dst], [src])
+raw([pop, ret], [rdi], [rdi], [])              ; pop rdi ; ret
+raw([mov, ret], [[rdi], rax], [rdi], [rax])    ; mov [rdi], rax ; ret   (store)
+raw([syscall], [], [], [rax, rdi])             ; syscall
+```
+
+A raw gadget lists its instruction mnemonics, their operands, and the concrete registers it writes (`dst`) and reads (`src`) — the last two feed the assembler's side-effect tracking, so a raw gadget composes with the rest of the chain like any operation. It is matched verbatim (a memory operand is written `[reg]`), so raw gadgets are architecture specific and are not translated across architectures. By default every operand belongs to the first instruction; to spread operands over several instructions, wrap each instruction's operands in parentheses:
+
+```
+raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])   ; pop rdi ; pop rsi ; ret
+```
+
 ### Interactive mode
 
 With `--interactive`, rop3 scans the binary once and drops into a prompt so you can explore its gadgets without re-scanning on every query:

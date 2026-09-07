@@ -204,8 +204,9 @@ class GadFinder:
         fresh = count()   # source of fresh generic slots for unbound operands
         per_step_alternatives = []
         for step in steps:
-            binding = self.bind_step(step, fresh)
-            alternatives = self.expand_operation(step['op'], binding)
+            defn = self._step_defn(step)
+            binding = self.bind_step(step, fresh, defn=defn)
+            alternatives = self.expand_operation(defn, binding)
             if not alternatives:
                 from rop3.ropchain import RopChainNotFound
                 raise RopChainNotFound(
@@ -257,7 +258,17 @@ class GadFinder:
             parser), keeping the matcher free of name lookups. '''
         return match_gadgets(defn, operands, gadgets, reject_clobbered=reject_clobbered)
 
-    def bind_step(self, step, fresh):
+    def _step_defn(self, step):
+        ''' The OperationDef backing a chain step. A step may carry its own
+            `defn` (an explicit gadget defined inline in the ROP-chain file, see
+            RopChain._parse_raw_line); otherwise the ROPLang name is resolved
+            against the operation catalog. '''
+        defn = step.get('defn')
+        if defn is not None:
+            return defn
+        return parser.Parser().get_op(step['op'])
+
+    def bind_step(self, step, fresh, defn=None):
         '''
         Resolve a requested chain step's operands to values, so a compound
         operation can be searched as a single operation with unbound (None)
@@ -270,7 +281,8 @@ class GadFinder:
 
         Raises parser.ParserException if the operation is undefined.
         '''
-        defn = parser.Parser().get_op(step['op'])
+        if defn is None:
+            defn = self._step_defn(step)
         operands = step.get('operands')
         if operands is None:
             operands = [step.get('op1'), step.get('op2')]
@@ -282,14 +294,15 @@ class GadFinder:
             binding[f'op{i + 1}'] = value
         return binding
 
-    def expand_operation(self, op: str, binding: dict) -> list[list[dict]]:
-        ''' Flatten a ROPLang operation (named `op`) into its alternative
-            2-operand primitive step chains. The name is resolved to its
-            definition here (via the parser); an undefined operation surfaces as
+    def expand_operation(self, defn, binding: dict) -> list[list[dict]]:
+        ''' Flatten a ROPLang operation definition into its alternative
+            2-operand primitive step chains. `defn` is the resolved
+            OperationDef (from the catalog or an explicit inline gadget); any
+            operation referenced during realization but undefined surfaces as
             RopChainNotFound, the assembler's own error type. '''
         from rop3.ropchain import RopChainNotFound
         try:
-            return realize(parser.Parser().get_op(op), binding)
+            return realize(defn, binding)
         except parser.ParserException as exc:
             raise RopChainNotFound(str(exc))
 
