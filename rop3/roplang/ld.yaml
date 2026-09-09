@@ -25,3 +25,15 @@ ld:
         - mnemonic: lw
           op1: op1
           op2: '[op2]'
+    # Compressed loads render as (rd, off, base): match the offset with a
+    # wildcard (ANY) and the base register as op3.
+    - steps:
+        - mnemonic: c.ld
+          op1: op1
+          op2: ANY
+          op3: op2
+    - steps:
+        - mnemonic: c.lw
+          op1: op1
+          op2: ANY
+          op3: op2

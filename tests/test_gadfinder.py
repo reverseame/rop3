@@ -144,3 +144,49 @@ def test_ret_imm_gadgets_gated_by_flag(x86):
     assert not any('ret 8' in t for t in default)
     with_imm = [g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ALLOW_RET_IMM, buf, base)]
     assert 'pop eax ; ret 8' in with_imm
+
+
+def test_ropblock_flag_finds_register_return_with_frame(x86):
+    ''' --ropblock (the ROPBLOCK flag) drives backwards_framed_search: it finds
+        `pop eax ; jmp eax` (a register return the plain ROP scan misses) and
+        attaches the per-instruction frame mask (prologue + terminator). '''
+    base = 0x400000
+    buf = b'\x58\xff\xe0'                                   # pop eax ; jmp eax
+    gadgets = _run_find(gadfinder.ROP | gadfinder.ROPBLOCK, buf, base)
+    reg = [g for g in gadgets if g.text_repr == 'pop eax ; jmp eax']
+    assert reg, [g.text_repr for g in gadgets]
+    assert reg[0].frame == (True, True)                    # prologue, terminator
+
+    # the plain ROP scan does not treat a `jmp reg` tail as a gadget
+    plain = _run_find(gadfinder.ROP, buf, base)
+    assert not any(g.text_repr == 'pop eax ; jmp eax' for g in plain)
+
+
+def test_ropblock_disables_parallel(x86):
+    ''' The abstract-gadget backward search is not chunkable, so it runs
+        single-threaded even with --jobs > 1 (produces the same gadgets). '''
+    base = 0x400000
+    buf = b'\x58\xff\xe0\x5b\xc3'          # pop eax ; jmp eax ; pop ebx ; ret
+    serial = {g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ROPBLOCK, buf, base)}
+    f = gadfinder.GadFinder(flags=gadfinder.ROP | gadfinder.ROPBLOCK, jobs=4)
+    f._open_binary = lambda fn, b, arch=None: _FakeBinary(base, bytes(buf))
+    parallel = {g.text_repr for g in f.find(['fake'])}
+    assert serial == parallel
+    assert 'pop eax ; jmp eax' in serial
+
+
+def test_classical_scan_populates_frame_mask(x86):
+    ''' Ordinary (classical-scan) gadgets carry a frame mask marking the
+        terminator, which operation matching consults like any other gadget's.
+        An explicit stack-pointer adjustment is a meaningful side effect, not
+        display framing, so it stays undimmed. '''
+    base = 0x400000
+    buf = b'\x58\xc3'                                  # pop eax ; ret
+    g = next(x for x in _run_find(gadfinder.ROP, buf, base)
+             if x.text_repr == 'pop eax ; ret')
+    assert g.frame == (False, True)                    # pop = body, ret = frame
+
+    buf2 = b'\x83\xc4\x08\xc3'                          # add esp, 8 ; ret
+    g2 = next(x for x in _run_find(gadfinder.ROP, buf2, base)
+              if x.text_repr == 'add esp, 8 ; ret')
+    assert g2.frame == (False, True)                    # add esp = side effect, ret = frame

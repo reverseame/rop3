@@ -36,6 +36,7 @@ class ArgumentParser:
         self.argparser.add_argument('--ret-imm', action=argparse.BooleanOptionalAction, default=False, help='include gadgets ending in a `ret <imm>` / `retf <imm>` (disabled by default)')
         self.argparser.add_argument('--jop', action=argparse.BooleanOptionalAction, help="search for JOP gadgets", default=False)
         self.argparser.add_argument('--frame', action=argparse.BooleanOptionalAction, default=True, help='framed gadget search (default on): on AArch64/RISC-V keep only gadgets that restore the return address from the stack; no effect on x86')
+        self.argparser.add_argument('--ropblock', action='store_true', default=False, help='abstract-gadget search: find gadgets whose tail branches through a register loaded from the stack and not clobbered (e.g. `pop rax ; ... ; jmp rax`, `ldr x9,[sp] ; ... ; br x9`), x86 `ret` being the degenerate case; runs single-threaded')
         self.argparser.add_argument('--reg-aliases', action='store_true', default=False, help='allow sub-register aliases (al, ax, eax, ...) to substitute their full register when matching operations; they are then treated as the same register for chain assignment and side effects')
         self.argparser.add_argument('--allow-undeterministic-gadgets', action='store_true', default=False, help='allow gadgets with conditional branches (e.g. jne) as intermediate instructions')
         self.argparser.add_argument('--allow-complex-memory-ops', action='store_true', default=False, help='allow gadgets whose first instruction uses complex memory addressing (e.g. [r1*r2], [r1+r2*s+disp])')
@@ -126,6 +127,8 @@ class ArgumentParser:
             flags |= gadfinder.KEEP_CONTRADICTORY
         if not args.frame:
             flags |= gadfinder.UNFRAMED
+        if args.ropblock:
+            flags |= gadfinder.ROPBLOCK
 
         namespace['flags'] = flags
 

@@ -123,3 +123,23 @@ def test_result_clobbered(x64):
     assert bad.result_clobbered([0], {'rsi'}) is False
     # the terminating ret's own rsp pop is control flow, not a clobber
     assert spa.result_clobbered([0], {'rsp'}) is False
+
+
+def test_display_repr_dims_frame_instructions(x64, monkeypatch):
+    ''' display_repr colors the frame (prologue/epilogue) instructions and
+        leaves the body plain; text_repr stays uncolored. '''
+    import os, sys
+    g = make_gadget(b'\x58\xc3', 0x1000)             # pop rax ; ret
+    g.frame = (False, True)                          # pop rax = body, ret = frame
+    monkeypatch.setattr(sys.stdout, 'isatty', lambda: True, raising=False)
+    monkeypatch.delenv('NO_COLOR', raising=False)
+    colored = g.display_repr()
+    assert colored == f'pop rax ; {gadget_mod.FRAME_COLOR}ret{gadget_mod.END_COLOR}'
+    assert g.text_repr == 'pop rax ; ret'            # unchanged, uncolored
+
+
+def test_display_repr_plain_without_frame(x64):
+    ''' With no frame mask, display_repr is just the plain text. '''
+    g = make_gadget(b'\x58\xc3', 0x1000)
+    assert g.frame is None
+    assert g.display_repr() == g.text_repr

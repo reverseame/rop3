@@ -222,3 +222,184 @@ def framed_aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
                     if is_valid_gadget(candidate):
                         yield vaddr, raw, candidate
             j -= 1
+
+
+# --------------------------------------------------------------------------
+# Backward framed (ropblock) search
+# --------------------------------------------------------------------------
+
+# No single instruction is longer than this on any supported ISA, so decoding a
+# window this wide is enough to recover the one instruction starting at an offset.
+_MAX_INSN_BYTES = 16
+
+
+def backward_instructions(opcodes, base_vaddr, alignment, disasm, start=None):
+    '''
+    Arch-aware backward instruction iterator.
+
+    Starting just below `start` (the end of the buffer by default) and stepping
+    toward the front by the instruction `alignment` -- 1 on x86 (every byte, so
+    unintended instructions hidden inside longer ones surface), 2 on compressed
+    RISC-V, 4 on AArch64 / base RISC-V -- decode the single instruction that
+    begins at each aligned offset and yield ``(offset, insn)``. Offsets where
+    nothing decodes are skipped.
+
+    Parameters
+    ----------
+    opcodes : bytes            -- executable bytes to scan.
+    base_vaddr : int           -- virtual address of ``opcodes[0]``.
+    alignment : int            -- instruction alignment in bytes.
+    disasm : callable(raw, vaddr) -> iterable  -- e.g. capstone ``Cs.disasm``.
+    start : int, optional      -- byte offset to begin below (default: len).
+
+    Yields
+    ------
+    (offset, insn)
+    '''
+    hi = len(opcodes) if start is None else min(start, len(opcodes))
+    off = hi - 1
+    if off >= 0 and alignment > 1:
+        off -= (base_vaddr + off) % alignment           # align the first offset
+    while off >= 0:
+        insn = next(iter(disasm(opcodes[off:off + _MAX_INSN_BYTES],
+                                base_vaddr + off)), None)
+        if insn is not None:
+            yield off, insn
+        off -= alignment
+
+
+def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
+                            is_terminator, branch_reg, is_prologue, clobbers,
+                            is_frame=None, splits=None, accept_candidate=None):
+    '''
+    Backward framed ("ropblock") gadget search.
+
+    A ropblock gadget is framed as ``[prologue] ... [terminator]``: the
+    terminator writes the program counter from a register (an indirect
+    ``jmp``/``br`` through a register), and the prologue loads *that* register
+    from the stack (``pop reg`` / ``ldr reg, [sp]``). x86 ``ret`` is the
+    degenerate case -- it pops the program counter straight off the stack, so a
+    single instruction is both prologue and epilogue (``branch_reg`` returns
+    ``None`` and the frame is satisfied with no separate prologue).
+
+    Using `backward_instructions` to find each terminator, the search walks back
+    over the contiguous runs that end at that terminator (growing one length at a
+    time up to `depth` bytes) and emits a run once it is *framed*: it contains,
+    before the terminator, a prologue that loads the terminator's branch register
+    with no intervening clobber of that register. Longer runs that still contain
+    the frame keep being emitted.
+
+    Each emitted run carries a per-instruction ``frame`` mask (a tuple[bool]
+    parallel to ``decodes``): True where the instruction is a framing
+    prologue/epilogue rather than the operation body. It marks the data-flow
+    prologue (the stack load of the branch register) and the terminator, plus any
+    position-independent framing instruction `is_frame` recognizes (a prologue
+    prefix, ...). Operation matching skips these.
+
+    Predicates (arch-derived, passed as callables):
+      is_terminator(insn)     -> bool   -- a ropblock terminator (pc <- reg / ret)
+      branch_reg(insn)        -> reg | None -- register the terminator branches
+          through, or None when the terminator is its own prologue (x86 ret)
+      is_prologue(insn, reg)  -> bool   -- does `insn` load `reg` from the stack
+      clobbers(insn, reg)     -> bool   -- does `insn` overwrite `reg`
+      is_frame(insn)          -> bool, optional -- a position-independent framing
+          instruction (prologue prefix / terminator). A stack
+          pivot (`add rsp, 8`, `leave`) is *not* framing -- it is a real stack
+          operation (control flow returns through the stack or a branch register,
+          never through the pivot), so `is_frame` must exclude it. Default: none.
+      splits(insn)            -> bool, optional -- an instruction that may not
+          appear *inside* a gadget (an intermediate branch/return); a candidate
+          whose body contains one is rejected. Default: no such check.
+
+    Yields
+    ------
+    (vaddr, raw, decodes, frame)
+    '''
+    for t_off, term in backward_instructions(opcodes, base_vaddr, alignment, disasm):
+        if not is_terminator(term):
+            continue
+        term_end = t_off + term.size
+        # Grow the candidate backward from the terminator, one length at a time.
+        for length in range(term.size, depth + 1):
+            q = term_end - length
+            if q < 0:
+                break
+            if alignment > 1 and (base_vaddr + q) % alignment != 0:
+                continue
+            raw = opcodes[q:term_end]
+            if accept_candidate is not None and not accept_candidate(base_vaddr + q, raw):
+                continue
+            decodes = list(disasm(raw, base_vaddr + q))
+            # The run must decode cleanly and still end on the terminator.
+            if not decodes:
+                continue
+            last = decodes[-1]
+            if last.address + last.size != base_vaddr + term_end:
+                continue
+            if not is_terminator(last):
+                continue
+            # No control-flow transfer before the terminator: a branch/return
+            # anywhere ahead of it ends the gadget early, including at position 0
+            # (a leading `ret` makes the rest dead -- "no prologue after
+            # prologue"). The trailing terminator itself is exempt; a bare `ret`
+            # (nothing before it) stays valid. Matches is_valid_*_gadget.
+            if splits is not None and any(splits(insn) for insn in decodes[:-1]):
+                continue
+            prologue = _ropblock_prologue_index(decodes, branch_reg(last),
+                                                is_prologue, clobbers)
+            if prologue is None:
+                continue                        # not framed
+            frame = _frame_mask(decodes, prologue, is_frame)
+            yield base_vaddr + q, raw, decodes, frame
+
+
+def _ropblock_prologue_index(decodes, reg, is_prologue, clobbers):
+    '''
+    Index of the prologue that frames the run (whose last instruction is the
+    terminator), or None when it is not framed. The terminator's branch register
+    `reg` must be loaded from the stack by a prologue that no later instruction
+    clobbers: scanning backward, the nearest write of `reg` must be that stack
+    load. `reg` is None for a self-framing terminator (x86 ret), whose prologue
+    is the terminator itself.
+    '''
+    if reg is None:
+        return len(decodes) - 1                 # x86 ret: its own prologue
+    for i in range(len(decodes) - 2, -1, -1):
+        if is_prologue(decodes[i], reg):
+            return i
+        if clobbers(decodes[i], reg):
+            return None
+    return None
+
+
+def _frame_mask(decodes, prologue, is_frame):
+    ''' Per-instruction framing mask: the prologue, the terminator (last), and
+        any position-independent framing instruction `is_frame` recognizes.
+        Stack pivots are *not* framing (see `is_frame` above), so an `add rsp, 8`
+        anywhere in the run stays unmasked and matches as a real `add`. '''
+    last = len(decodes) - 1
+    return tuple(
+        i == prologue or i == last or (is_frame(insn) if is_frame else False)
+        for i, insn in enumerate(decodes))
+
+
+def frame_mask_for(decodes, arch):
+    '''
+    Derive the framing mask for an already-decoded gadget whose terminator is
+    ``decodes[-1]`` -- the branch-register stack-load prologue (found by the
+    same backward data-flow walk `backwards_framed_search` uses), the terminator
+    itself, and any position-independent framing instruction. The complement of
+    the mask is the operation body: everything a matcher may anchor on, wherever
+    it sits (before the prologue, or interleaved through the frame).
+
+    This is the classical scans' frame (they lack the abstract search's live
+    data-flow, so it is reconstructed here) and operation matching's fallback
+    when a gadget carries no precomputed mask. Stack pivots are deliberately
+    *not* framed (see `_frame_mask`).
+    '''
+    if not decodes:
+        return tuple()
+    reg = arch.ropblock_branch_reg(decodes[-1])
+    prologue = _ropblock_prologue_index(decodes, reg, arch.is_stack_load,
+                                        arch.clobbers_reg)
+    return _frame_mask(decodes, prologue, arch.is_frame_instruction)

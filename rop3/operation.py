@@ -85,13 +85,11 @@ def match_gadgets(defn: OperationDef, operands: list | None,
             continue
         set_ = real.links[0].bound(bindings)
         for gadget in gadgets:
-            (equal, binds, indices) = set_.is_equal(gadget.decodes)
-            if not equal:
-                continue
-            if reject_clobbered and gadget.result_clobbered(
-                    indices, _destination_registers(defn, bindings, binds)):
-                continue
-            ret.append(_annotate(defn, bindings, gadget, binds))
+            for binds, indices in set_.all_matches(gadget.decodes, gadget.frame):
+                if reject_clobbered and gadget.result_clobbered(
+                        indices, _destination_registers(defn, bindings, binds)):
+                    continue
+                ret.append(_annotate(defn, bindings, gadget, binds))
 
     return ret
 
@@ -455,51 +453,107 @@ class Set:
                     operand.reg = mapping[operand.reg]
         return clone
 
-    def is_equal(self, decodes):
+    def is_equal(self, decodes, frame=None):
         '''
         Match this pattern against a gadget's decoded instructions.
 
-        The gadget is viewed as [frame prologue] [operation body] [epilogue].
-        The architecture's frame prologue (Architecture.is_frame_prefix) -- a
-        leading run of framing instructions, e.g. the RISC-V `ld ra, off(sp)`
-        restore; empty on x86/AArch64 -- is skipped, and the operation's
-        instructions must then match a *consecutive* run starting right after it
-        (position 0 when the prologue is empty). This anchors detection to real
-        gadgets instead of matching an operation buried behind arbitrary leading
-        instructions, and requires the pattern instructions to be adjacent:
-        `push src ; pop dst` realizes `mov(dst, src)`, but
-        `push src ; nop ; pop dst` does not. Instructions after the run form the
-        epilogue.
+        Matching is a two-phase walk over the gadget, driven by the `frame` mask
+        (True where an instruction is framing -- the branch-register stack-load
+        prologue, the terminator, or a position-independent framing prefix):
 
-        Returns (matched, bindings, indices); `indices` are the (contiguous)
-        positions of the matched pattern instructions, used by the caller
-        (Gadget.result_clobbered) to reject contradictory gadgets.
+          * *Before the frame* -- no framing instruction has been seen yet -- an
+            operation may only anchor at the gadget's first instruction. If the
+            first instruction is not the operation, the gadget is discarded: no
+            junk may precede an operation that sits ahead of the frame. So
+            `mov rdi, rsi ; pop rax ; jmp rax` realizes `mov(rdi, rsi)` (the mov
+            is first), but `mov rdi, rax ; pop rbx ; ret` does not realize
+            `lc(rbx)` and `leave ; add ; ret` does not realize `add` (junk
+            precedes the body). On x86 the last instruction is both prologue and
+            epilogue for a normal ROP gadget, so the whole body is "before the
+            frame" and only the junk-free gadget (the operation first) matches --
+            the backward scan emits that shorter gadget separately.
+
+          * *Inside the frame* -- once a framing instruction has been passed --
+            any body instruction matches, in no fixed order, until the epilogue.
+            Each is an independent operation, so a register-restore frame yields
+            one `lc` per restored register (`lc(s0)`, `lc(s1)`, `lc(s7)` for
+            `ld ra ; ld s0 ; ld s1 ; ld s7 ; addi sp ; ret`) and an operation
+            deeper in the frame matches even behind another body instruction
+            (`add` in `ld ra ; add a0, a1, a2 ; ld s0 ; ret`).
+
+        An operation never anchors *on* a framing instruction (the prologue load
+        of the branch register is not an `lc`; the terminator is not matched).
+        The pattern instructions must be adjacent: `push src ; pop dst` realizes
+        `mov(dst, src)`, but `push src ; nop ; pop dst` does not. A raw verbatim
+        gadget needs no special handling -- its pattern anchors at the first
+        instruction and its run simply includes the terminator.
+
+        `frame` is a per-instruction framing mask (parallel to `decodes`). Every
+        search attaches one; when it is None (a synthetic gadget built without
+        one) it is derived here (search.frame_mask_for) so matching is uniformly
+        frame-aware.
+
+        Returns (matched, bindings, indices) for the *first* anchor that
+        matches; `indices` are the (contiguous) positions of the matched pattern
+        instructions, used by the caller (Gadget.result_clobbered) to reject
+        contradictory gadgets. `all_matches` returns every anchor instead (one
+        per matchable body position).
+        '''
+        for binds, indices in self.iter_matches(decodes, frame):
+            return (True, binds, indices)
+        return (False, {}, [])
+
+    def all_matches(self, decodes, frame=None):
+        ''' Every (bindings, indices) at which this pattern matches -- one per
+            matchable body position, so each restored register in a frame is a
+            separate operation (`ld ra ; ld s0 ; ld s1 ; ld s7 ; ret` yields
+            `lc(s0)`, `lc(s1)` and `lc(s7)`). '''
+        return list(self.iter_matches(decodes, frame))
+
+    def iter_matches(self, decodes, frame=None):
+        '''
+        Yield (bindings, indices) for every anchor at which this pattern matches
+        (see `is_equal` for the two-phase anchoring rules). `frame` is derived
+        when absent, so matching is always frame-aware.
         '''
         if not self.items:
-            return (True, {}, [])
+            yield ({}, [])
+            return
 
-        arch = arch_singleton.arch
-        start = 0
-        while start < len(decodes) and arch.is_frame_prefix(decodes[start]):
-            start += 1
+        n = len(decodes)
+        k = len(self.items)
+        if n < k:
+            return
 
-        if len(decodes) - start < len(self.items):
-            return (False, {}, [])
+        if frame is None:
+            import rop3.search as search
+            frame = search.frame_mask_for(decodes, arch_singleton.arch)
 
-        # The pattern matches a consecutive run anchored at `start`.
+        entered_frame = False    # has a framing instruction been passed yet?
+        for anchor in range(n - k + 1):
+            # An operation anchors on a body instruction only, and either at the
+            # gadget's start (no junk before it) or once inside the frame.
+            if not frame[anchor] and (anchor == 0 or entered_frame):
+                matched = self._match_run(decodes, anchor)
+                if matched is not None:
+                    yield (matched[1], matched[2])
+            if frame[anchor]:
+                entered_frame = True
+
+    def _match_run(self, decodes, start):
+        ''' Match the pattern as a consecutive run anchored at `start`. Returns
+            (True, bindings, indices) on success, or None. '''
         bindings: dict = {}
         indices = []
         for offset, item in enumerate(self.items):
-            pos = start + offset
-            (equal, binds) = item.is_equal(decodes[pos])
+            (equal, binds) = item.is_equal(decodes[start + offset])
             if not equal:
-                return (False, {}, [])
+                return None
             for name, val in binds.items():   # fold in per-instruction bindings
                 if name in bindings and bindings[name] != val:
-                    return (False, {}, [])    # conflicting operand reassignment
+                    return None               # conflicting operand reassignment
                 bindings[name] = val
-            indices.append(pos)
-
+            indices.append(start + offset)
         return (True, bindings, indices)
 
 
@@ -549,18 +603,27 @@ class Operand:
     def __init__(self, operand):
         self.mem = False
         self.abstract = False
+        self.wildcard = False
         self.reg = None
         self.imm = None
         self._parse(operand)
 
     def __str__(self) -> str:
+        if self.wildcard:
+            return self.WILDCARD
         if self.is_mem():
             return f'[{self.reg}]'
         if self.is_imm():
             return str(self.imm)
         return str(self.reg)
 
+    #: Pattern token for a wildcard operand (matches anything, binds nothing).
+    WILDCARD = 'ANY'
+
     def _parse(self, operand):
+        if operand is None or str(operand) == self.WILDCARD:
+            self.wildcard = True
+            return
         s = str(operand)
         if s.startswith('[') and s.endswith(']'):
             self.mem = True
@@ -590,7 +653,7 @@ class Operand:
         return int(value, 0)
 
     def is_reg(self) -> bool:
-        return not self.mem and self.imm is None
+        return not self.mem and not self.wildcard and self.imm is None
 
     def is_mem(self) -> bool:
         return self.mem
@@ -615,6 +678,10 @@ class Operand:
 
     def is_equal(self, decode, operand):
         arch = arch_singleton.arch
+
+        # A wildcard matches any operand and binds nothing.
+        if self.wildcard:
+            return (True, None)
 
         # A generic register operand may match an immediate (reg -> imm subst),
         # but never a memory operand (a load address is not an immediate).

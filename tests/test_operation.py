@@ -15,6 +15,8 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import pytest
+
 import rop3.operation as operation
 
 from conftest import make_gadget, make_operation
@@ -57,36 +59,6 @@ def test_filter_gadgets_does_not_mutate_input(x64):
     assert matched[0].op == 'lc' and matched[0].dst == {'rax'}
     # original is untouched
     assert g.op is None and g.dst is None and g.side_regs == set()
-
-
-def test_filter_gadgets_rejects_leading_junk_on_x86(x64):
-    ''' x86 has no frame prologue, so the operation's instruction must be the
-        gadget's first: a `pop rbx` behind a `mov` is not matched. '''
-    g = make_gadget(b'\x48\x89\xc7\x5b\xc3', 0x1000)   # mov rdi, rax ; pop rbx ; ret
-    assert make_operation('lc', ['rbx']).filter_gadgets([g]) == []
-    # the same pop, as the first instruction, does match
-    g2 = make_gadget(b'\x5b\xc3', 0x1000)              # pop rbx ; ret
-    assert [x.text_repr for x in make_operation('lc', ['rbx']).filter_gadgets([g2])] \
-        == ['pop rbx ; ret']
-
-
-def test_filter_gadgets_requires_consecutive_operation_body(x64):
-    ''' A multi-instruction pattern must match a consecutive run: an
-        intervening instruction (`push src ; nop ; pop dst`) is not a match,
-        while the adjacent form (`push src ; pop dst`) is. '''
-    gapped = make_gadget(b'\x53\x90\x58\xc3', 0x1000)   # push rbx ; nop ; pop rax ; ret
-    assert make_operation('mov', ['rax', 'rbx']).filter_gadgets([gapped]) == []
-
-    consecutive = make_gadget(b'\x53\x58\xc3', 0x1010)  # push rbx ; pop rax ; ret
-    matched = make_operation('mov', ['rax', 'rbx']).filter_gadgets([consecutive])
-    assert [x.text_repr for x in matched] == ['push rbx ; pop rax ; ret']
-
-
-def test_filter_gadgets_rejects_junk_before_first_of_multi(x64):
-    ''' Junk before the first instruction of a multi-instruction pattern is
-        rejected even though the pattern is otherwise present. '''
-    g = make_gadget(b'\x90\x53\x58\xc3', 0x1000)       # nop ; push rbx ; pop rax ; ret
-    assert make_operation('mov', ['rax', 'rbx']).filter_gadgets([g]) == []
 
 
 def test_filter_gadgets_clobbered_destination(x64):
@@ -262,3 +234,47 @@ def test_reg_alias_substitution_flag(x64):
         assert matched[0].dst == {'rax'}
     finally:
         arch_singleton.allow_reg_aliases = False
+
+
+# --- The two-phase matching model -----------------------------------------
+#
+# Every case runs off the gadget's *derived* frame mask (make_gadget leaves it
+# None, so Set.iter_matches derives it via search.frame_mask_for), exercising
+# the real framing computation rather than a hand-set mask. Before the frame an
+# operation must be the gadget's first instruction; once inside the frame any
+# body instruction matches, in any order; a framing instruction is never
+# matched, but a stack pivot is body, not framing.
+
+@pytest.mark.parametrize('desc, code, op, operands, expected', [
+    # before the frame: the operation must be first -- no junk may precede it
+    ('op is the first instruction',
+     b'\x5b\xc3', 'lc', ['rbx'], ['pop rbx ; ret']),                 # pop rbx ; ret
+    ('junk before op on x86 (no prologue)',
+     b'\x48\x89\xc7\x5b\xc3', 'lc', ['rbx'], []),                    # mov rdi,rax ; pop rbx ; ret
+    ('op before the prologue is first, so matched',
+     b'\x48\x89\xf7\x58\xff\xe0', 'mov', ['rdi', 'rsi'],            # mov rdi,rsi ; pop rax ; jmp rax
+     ['mov rdi, rsi ; pop rax ; jmp rax']),
+    ('junk before a leading stack pivot',
+     b'\xc9\x48\x01\xc8\xc3', 'add', ['rax', 'rcx'], []),           # leave ; add rax,rcx ; ret
+    ('junk before the first of a multi-insn op',
+     b'\x90\x53\x58\xc3', 'mov', ['rax', 'rbx'], []),               # nop ; push rbx ; pop rax ; ret
+    # a multi-instruction body must be a consecutive run
+    ('non-consecutive body is not matched',
+     b'\x53\x90\x58\xc3', 'mov', ['rax', 'rbx'], []),               # push rbx ; nop ; pop rax ; ret
+    ('consecutive body is matched',
+     b'\x53\x58\xc3', 'mov', ['rax', 'rbx'], ['push rbx ; pop rax ; ret']),  # push rbx ; pop rax ; ret
+    # inside the frame: an operation after the prologue matches
+    ('op after the prologue',
+     b'\x58\x48\x89\xf7\xff\xe0', 'mov', ['rdi', 'rsi'],           # pop rax ; mov rdi,rsi ; jmp rax
+     ['pop rax ; mov rdi, rsi ; jmp rax']),
+    # a stack pivot is body, not framing, so it still matches add
+    ('sp-add in a JOP body is a real add',
+     b'\x58\x48\x83\xc4\x08\xff\xe0', 'add', ['rsp', '8'],         # pop rax ; add rsp,8 ; jmp rax
+     ['pop rax ; add rsp, 8 ; jmp rax']),
+    ('leading sp-add (ret self-frames) is a real add',
+     b'\x48\x83\xc4\x08\xc3', 'add', ['rsp', '8'], ['add rsp, 8 ; ret']),  # add rsp, 8 ; ret
+])
+def test_operation_matching_model(x64, desc, code, op, operands, expected):
+    g = make_gadget(code, 0x1000)
+    matched = [x.text_repr for x in make_operation(op, operands).filter_gadgets([g])]
+    assert matched == expected

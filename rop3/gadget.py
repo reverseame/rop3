@@ -23,13 +23,14 @@ import os
 import sys
 
 WARNING_COLOR = '\033[93m'
+FRAME_COLOR = '\033[90m'
 END_COLOR = '\033[0m'
 
-def _colorize(text: str) -> str:
-    ''' Wrap text in the warning color only when writing to a terminal and
-        NO_COLOR is unset, so redirected/piped output stays clean. '''
+def _colorize(text: str, color: str = WARNING_COLOR) -> str:
+    ''' Wrap text in `color` only when writing to a terminal and NO_COLOR is
+        unset, so redirected/piped output stays clean. '''
     if sys.stdout.isatty() and not os.environ.get('NO_COLOR'):
-        return f'{WARNING_COLOR}{text}{END_COLOR}'
+        return f'{color}{text}{END_COLOR}'
     return text
 
 @dataclass
@@ -46,6 +47,10 @@ class Gadget:
     dst: set = None    # concrete register names written (may overlap src)
     src: set = None    # concrete register names read (may overlap dst)
     symbol: str = None
+    # Per-instruction frame mask (parallel to `decodes`): True where the
+    # instruction is a prologue/epilogue framing instruction rather than the
+    # operation body.
+    frame: tuple = None
     side_regs: set[str] = field(init=False, default_factory=set)
     # Concrete registers bound to the operation's two operand slots.
     slot_op1: str = field(init=False, default=None)
@@ -175,9 +180,23 @@ class Gadget:
 
         return ret
 
+    def display_repr(self) -> str:
+        ''' The gadget text with its prologue/epilogue framing instructions
+            (the `frame` mask) dimmed, so the operation body stands out. Falls
+            back to the plain text when no frame mask is known. '''
+        if not self.frame:
+            return self.text_repr
+        parts = []
+        for i, d in enumerate(self.decodes):
+            text = f'{d.mnemonic} {d.op_str}' if d.op_str else d.mnemonic
+            if i < len(self.frame) and self.frame[i]:
+                text = _colorize(text, FRAME_COLOR)
+            parts.append(text)
+        return ' ; '.join(parts)
+
     def __str__(self) -> str:
         ret = f"[{os.path.basename(self.filename)} @ {hex(self.vaddr)}]: "
-        ret += self.text_repr
+        ret += self.display_repr()
         if self.symbol:
             ret += f" <{self.symbol}>"
         if self.count and self.count > 1:

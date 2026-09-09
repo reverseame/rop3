@@ -26,6 +26,7 @@ from rop3.cache import GadgetCache
 import rop3.utils as utils
 import rop3.debug as debug
 import rop3.binary
+import rop3.search as search
 from rop3.operation import OperationDef, match_gadgets, realize
 from rop3.arch import arch_singleton, DEFAULT_DEPTH
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
@@ -52,6 +53,7 @@ ALLOW_RET_IMM = 128
 ALLOW_REG_ALIASES = 256
 KEEP_CONTRADICTORY = 512
 UNFRAMED = 1024
+ROPBLOCK = 2048
 
 ''' Terminator canary bytes to avoid in gadget addresses by default:
     0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
@@ -344,8 +346,8 @@ class GadFinder:
 
         ''' The parallel scanner chunks by termination byte-offset, which only
             the Galileo backward walk supports; other strategies (the linear
-            sweep) run single-threaded. '''
-        parallelizable = arch_singleton.arch.parallelizable
+            sweep, the abstract-gadget backward search) run single-threaded. '''
+        parallelizable = arch_singleton.arch.parallelizable and not self._ropblock()
         if self._jobs > 1 and parallelizable:
             records = self._scan_parallel(binary, badchars, badchar_bytes)
             if self._cache is not None:
@@ -360,12 +362,21 @@ class GadFinder:
         records = [] if self._cache is not None else None
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
-        for vaddr, raw, decodes in self._scan_sections(binary, badchars, badchar_bytes):
+        ropblock = bool(self._ropblock())
+        for vaddr, raw, decodes, frame in self._scan_sections(binary, badchars, badchar_bytes):
+            if not ropblock:                        # ordinary scan: mark the frame
+                frame = self._classical_frame(decodes)
             if records is not None:
-                records.append([vaddr, raw.hex()])
+                record = [vaddr, raw.hex()]
+                # The abstract-gadget frame is data-flow derived, so cache it;
+                # the ordinary frame is recomputed cheaply on reconstruction.
+                if ropblock and frame is not None:
+                    record.append([bool(f) for f in frame])
+                records.append(record)
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
-                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
+                         frame=frame)
 
         if records is not None:
             self._cache.store(key, records)
@@ -430,7 +441,19 @@ class GadFinder:
             yield from arch_obj.scan(
                 opcodes, vaddr, self.depth, md.disasm, self._is_valid_gadget,
                 terminations=terminations, accept_candidate=accept_candidate,
-                framed=self._framed())
+                framed=self._framed(), ropblock=bool(self._ropblock()))
+
+    def _classical_frame(self, decodes) -> tuple:
+        ''' Per-instruction frame mask for an ordinary (classical-scan) gadget:
+            the branch-register stack-load prologue, the terminator, and any
+            position-independent framing instruction (prologue prefix). The
+            classical scans lack the abstract search's live data-flow, so the
+            prologue is reconstructed here (search.frame_mask_for). Attached to
+            every classical-scan gadget and consulted by operation matching just
+            like the abstract-gadget search's own mask. Excludes explicit
+            stack-pointer pivots (`add rsp, 8`, `leave`, `c.addi16sp sp, imm`),
+            which are meaningful side effects rather than plumbing to dim. '''
+        return search.frame_mask_for(decodes, arch_singleton.arch)
 
     def _reconstruct(self, binary, records, symbol_table):
         ''' Rebuild Gadget objects from cached (vaddr, hex-bytes) records. '''
@@ -438,12 +461,20 @@ class GadFinder:
         mode = arch_singleton.arch.mode
         md = capstone.Cs(arch, mode)
         md.detail = True
-        for vaddr, hexbytes in records:
+        ropblock = bool(self._ropblock())
+        for record in records:
+            vaddr, hexbytes = record[0], record[1]
             raw = bytes.fromhex(hexbytes)
             decodes = list(md.disasm(raw, vaddr))
+            if ropblock:
+                # A 3rd record element is the cached abstract-gadget frame mask.
+                frame = tuple(record[2]) if len(record) > 2 and record[2] is not None else None
+            else:
+                frame = self._classical_frame(decodes)
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
-                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
+                         frame=frame)
 
     def _record_params(self, binary, badchars, badchar_bytes) -> dict:
         ''' Everything (besides file content) that changes the raw record set,
@@ -507,6 +538,11 @@ class GadFinder:
     def _framed(self):
         ''' Framed search is the default; UNFRAMED disables it. '''
         return not (self.flags & UNFRAMED)
+
+    def _ropblock(self):
+        ''' Abstract-gadget search: back a terminator with a stack-loaded
+            branch register (see search.backwards_framed_search). '''
+        return self.flags & ROPBLOCK
 
     def _is_valid_gadget(self, decodes):
         ''' Invalid instructions and, thus, not decoded '''
@@ -583,7 +619,9 @@ def _scan_worker(task):
     # The slice starts `slice_start` bytes into the section.
     base_vaddr = sec_vaddr + slice_start
     out = []
-    for vaddr, raw, _decodes in arch_obj.scan(
+    # The parallel path is Galileo-only (abstract-gadget search runs
+    # single-threaded), so `scan` here always yields a None frame mask.
+    for vaddr, raw, _decodes, _frame in arch_obj.scan(
             slice_bytes, base_vaddr, depth, md.disasm, finder._is_valid_gadget,
             terminations=terminations, accept_candidate=accept_candidate,
             accept_match=accept_match, framed=finder._framed()):

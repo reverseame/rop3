@@ -193,6 +193,61 @@ class X86_Architecture(Architecture):
             return False
         return super().is_stack_pivot(insn)
 
+    # --- ropblock (abstract-gadget) predicates ------------------------------
+    #
+    # A ropblock gadget is framed [prologue] ... [terminator]: the terminator
+    # writes PC (ret pops it from the stack; `jmp reg` branches through a
+    # register), and the prologue loads that register from the stack. x86 `ret`
+    # is the degenerate case where the terminator is its own prologue.
+
+    _STACK_LOAD_MNEMONICS = ('mov', 'movzx', 'movsx', 'movsxd')
+
+    def is_pc_reg_write(self, insn) -> bool:
+        m = self.base_mnemonic(insn.mnemonic)
+        if m in ('ret', 'retf'):
+            return True
+        if m == 'jmp':
+            ops = insn.operands
+            return bool(ops) and ops[0].type == x86_const.X86_OP_REG
+        return False
+
+    def ropblock_branch_reg(self, insn):
+        m = self.base_mnemonic(insn.mnemonic)
+        if m in ('ret', 'retf'):
+            return None                 # ret pops PC off the stack: self-framing
+        if m == 'jmp':
+            ops = insn.operands
+            if ops and ops[0].type == x86_const.X86_OP_REG:
+                return self.normalize_reg(insn.reg_name(ops[0].reg))
+        return None
+
+    def is_stack_load(self, insn, reg) -> bool:
+        m = self.base_mnemonic(insn.mnemonic)
+        ops = insn.operands
+        # `pop reg` restores reg from [rsp].
+        if m == 'pop':
+            return (bool(ops) and ops[0].type == x86_const.X86_OP_REG
+                    and self.normalize_reg(insn.reg_name(ops[0].reg)) == reg)
+        # `mov reg, [rsp + disp]` (no index) restores reg from the stack.
+        if m in self._STACK_LOAD_MNEMONICS and len(ops) >= 2 \
+                and ops[0].type == x86_const.X86_OP_REG \
+                and ops[1].type == x86_const.X86_OP_MEM:
+            mem = ops[1].mem
+            return (mem.base != 0 and mem.index == 0
+                    and self.normalize_reg(insn.reg_name(mem.base))
+                        == self.normalize_reg(self.sp)
+                    and self.normalize_reg(insn.reg_name(ops[0].reg)) == reg)
+        return False
+
+    def clobbers_reg(self, insn, reg) -> bool:
+        # A genuine clobber overwrites `reg` from elsewhere; an in-place
+        # transform that also reads `reg` (e.g. `add rax, rbx`) preserves the
+        # stack-derived value and is not a clobber.
+        def touches(getter):
+            return any(insn.reg_name(rid) and self.normalize_reg(insn.reg_name(rid)) == reg
+                       for rid in getter(insn))
+        return touches(self.written_registers) and not touches(self.read_registers)
+
     @property
     def _canonical_width(self) -> int:
         """Register width (in bytes) used to display/normalize register names"""

@@ -73,21 +73,24 @@ class AArch64_Architecture(Architecture):
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True):
+             framed=True, ropblock=False):
         # Fixed-width, naturally aligned ISA: the aligned linear sweep finds the
         # same gadgets as Galileo, faster, with no unintended gadgets. When
         # framed, keep only gadgets that restore the return address (lr/x30)
         # from the stack before returning. Byte `terminations`/`accept_match`
-        # (Galileo-only) are unused here.
-        if framed:
-            yield from framed_aligned_scan(
-                opcodes, base_vaddr, depth, self.alignment, disasm,
-                is_valid_gadget, self.is_frame_load, self.is_return,
-                accept_candidate=accept_candidate)
-        else:
-            yield from aligned_scan(
-                opcodes, base_vaddr, depth, self.alignment, disasm,
-                is_valid_gadget, accept_candidate=accept_candidate)
+        # (Galileo-only) are unused here. Yields (vaddr, raw, decodes, frame).
+        if ropblock:
+            yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
+                                           accept_candidate=accept_candidate)
+            return
+        gen = framed_aligned_scan(
+            opcodes, base_vaddr, depth, self.alignment, disasm,
+            is_valid_gadget, self.is_frame_load, self.is_return,
+            accept_candidate=accept_candidate) if framed else aligned_scan(
+            opcodes, base_vaddr, depth, self.alignment, disasm,
+            is_valid_gadget, accept_candidate=accept_candidate)
+        for vaddr, raw, decodes in gen:
+            yield vaddr, raw, decodes, None
 
     @property
     def name(self) -> str:
@@ -185,3 +188,54 @@ class AArch64_Architecture(Architecture):
         from_stack = any(op.type == self.op_mem and insn.reg_name(op.mem.base) in ('sp', 'wsp')
                          for op in ops)
         return loads_lr and from_stack
+
+    # --- ropblock (abstract-gadget) predicates ------------------------------
+
+    _LOAD_MNEMONICS = ('ldr', 'ldp', 'ldur')
+
+    @staticmethod
+    def _norm(name):
+        ''' Fold AArch64 register aliases for ropblock matching: lr->x30,
+            fp->x29, the 32-bit views w0..w30->x0..x30, wsp->sp. '''
+        n = str(name)
+        aliases = {'lr': 'x30', 'fp': 'x29', 'wsp': 'sp', 'wzr': 'xzr'}
+        if n in aliases:
+            return aliases[n]
+        if len(n) > 1 and n[0] == 'w' and n[1:].isdigit():
+            return 'x' + n[1:]
+        return n
+
+    def is_pc_reg_write(self, insn) -> bool:
+        # `ret` (branches through x30) and `br Xn`; `blr` is a call and excluded.
+        return self.base_mnemonic(insn.mnemonic) in ('ret', 'br')
+
+    def ropblock_branch_reg(self, insn):
+        m = self.base_mnemonic(insn.mnemonic)
+        if m in ('ret', 'br'):
+            for op in insn.operands:
+                if op.type == self.op_reg:
+                    return self._norm(insn.reg_name(op.reg))
+            if m == 'ret':
+                return 'x30'                # bare `ret` branches through x30/lr
+        return None
+
+    def is_stack_load(self, insn, reg) -> bool:
+        if self.base_mnemonic(insn.mnemonic) not in self._LOAD_MNEMONICS:
+            return False
+        ops = insn.operands
+        from_stack = any(op.type == self.op_mem
+                         and insn.reg_name(op.mem.base) in ('sp', 'wsp')
+                         for op in ops)
+        if not from_stack:
+            return False
+        return any(op.type == self.op_reg and self._norm(insn.reg_name(op.reg)) == reg
+                   for op in ops)
+
+    def clobbers_reg(self, insn, reg) -> bool:
+        # A write that also reads `reg` is an in-place transform (e.g. PAC
+        # `autiasp`, which authenticates the stacked x30), not a clobber.
+        def touches(getter):
+            return any(insn.reg_name(rid) and self._norm(insn.reg_name(rid)) == reg
+                       for rid in getter(insn))
+        return touches(self.written_registers) and not touches(self.read_registers)
+

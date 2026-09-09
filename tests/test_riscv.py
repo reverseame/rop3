@@ -156,6 +156,24 @@ def test_gadfinder_default_depth_finds_riscv_gadget(tmp_path):
     assert 'ld ra, 8(sp) ; ret' in reprs
 
 
+def test_riscv_stack_cleanup_is_not_frame():
+    ''' A constant stack-pointer cleanup (`c.addi16sp sp, imm`) is a stack pivot
+        (is_stack_pivot) but not a framing instruction: control returns through
+        `ra`, not the stack pointer, so the adjustment is a meaningful side
+        effect, not plumbing. It stays undimmed and matchable (is_frame_instruction
+        is False). The ra restore and terminator are framed. Regression:
+        c.addi16sp was wrongly dimmed / masked. '''
+    arch = RISCV_Architecture(compressed=True)
+    addi16sp = _disasm(b'\x25\x61', compressed=True)[0]        # c.addi16sp sp, 0x60
+    assert arch.is_stack_pivot(addi16sp) is True
+    assert arch.is_frame_instruction(addi16sp) is False        # real op, not framing
+
+    ld_ra = _disasm(b'\xf2\x60', compressed=True)[0]           # c.ldsp ra, ...
+    ret = _disasm(b'\x82\x80', compressed=True)[0]             # c.jr ra
+    assert arch.is_frame_instruction(ld_ra) is True            # prologue: framed
+    assert arch.is_frame_instruction(ret) is True              # terminator: framed
+
+
 def test_riscv_written_registers_from_encoding():
     # capstone raises on regs_access() for RISC-V, so writes come from the
     # encoding: rd is operand 0, absent for stores/branches/register-jumps.
@@ -221,30 +239,6 @@ def test_riscv_calculate_side_effects_without_regs_access():
     assert 'a0' in gadget.side_regs
 
 
-def test_riscv_frame_prefix_lets_operation_follow_ra_load():
-    ''' On RISC-V the ra restore frames a gadget, so an operation may sit right
-        after it -- but not behind other (non-frame) instructions. '''
-    import rop3.operation as operation
-    from rop3.arch import arch_singleton
-    arch_singleton.reset()
-    arch_singleton.initialize(RISCV_Architecture(compressed=True))
-
-    pattern = operation.Set()                       # c.add op1, op2
-    ins = operation.Instruction('c.add')
-    ins.add(operation.Operand('op1'))
-    ins.add(operation.Operand('op2'))
-    pattern.add(ins)
-
-    C_ADD = b'\x2e\x95'                             # c.add a0, a1
-
-    # ld ra, 8(sp) ; c.add a0, a1 ; ret  -- operation after the ra-load frame
-    assert pattern.is_equal(_disasm(LD_RA_SP + C_ADD + RET, compressed=True))[0]
-    # c.add a0, a1 ; ld ra, 8(sp) ; ret  -- operation first (frame in epilogue)
-    assert pattern.is_equal(_disasm(C_ADD + LD_RA_SP + RET, compressed=True))[0]
-    # mv a0, a1 ; c.add a0, a1 ; ret  -- non-frame junk before the operation
-    assert not pattern.is_equal(_disasm(MV_A0_A1 + C_ADD + RET, compressed=True))[0]
-
-
 def _riscv_op_matches(op, operands, body):
     ''' Build a framed gadget `ld ra, 8(sp) ; <body> ; ret` and return whether
         the given operation matches it via the RISC-V ROPLang patterns. '''
@@ -293,6 +287,15 @@ def _s(op, f3, rs1, rs2, imm):
     ('mov', ['a0', 'a1'], b'\x2e\x85'),                     # c.mv a0,a1
     ('mov', ['a0', 'a1'], _r(0x33, 0, 0x00, 10, 0, 11)),    # add a0,zero,a1
     ('lc',  ['a0'],       _i(0x03, 3, 10, 2, 16)),          # ld a0,16(sp)
+    ('lc',  ['a0'],       b'\x02\x65'),                     # c.ldsp a0,0(sp)
+    ('lc',  ['a0'],       b'\x02\x45'),                     # c.lwsp a0,0(sp)
+    ('ld',  ['s0', 's0'], b'\x00\x60'),                     # c.ld  s0,0(s0)
+    ('ld',  ['s0', 's0'], b'\x00\x40'),                     # c.lw  s0,0(s0)
+    ('st',  ['s0', 's0'], b'\x00\xe0'),                     # c.sd  s0,0(s0) -> [s0]<-s0
+    ('st',  ['s0', 's0'], b'\x00\xc0'),                     # c.sw  s0,0(s0)
+    ('and', ['s0', '0'],  b'\x01\x88'),                     # c.andi s0,0
+    ('sc',  ['s0'],       b'\x22\xe0'),                     # c.sdsp s0,0(sp)
+    ('add', ['sp', '32'], b'\x05\x61'),                     # c.addi16sp sp,0x20
     ('ld',  ['a0', 'a1'], _i(0x03, 3, 10, 11, 0)),          # ld a0,0(a1)
     ('st',  ['a1', 'a0'], _s(0x23, 3, 11, 10, 0)),          # sd a0,0(a1) -> [a1]<-a0
     # immediate forms: addi/andi/ori/xori reg, reg, #imm  ==  op(reg, #imm)
@@ -301,9 +304,55 @@ def _s(op, f3, rs1, rs2, imm):
     ('and', ['a0', '12'], _i(0x13, 7, 10, 10, 12)),         # andi a0,a0,12
     ('or',  ['a0', '5'],  _i(0x13, 6, 10, 10, 5)),          # ori a0,a0,5
     ('xor', ['a0', '5'],  _i(0x13, 4, 10, 10, 5)),          # xori a0,a0,5
+    # inside the restore frame (the helper prepends `ld ra`): any body
+    # instruction matches, in any order -- a load deep in the frame and a
+    # non-pop `mv` do not block a later `ld` (s0=x8, s1=x9, s7=x23).
+    ('lc',  ['s7'], MV_A0_A1 + _i(0x03, 3, 23, 2, 24)),     # ...mv a0,a1 ; ld s7
+    ('mov', ['a0', 'a1'], MV_A0_A1 + _i(0x03, 3, 23, 2, 24)),
+    ('lc',  ['s0'], _i(0x03, 3, 8, 2, 8) + _i(0x03, 3, 9, 2, 16) + _i(0x03, 3, 23, 2, 24)),
+    ('lc',  ['s1'], _i(0x03, 3, 8, 2, 8) + _i(0x03, 3, 9, 2, 16) + _i(0x03, 3, 23, 2, 24)),
+    ('lc',  ['s7'], _i(0x03, 3, 8, 2, 8) + _i(0x03, 3, 9, 2, 16) + _i(0x03, 3, 23, 2, 24)),
 ])
 def test_riscv_roplang_patterns_match(op, operands, body):
     assert _riscv_op_matches(op, operands, body)
+
+
+def test_riscv_lc_realization_set():
+    ''' Complete set of RISC-V `lc` single-gadget realizations: the plain
+        `ld`/`lw` (rd, [sp]) loads and the compressed `c.ldsp`/`c.lwsp` stack
+        loads. Pins the yaml so any change to lc.yaml surfaces here. '''
+    import rop3.parser as parser
+    from rop3.arch import arch_singleton
+    arch_singleton.reset()
+    arch_singleton.initialize(RISCV_Architecture(compressed=True))
+    defn = parser.Parser().get_op('lc')
+    mnems = [r.links[0].items[0].mnemonic
+             for r in defn.realizations if r.is_single_gadget]
+    assert mnems == ['ld', 'lw', 'c.ldsp', 'c.lwsp']
+
+
+def test_riscv_lc_enumerates_every_pop_in_frame():
+    ''' Unbound `lc` reports every pop in a restore frame as its own match, one
+        gadget copy per restored register (`ld ra ; ld s0 ; ld s1 ; ld s7 ; ret`
+        -> lc(s0), lc(s1), lc(s7)); the ra restore stays framing and is not
+        enumerated. '''
+    import capstone
+    from rop3.arch import arch_singleton
+    from rop3.gadget import Gadget
+    arch_singleton.reset()
+    arch_singleton.initialize(RISCV_Architecture(compressed=True))
+    mode = capstone.CS_MODE_RISCV64 | capstone.CS_MODE_RISCVC
+    md = capstone.Cs(capstone.CS_ARCH_RISCV, mode)
+    md.detail = True
+    # ld ra ; ld s0 ; c.ldsp a0 ; ld s7 ; ret  -- mixes a compressed pop
+    code = (LD_RA_SP + _i(0x03, 3, 8, 2, 8) + b'\x02\x65'
+            + _i(0x03, 3, 23, 2, 24) + RET)
+    gadget = Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
+                    vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
+
+    matched = make_operation('lc').filter_gadgets([gadget])
+    dsts = sorted(next(iter(g.dst)) for g in matched)
+    assert dsts == ['a0', 's0', 's7']              # one lc per pop (incl. c.ldsp), ra excluded
 
 
 def test_riscv_jmp_is_a_stack_pivot(tmp_path):

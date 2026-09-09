@@ -18,7 +18,9 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import pytest
 
-from rop3.search import galileo_scan, aligned_scan, framed_aligned_scan, _linear_disasm
+from rop3.search import (galileo_scan, aligned_scan, framed_aligned_scan,
+                         _linear_disasm, backward_instructions,
+                         backwards_framed_search)
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
 _riscv = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
@@ -212,3 +214,100 @@ def test_riscv_is_ra_load_predicate():
     assert not is_ra_load(LD_RA_A0)      # ld ra, 8(a0)  -- not the stack
     assert not is_ra_load(b'\x03\x35\x81\x00')  # ld a0, 8(sp)  -- not ra
     assert not is_ra_load(ADD)           # not a load
+
+
+# --- Backward framed (ropblock) search ------------------------------------
+
+def _backwards_framed(opcodes, base, depth=8):
+    ''' Yields (vaddr, raw, decodes), dropping the frame mask so the shared
+        `_texts` helper can consume it. '''
+    arch = X64_Architecture()
+    md = _x86_md()
+    for vaddr, raw, decodes, _frame in backwards_framed_search(
+            opcodes, base, depth, arch.alignment, md.disasm,
+            arch.is_pc_reg_write, arch.ropblock_branch_reg,
+            arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction):
+        yield vaddr, raw, decodes
+
+
+def test_backward_instructions_steps_backward_by_alignment():
+    md = _x86_md()
+    code = b'\x90\x5f\xc3'                 # nop ; pop rdi ; ret
+    pairs = list(backward_instructions(code, 0x1000, 1, md.disasm))
+    assert [off for off, _ in pairs] == [2, 1, 0]        # high -> low, every byte
+    seen = {off: insn.mnemonic for off, insn in pairs}
+    assert (seen[2], seen[1], seen[0]) == ('ret', 'pop', 'nop')
+
+
+@_riscv
+def test_backward_instructions_alignment_skips_bytes():
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM) \
+        if hasattr(capstone, 'CS_ARCH_ARM64') else None
+    if md is None:
+        pytest.skip('capstone build without ARM64 support')
+    md.detail = True
+    code = bytes.fromhex('e0031faa') + bytes.fromhex('c0035fd6')  # mov x0,xzr ; ret
+    offs = [off for off, _ in backward_instructions(code, 0x1000, 4, md.disasm)]
+    assert offs == [4, 0]                                # 4-byte aligned steps only
+
+
+def test_backwards_framed_ret_is_self_framing():
+    # x86 ret pops PC off the stack: it frames every run that ends in it.
+    texts = _texts(_backwards_framed(b'\x5f\xc3', 0x1000))   # pop rdi ; ret
+    assert texts[0x1000] == {'pop rdi ; ret'}
+    assert texts[0x1001] == {'ret'}
+
+
+def test_backwards_framed_reg_terminator_needs_prologue():
+    # pop rax ; jmp rax  -- pop rax is the prologue for the jmp's branch register.
+    texts = _texts(_backwards_framed(b'\x58\xff\xe0', 0x1000))
+    assert texts[0x1000] == {'pop rax ; jmp rax'}
+    assert 0x1001 not in texts                # bare `jmp rax` has no prologue
+
+
+def test_backwards_framed_rejects_unframed_and_clobbered_reg():
+    # mov rax, rbx ; jmp rax  -- rax never comes off the stack.
+    assert _texts(_backwards_framed(b'\x48\x89\xd8\xff\xe0', 0x1000)) == {}
+    # pop rax ; mov rax, rbx ; jmp rax  -- rax recomputed after the stack load.
+    texts = _texts(_backwards_framed(b'\x58\x48\x89\xd8\xff\xe0', 0x1000))
+    assert all(not t.endswith('jmp rax') for ts in texts.values() for t in ts)
+
+
+def test_backwards_framed_marks_prologue_body_epilogue():
+    # pop rax ; mov rdi, rsi ; jmp rax  -- prologue(pop rax) / body(mov) /
+    # terminator(jmp rax): the frame mask marks the prologue and terminator.
+    arch = X64_Architecture()
+    md = _x86_md()
+    runs = {tuple(d.mnemonic for d in decodes): frame
+            for _v, _r, decodes, frame in backwards_framed_search(
+                b'\x58\x48\x89\xf7\xff\xe0', 0x1000, 8, arch.alignment, md.disasm,
+                arch.is_pc_reg_write, arch.ropblock_branch_reg,
+                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+    assert runs[('pop', 'mov', 'jmp')] == (True, False, True)
+
+
+def test_backwards_framed_sp_pivot_is_not_framed():
+    # pop rax ; add rsp, 8 ; jmp rax  -- control returns through rax (JOP), not
+    # the stack, so `add rsp, 8` is a real stack operation, not framing. Only the
+    # prologue (pop rax) and the terminator (jmp rax) are framed.
+    arch = X64_Architecture()
+    md = _x86_md()
+    runs = {tuple(d.mnemonic for d in decodes): frame
+            for _v, _r, decodes, frame in backwards_framed_search(
+                b'\x58\x48\x83\xc4\x08\xff\xe0', 0x1000, 12, arch.alignment, md.disasm,
+                arch.is_pc_reg_write, arch.ropblock_branch_reg,
+                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+    assert runs[('pop', 'add', 'jmp')] == (True, False, True)
+
+
+def test_backwards_framed_leading_sp_pivot_is_body():
+    # add rsp, 8 ; ret  -- ret is self-framing (its own prologue); the stack
+    # pivot is the operation body, left unframed so `--op add` surfaces it.
+    arch = X64_Architecture()
+    md = _x86_md()
+    runs = {tuple(d.mnemonic for d in decodes): frame
+            for _v, _r, decodes, frame in backwards_framed_search(
+                b'\x48\x83\xc4\x08\xc3', 0x1000, 12, arch.alignment, md.disasm,
+                arch.is_pc_reg_write, arch.ropblock_branch_reg,
+                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+    assert runs[('add', 'ret')] == (False, True)

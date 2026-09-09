@@ -36,3 +36,9 @@ sc:
         - mnemonic: sd
           op1: op1
           op2: '[sp]'
+    # Compressed doubleword stack store (src, off, sp).
+    - steps:
+        - mnemonic: c.sdsp
+          op1: op1
+          op2: ANY
+          op3: sp

@@ -35,3 +35,8 @@ and:
           op1: op1
           op2: op1
           op3: op2
+    # c.andi op1, imm   (op1 <- op1 & imm; op2 binds the immediate)
+    - steps:
+        - mnemonic: c.andi
+          op1: op1
+          op2: op2

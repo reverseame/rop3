@@ -14,7 +14,7 @@ jmp:
 
   arm:
     - steps:
-        - mnemonic: mov
+        - operation: mov
           op1: REG_SP
           op2: op1
 

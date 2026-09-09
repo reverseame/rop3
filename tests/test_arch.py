@@ -130,10 +130,15 @@ def test_is_valid_rop_gadget_ret_imm_gating():
 
 
 def test_ret_imm_anywhere_gated():
-    ''' A `ret <imm>` returns at that point, so a gadget containing one anywhere
-        (even as the first instruction) is excluded unless ret-imm is allowed. '''
+    ''' A `ret <imm>` returns at that point. As the gadget's terminator it is a
+        ret-imm gadget, gated by allow_ret_imm (see
+        test_is_valid_rop_gadget_ret_imm_gating). Anywhere else it ends the
+        gadget early -- a leading `ret <imm>` makes the trailing instructions
+        dead ("prologue after prologue") -- so the gadget is rejected regardless
+        of ret-imm being allowed; the standalone `ret <imm>` is found on its
+        own. '''
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
     arch = X64_Architecture()
     lead_ret_imm = list(md.disasm(b'\xc2\x48\x89\xc3', 0))   # ret 0x8948 ; ret
     assert not arch.is_valid_rop_gadget(lead_ret_imm)
-    assert arch.is_valid_rop_gadget(lead_ret_imm, allow_ret_imm=True)
+    assert not arch.is_valid_rop_gadget(lead_ret_imm, allow_ret_imm=True)

@@ -20,7 +20,7 @@ from typing import List, Any
 
 import capstone
 
-from rop3.search import galileo_scan
+from rop3.search import galileo_scan, backwards_framed_search
 
 # Default search depth in bytes when the user does not pass --depth. Tuned for
 # x86, whose 1-3 byte instructions pack several into a short gadget. Fixed-width
@@ -122,9 +122,15 @@ class Architecture(ABC):
         if not allow_ret_imm and self._has_ret_imm(decodes, terminations):
             return False
 
-        intermediates = decodes[1:-1]
+        # Every instruction but the gadget's own terminator: a termination or
+        # branch here ends the gadget early, so it may not appear -- including at
+        # position 0 (a leading `ret` makes `ret ; mov rax, rdi ; ret` degenerate:
+        # execution stops at the first ret, and the real gadget is the shorter
+        # one after it). The trailing terminator is exempt; a bare `ret` (its own
+        # terminator, nothing before it) stays valid.
+        intermediates = decodes[:-1]
 
-        # Intermediate termination (there is already a shorter version).
+        # Leading/intermediate termination (there is already a shorter version).
         if any(self.base_mnemonic(ins.mnemonic) in terminations for ins in intermediates):
             return False
         # Multibranch unconditional (jmp/call, j/jal).
@@ -151,7 +157,9 @@ class Architecture(ABC):
         if not self.is_valid_jop_last(last):
             return False
 
-        intermediates = decodes[1:-1]
+        # Every instruction but the terminator (see is_valid_rop_gadget): a
+        # branch/return at position 0 or in the middle ends the gadget early.
+        intermediates = decodes[:-1]
 
         # Multibranch unconditional (jmp/call, j/jal).
         if any(self.base_mnemonic(ins.mnemonic) in self.unconditional_branch_mnemonics
@@ -192,14 +200,37 @@ class Architecture(ABC):
             DEFAULT_DEPTH would find nothing. '''
         return DEFAULT_DEPTH
 
+    def splits_gadget(self, insn) -> bool:
+        """
+        Whether `insn` may not appear *inside* a gadget -- an intermediate
+        control-flow transfer that would end it early: an unconditional branch or
+        return, or a conditional branch. The gadget's own terminator is exempt
+        (the abstract-gadget search checks only the instructions before it).
+        """
+        return (self.base_mnemonic(insn.mnemonic) in self.unconditional_branch_mnemonics
+                or insn.mnemonic in self.conditional_branch_mnemonics)
+
+    def _ropblock_scan(self, opcodes, base_vaddr, depth, disasm,
+                       accept_candidate=None):
+        ''' Abstract-gadget backward search (search.backwards_framed_search)
+            wired with this architecture's own ropblock predicates; yields
+            ``(vaddr, raw, decodes, frame)``. '''
+        yield from backwards_framed_search(
+            opcodes, base_vaddr, depth, self.alignment, disasm,
+            self.is_pc_reg_write, self.ropblock_branch_reg,
+            self.is_stack_load, self.clobbers_reg, self.is_frame_instruction,
+            splits=self.splits_gadget, accept_candidate=accept_candidate)
+
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True):
+             framed=True, ropblock=False):
         '''
         Yield this architecture's gadgets within one executable section as
-        ``(vaddr, raw, decodes)`` tuples. Each architecture wires the search
-        strategy (see rop3.search) that fits its ISA; the finder calls this
-        uniformly and never branches on the architecture.
+        ``(vaddr, raw, decodes, frame)`` tuples (`frame` is the per-instruction
+        framing mask, non-None only for the abstract-gadget search). Each
+        architecture wires the search strategy (see rop3.search) that fits its
+        ISA; the finder calls this uniformly and never branches on the
+        architecture.
 
         The default is the Galileo backward walk -- required on variable-length
         (x86) ISAs, where gadgets hide inside longer instructions -- driven by
@@ -207,11 +238,17 @@ class Architecture(ABC):
         partitions terminations across parallel chunks (see _scan_parallel) and
         is ignored by strategies that do not chunk. `framed` is honored only by
         architectures with a framed scan (AArch64, RISC-V); Galileo ignores it.
+        `ropblock` selects the abstract-gadget backward search instead.
         '''
-        yield from galileo_scan(
-            opcodes, base_vaddr, terminations, depth, self.alignment, disasm,
-            is_valid_gadget, accept_match=accept_match,
-            accept_candidate=accept_candidate)
+        if ropblock:
+            yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
+                                           accept_candidate=accept_candidate)
+            return
+        for vaddr, raw, decodes in galileo_scan(
+                opcodes, base_vaddr, terminations, depth, self.alignment, disasm,
+                is_valid_gadget, accept_match=accept_match,
+                accept_candidate=accept_candidate):
+            yield vaddr, raw, decodes, None
 
     @property
     @abstractmethod
@@ -333,6 +370,48 @@ class Architecture(ABC):
             return False
         return (self.normalize_reg(insn.reg_name(ops[0].reg))
                 == self.normalize_reg(self.sp))
+
+    def is_frame_instruction(self, insn) -> bool:
+        """
+        Whether `insn` is a *position-independent* framing instruction -- a frame
+        prologue prefix, a return, or a PC-writing terminator.
+        Marks the prologue/epilogue of a gadget: dimmed in the gadget view, and
+        (for an abstract gadget) skipped by operation matching. The data-flow
+        prologue -- the stack load of the terminator's branch register -- is
+        marked separately by the search, which knows that register.
+        """
+        return (self.is_frame_prefix(insn) or self.is_return(insn)
+                or self.is_pc_reg_write(insn))
+
+    def is_pc_reg_write(self, insn) -> bool:
+        """
+        Whether `insn` is a ropblock terminator: it writes the program counter
+        from a register (an indirect jmp/br through a register) or, for x86,
+        pops it straight off the stack (`ret`). Default: none.
+        """
+        return False
+
+    def ropblock_branch_reg(self, insn):
+        """
+        The register a ropblock terminator branches through, or None when the
+        terminator pops the program counter straight off the stack and is thus
+        its own prologue (x86 `ret`). Default: None.
+        """
+        return None
+
+    def is_stack_load(self, insn, reg) -> bool:
+        """
+        Whether `insn` is a ropblock prologue for `reg`: it loads `reg` from the
+        stack (`pop reg`, `ldr reg, [sp]`, `ld reg, off(sp)`). Default: no.
+        """
+        return False
+
+    def clobbers_reg(self, insn, reg) -> bool:
+        """
+        Whether `insn` overwrites `reg` (breaking a prologue -> terminator
+        data-flow). Default: no.
+        """
+        return False
 
     def is_frame_load(self, insn) -> bool:
         """
