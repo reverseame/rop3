@@ -1,0 +1,6 @@
+lc(a1)
+lc(a2)
+lc(a7)
+lc(a0)
+raw([ecall], [], [], [a0, a1, a2, a7])
+
