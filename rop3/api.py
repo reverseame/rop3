@@ -39,7 +39,8 @@ class Rop3:
     def __init__(self, binaries, *, depth=None, rop=True, jop=False,
                  retf=False, all=False, allow_undeterministic=False,
                  allow_complex_mem=False, avoid_canary=True, ret_imm=False,
-                 reg_aliases=False, keep_contradictory=False, framed=True, base=None,
+                 reg_aliases=False, keep_contradictory=False, framed=True,
+                 ropblock=False, base=None,
                  badchars=None, badchar_bytes=None, arch=None, symbols=False,
                  cache=False, cache_dir=None, jobs=1):
         self.binaries = [binaries] if isinstance(binaries, str) else list(binaries)
@@ -72,6 +73,8 @@ class Rop3:
             flags |= gadfinder.KEEP_CONTRADICTORY
         if not framed:
             flags |= gadfinder.UNFRAMED
+        if ropblock:
+            flags |= gadfinder.ROPBLOCK
 
         self._finder = GadFinder(depth, flags, cache=cache, cache_dir=cache_dir,
                                  jobs=jobs)
@@ -113,7 +116,8 @@ class Rop3:
             verbose reporting; does not scan for gadgets. '''
         bases = self.base if isinstance(self.base, list) \
             else [self.base] * len(self.binaries)
-        return [Binary(fn, b, self.arch).describe()
+        ropblock, framed = self._finder.ropblock, self._finder.framed
+        return [Binary(fn, b, self.arch).describe(ropblock=ropblock, framed=framed)
                 for fn, b in zip(self.binaries, bases)]
 
     def find_op(self, op, operands=None):

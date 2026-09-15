@@ -24,3 +24,13 @@ lc:
         - mnemonic: lw
           op1: op1
           op2: '[sp]'
+    - steps:
+        - mnemonic: c.ldsp
+          op1: op1
+          op2: ANY
+          op3: sp
+    - steps:
+        - mnemonic: c.lwsp
+          op1: op1
+          op2: ANY
+          op3: sp

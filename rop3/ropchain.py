@@ -23,6 +23,9 @@ import rop3.debug as debug
 import rop3.utils as utils
 
 from .gadget import Gadget, heuristic_basic_count
+from .operation import OperationDef
+
+from .symbolic import SymbolicAnalyzer
 
 '''
 Matches an operation line with an arbitrary number of comma-separated operands:
@@ -39,6 +42,12 @@ REGEX_OP = re.compile(
 )
 COMMENT = re.compile(r'^(?:\s*;.*)?$')
 
+'''
+Matches an explicit inline gadget:
+    raw([mnemonic, ...], [operands], [dst regs], [src regs])
+'''
+REGEX_RAW = re.compile(r'^\s*raw\s*\(')
+
 
 class RopChain:
     '''
@@ -46,23 +55,31 @@ class RopChain:
     '''
     def __init__(self, gadfinder):
         self.gadfinder = gadfinder
+        self._analyzer = SymbolicAnalyzer()
+        self.last_symbolic_result = None
 
     def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None,
-                          badchar_bytes=None, arch=None, symbols=False) -> Iterator[list[Gadget]]:
+                          badchar_bytes=None, arch=None, symbols=False,
+                          symbolic=True) -> Iterator[list[Gadget]]:
         gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars,
                                       badchar_bytes=badchar_bytes, arch=arch, symbols=symbols)
-        return self.search_from_gadgets(gadgets, ropfile)
+        return self.search_from_gadgets(gadgets, ropfile, symbolic=symbolic)
 
-    def search_from_gadgets(self, gadgets, ropfile) -> Iterator[list[Gadget]]:
+    def search_from_gadgets(self, gadgets, ropfile, symbolic=True) -> Iterator[list[Gadget]]:
         ropchain = self._parse_ropfile(ropfile)
-        return self.search(gadgets, ropchain)
+        return self.search(gadgets, ropchain, symbolic=symbolic)
 
-    def search(self, gadgets, ropchain, prune_equivalent=True) -> Iterator[list[Gadget]]:
+    def search(self, gadgets, ropchain, prune_equivalent=True,
+               symbolic=True) -> Iterator[list[Gadget]]:
         '''
         `ropchain` is the parsed request: a list of steps ({op, operands}). The
         gadfinder classifies it into realizations -- one per compound-operation
         alternative -- each a list of (primitive_step, gadgets) pairs; every
         realization is resolved by Tree and assembled by DFS.
+
+        When `symbolic` is set (and Triton is available), each assembled chain
+        is symbolically executed as a final validation step before it is
+        yielded.
         '''
         realizations = self.gadfinder.classify_ropchain(gadgets, ropchain)
         found = False
@@ -70,11 +87,47 @@ class RopChain:
             try:
                 for solution in self._assemble(bundle, prune_equivalent):
                     found = True
+                    self._symbolic_check(solution, symbolic)
                     yield solution
             except RopChainNotFound:
                 continue
         if not found:
             raise RopChainNotFound('no suitable ropchain combination found')
+
+    def _symbolic_check(self, solution: list[Gadget], symbolic: bool) -> None:
+        '''
+        Final step: symbolically execute the assembled chain, record the stack
+        layout / memory accesses it needs, and confirm control reaches the last
+        gadget.
+        '''
+        self.last_symbolic_result = None
+        if not symbolic:
+            return
+
+        result = self._analyzer.analyze_ropchain(solution)
+        self.last_symbolic_result = result
+        if not result.supported:
+            debug.info(f'symbolic analysis skipped: {result.error}')
+            return
+        if result.error:
+            debug.warning(result.error)
+            return
+        for line in result.report_lines():
+            debug.info(line)
+        if result.memory_writes:
+            debug.warning(
+                f'concolic emulation observed {len(result.memory_writes)} memory '
+                'write(s): the chain has memory side effects (see the report for '
+                'addresses and values)')
+        if result.pivots:
+            debug.warning(
+                f'concolic emulation detected {len(result.pivots)} stack '
+                'pivot(s): control does not reach the next gadget through the '
+                'filled return slot (redirected stack pointer or a chain-fixed '
+                'return address)')
+        if not result.reached:
+            debug.warning('concolic emulation did not reach the final gadget: '
+                          'the chain may not transfer control as expected')
 
     def _assemble(self, bundle, prune_equivalent) -> Iterator[list[Gadget]]:
         ''' Resolve one realization's register slots and assemble it by DFS.
@@ -193,6 +246,13 @@ class RopChain:
 
         data = utils.read_file(ropfile).splitlines()
         for i, line in enumerate(data, start=1):
+            if REGEX_RAW.match(line):
+                try:
+                    ret.append(self._parse_raw_line(line))
+                except RawGadgetError as exc:
+                    debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
+                continue
+
             match = REGEX_OP.search(line)
             if match:
                 op_name = match.group('OP')
@@ -231,6 +291,138 @@ class RopChain:
             debug.warning(f'{op_name}: an empty operand from a legacy dst/src comma '
                           f'is ignored (operands are positional: op1, op2, ...)')
         return [a for a in raw if a]
+
+    def _parse_raw_line(self, line: str) -> dict:
+        '''
+        Parse an explicit-gadget line into a chain step carrying its own inline
+        OperationDef:
+
+            raw([mnemonic, ...], [operands], [dst], [src])
+
+        The four bracketed fields are the instruction mnemonics, their operands,
+        and the concrete registers written (dst) / read (src) for the
+        assembler's side-effect tracking. The step is otherwise identical to a
+        ROPLang step, so the classifier/assembler consume it unchanged; the only
+        difference is that its definition is built here instead of resolved from
+        the operation catalog. The gadget is matched exactly as written, hence
+        architecture specific (no multi-architecture realizations).
+
+        Operands map to instructions positionally: with no parenthesised groups
+        every operand belongs to the *first* instruction (the common case:
+        `pop rdi ; ret`, `mov [rdi], rax ; ret`); to give operands to several
+        instructions, wrap each instruction's operands in `(...)`
+        (`raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])`).
+        '''
+        body = self._raw_body(line)
+        fields = self._split_top_level(body)
+        if len(fields) != 4:
+            raise RawGadgetError('a raw gadget needs exactly four bracketed '
+                                 'fields: [mnemonics], [operands], [dst], [src]')
+
+        mnemonics = self._raw_list(fields[0], 'mnemonics')
+        if not mnemonics:
+            raise RawGadgetError('a raw gadget needs at least one mnemonic')
+        per_instr_ops = self._raw_operands(fields[1], len(mnemonics))
+        dst = self._raw_list(fields[2], 'dst')
+        src = self._raw_list(fields[3], 'src')
+
+        instructions = [{'mnemonic': m, 'operands': ops}
+                        for m, ops in zip(mnemonics, per_instr_ops)]
+        name = ' ; '.join(
+            f"{ins['mnemonic']} {', '.join(ins['operands'])}".strip()
+            for ins in instructions)
+
+        defn = OperationDef(name, operands=0, dst_roles=dst, src_roles=src)
+        defn.add_realization([{'gadget': instructions}])
+
+        return {'data': line.strip(), 'op': name, 'operands': [], 'defn': defn}
+
+    @staticmethod
+    def _raw_body(line: str) -> str:
+        ''' The text between the outermost parentheses of a `raw(...)` line,
+            with any trailing `;` comment removed. '''
+        line = RopChain._strip_line_comment(line).strip()
+        open_paren = line.find('(')
+        if open_paren == -1 or not line.endswith(')'):
+            raise RawGadgetError('malformed raw gadget: expected raw(...)')
+        return line[open_paren + 1:-1]
+
+    @staticmethod
+    def _strip_line_comment(line: str) -> str:
+        ''' Drop a trailing `;` comment, ignoring any `;` nested inside brackets
+            (a raw gadget's fields never contain `;`, but stay bracket-aware). '''
+        depth = 0
+        for i, ch in enumerate(line):
+            if ch in '[(':
+                depth += 1
+            elif ch in ')]':
+                depth = max(0, depth - 1)
+            elif ch == ';' and depth == 0:
+                return line[:i]
+        return line
+
+    @staticmethod
+    def _split_top_level(s: str, sep: str = ',') -> list[str]:
+        ''' Split `s` on `sep` at bracket depth 0, honouring `[]` and `()`
+            nesting, and strip each part. '''
+        parts, depth, cur = [], 0, ''
+        for ch in s:
+            if ch in '[(':
+                depth += 1
+            elif ch in ')]':
+                depth -= 1
+            if ch == sep and depth == 0:
+                parts.append(cur.strip())
+                cur = ''
+            else:
+                cur += ch
+        parts.append(cur.strip())
+        return parts
+
+    @staticmethod
+    def _unbracket(field: str, what: str) -> str:
+        field = field.strip()
+        if not (field.startswith('[') and field.endswith(']')):
+            raise RawGadgetError(f'the {what} field must be wrapped in [ ]')
+        return field[1:-1].strip()
+
+    @staticmethod
+    def _raw_list(field: str, what: str) -> list[str]:
+        ''' A bracketed, comma-separated field ([a, b, c]) as a list of tokens,
+            dropping empties (so `[]` is an empty list). '''
+        inner = RopChain._unbracket(field, what)
+        return [tok for tok in RopChain._split_top_level(inner) if tok]
+
+    @staticmethod
+    def _raw_operands(field: str, n_instr: int) -> list[list[str]]:
+        '''
+        Resolve the operands field into a per-instruction operand list (one entry
+        per mnemonic). With no `(...)` groups all operands belong to the first
+        instruction; with groups, each top-level element is one instruction's
+        operands -- a `(...)` group its full operand list, a bare token a single
+        operand -- assigned to instructions in order.
+        '''
+        inner = RopChain._unbracket(field, 'operands')
+        elements = [e for e in RopChain._split_top_level(inner) if e]
+        per_instr: list[list[str]] = [[] for _ in range(n_instr)]
+        if not elements:
+            return per_instr
+
+        grouped = any(e.startswith('(') and e.endswith(')') for e in elements)
+        if not grouped:
+            per_instr[0] = elements
+            return per_instr
+
+        if len(elements) > n_instr:
+            raise RawGadgetError(
+                f'{len(elements)} operand groups for {n_instr} instruction(s)')
+        for i, element in enumerate(elements):
+            if element.startswith('(') and element.endswith(')'):
+                ops = [o for o in RopChain._split_top_level(element[1:-1]) if o]
+            else:
+                ops = [element]
+            per_instr[i] = ops
+        return per_instr
 
 
 class Tree:
@@ -335,4 +527,9 @@ class Tree:
 
 
 class RopChainNotFound(Exception):
+    pass
+
+
+class RawGadgetError(Exception):
+    ''' A malformed explicit-gadget (`raw(...)`) line in a ROP-chain file. '''
     pass

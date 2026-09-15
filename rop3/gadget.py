@@ -23,13 +23,14 @@ import os
 import sys
 
 WARNING_COLOR = '\033[93m'
+FRAME_COLOR = '\033[90m'
 END_COLOR = '\033[0m'
 
-def _colorize(text: str) -> str:
-    ''' Wrap text in the warning color only when writing to a terminal and
-        NO_COLOR is unset, so redirected/piped output stays clean. '''
+def _colorize(text: str, color: str = WARNING_COLOR) -> str:
+    ''' Wrap text in `color` only when writing to a terminal and NO_COLOR is
+        unset, so redirected/piped output stays clean. '''
     if sys.stdout.isatty() and not os.environ.get('NO_COLOR'):
-        return f'{WARNING_COLOR}{text}{END_COLOR}'
+        return f'{color}{text}{END_COLOR}'
     return text
 
 @dataclass
@@ -46,6 +47,10 @@ class Gadget:
     dst: set = None    # concrete register names written (may overlap src)
     src: set = None    # concrete register names read (may overlap dst)
     symbol: str = None
+    # Per-instruction frame mask (parallel to `decodes`): True where the
+    # instruction is a prologue/epilogue framing instruction rather than the
+    # operation body.
+    frame: tuple = None
     side_regs: set[str] = field(init=False, default_factory=set)
     # Concrete registers bound to the operation's two operand slots.
     slot_op1: str = field(init=False, default=None)
@@ -84,7 +89,7 @@ class Gadget:
         return regs
 
     def tuple_repr(self) -> str:
-        ''' Formal tuple representation of the gadget:
+        ''' The gadget as a tuple for --tuple output:
             <op_name, op1[, op2], written registers, read registers> '''
         arch = arch_singleton.arch
         written = self._register_set(arch.written_registers)
@@ -108,27 +113,18 @@ class Gadget:
         return False
 
     def result_clobbered(self, matched_indices, dst_regs) -> bool:
-        ''' Whether this gadget overwrites an operation's result before its
-            terminator -- a "contradictory" gadget (e.g.
-            `add rax, rbx ; mov rax, rcx ; ret`) whose result never reaches the
-            ret. `matched_indices` are the positions of the operation's matched
-            instructions and `dst_regs` its declared destination registers.
+        ''' Whether an instruction between the operation and the terminator
+            overwrites the operation's result register, so it never reaches the
+            ret (e.g. `add rax, rbx ; mov rax, rcx ; ret`). `matched_indices`
+            are the matched instructions' positions, `dst_regs` the destination
+            registers.
 
-            `dst_regs` are intersected with the registers the matched
-            instructions actually write, so a store (whose result is in memory)
-            protects nothing and is never falsely rejected. A gadget is
-            contradictory when an instruction between the last matched one and
-            the terminator writes such a register.
-
-            The final (terminating) instruction is excluded: it is control flow,
-            and its incidental write to the stack pointer (an x86 `ret` pops) is
-            the gadget's exit mechanism, not a clobber of the result -- so a
-            stack-pointer operation like `add rsp, 8 ; ret` is not
-            contradictory.
-
-            `matched_indices` are contiguous (Set.is_equal matches a consecutive
-            run), so only the tail after `max(matched_indices)` needs scanning;
-            a clobber can never hide between two matched instructions. '''
+            Only registers the matched instructions actually write are guarded
+            (a store leaves its result in memory, so it guards nothing). The
+            terminator is excluded: its stack-pointer write is the exit
+            mechanism, not a clobber, so `add rsp, 8 ; ret` is fine. Matches are
+            contiguous, so only the tail after the last matched index is
+            scanned. '''
         if not dst_regs:
             return False
 
@@ -175,9 +171,23 @@ class Gadget:
 
         return ret
 
+    def display_repr(self) -> str:
+        ''' The gadget text with its prologue/epilogue framing instructions
+            (the `frame` mask) dimmed, so the operation body stands out. Falls
+            back to the plain text when no frame mask is known. '''
+        if not self.frame:
+            return self.text_repr
+        parts = []
+        for i, d in enumerate(self.decodes):
+            text = f'{d.mnemonic} {d.op_str}' if d.op_str else d.mnemonic
+            if i < len(self.frame) and self.frame[i]:
+                text = _colorize(text, FRAME_COLOR)
+            parts.append(text)
+        return ' ; '.join(parts)
+
     def __str__(self) -> str:
         ret = f"[{os.path.basename(self.filename)} @ {hex(self.vaddr)}]: "
-        ret += self.text_repr
+        ret += self.display_repr()
         if self.symbol:
             ret += f" <{self.symbol}>"
         if self.count and self.count > 1:
@@ -208,13 +218,8 @@ class Gadget:
         }
 
 def heuristic_basic_count(gadget: "Gadget") -> int:
-    """
-    Cost function — lower is better:
-      side_regs  : each clobbered register costs 4   (shift-left 2)
-      decodes    : each extra instruction costs 2    (shift-left 1)
-    """
-    return (
-        (len(gadget.side_regs) << 2)   # 4 pts per clobbered register
-      + (len(gadget.decodes)   << 1)   # 2 pts per instruction
-    )
+    ''' Cost of a gadget (lower is better): a clobbered register costs 4, an
+        instruction costs 2, so fewer side effects are preferred over fewer
+        instructions. '''
+    return 4 * len(gadget.side_regs) + 2 * len(gadget.decodes)
 

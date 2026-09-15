@@ -1,0 +1,38 @@
+;
+;    Turing Machine in ROP (amd64)
+;
+
+lc(reg1) ; reg1 points to the tape head
+lc(reg2) ; reg2 is the current state (scaled by 32 bytes)
+lc(reg3) ; reg3 points to the start of the transition table
+
+; --- Tape read ---
+ld(reg4, reg1)  ; reg4 = symbol read (scaled by 8)
+add(reg4, reg3) ;
+ld(reg4, reg4)  ; reg4 = base address of table[symbol, 0]
+
+; --- State-based addressing ---
+add(reg4, reg2) ; reg4 = address of table[symbol, state]
+
+; --- Struct execution ---
+; 1. Load the next state
+ld(reg2, reg4)
+add(reg4, 8)    ; reg4 points to the struct field <symbol>
+
+; 2. Load the symbol and write it to the tape
+ld(reg5, reg4)
+st(reg1, reg5)
+add(reg4, 8)    ; reg4 points to the struct field <movement>
+
+; 3. Load and apply the tape movement
+ld(reg5, reg4)  ; +8 or -8
+add(reg1, reg5)
+add(reg4, 8)    ; reg4 points to the struct field <@jump>
+
+; 4. Load the jump address (loop start or exit)
+ld(reg5, reg4)
+
+; Unconditional jump
+jmp(reg5)
+
+raw([nop], [], [], []) ; nop

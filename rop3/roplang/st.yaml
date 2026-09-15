@@ -26,3 +26,14 @@ st:
         - mnemonic: sw
           op1: op2
           op2: '[op1]'
+    # Compressed stores render as (src, off, base): src=op2, base=op1.
+    - steps:
+        - mnemonic: c.sd
+          op1: op2
+          op2: ANY
+          op3: op1
+    - steps:
+        - mnemonic: c.sw
+          op1: op2
+          op2: ANY
+          op3: op1

@@ -18,7 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import capstone.riscv_const as riscv_const
 from rop3.arch import Architecture
-from rop3.search import aligned_scan, framed_aligned_scan
+from rop3.search import aligned_scan
 
 # ABI register names capstone prints for the integer file (x0 is the hardwired
 # zero register and is not a usable destination, so it is excluded).
@@ -84,9 +84,13 @@ class RISCV_Architecture(Architecture):
     def __init__(self, compressed: bool = False):
         self._compressed = bool(compressed)
 
-    @property
-    def scan_name(self) -> str:
-        return 'framed aligned'
+    def scan_name(self, ropblock=False, framed=True) -> str:
+        # Mirror `scan`: --ropblock -> abstract-gadget search; otherwise the
+        # aligned linear sweep, gated on the return-address frame (`ret` jumps
+        # through ra) unless --no-frame drops it to a plain aligned sweep.
+        if ropblock:
+            return 'ropblock'
+        return 'framed aligned' if framed else 'aligned'
 
     @property
     def parallelizable(self) -> bool:
@@ -102,20 +106,21 @@ class RISCV_Architecture(Architecture):
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True):
+             framed=True, ropblock=False):
         # `ret` jumps through ra, so a useful ROP gadget must first restore ra
         # from the stack: the aligned sweep gated on that frame load (the
         # default). `--no-frame` drops the requirement (plain aligned sweep).
         # Byte `terminations`/`accept_match` (Galileo-only) are unused here.
-        if framed:
-            yield from framed_aligned_scan(
-                opcodes, base_vaddr, depth, self.alignment, disasm,
-                is_valid_gadget, self.is_frame_load, self.is_return,
-                accept_candidate=accept_candidate)
-        else:
-            yield from aligned_scan(
-                opcodes, base_vaddr, depth, self.alignment, disasm,
-                is_valid_gadget, accept_candidate=accept_candidate)
+        # Yields (vaddr, raw, decodes, frame).
+        if ropblock:
+            yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
+                                           accept_candidate=accept_candidate)
+            return
+        yield from aligned_scan(
+            opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
+            restores_return_address=self.restores_return_address,
+            is_return=self.is_return if framed else None,
+            accept_candidate=accept_candidate)
 
     @property
     def compressed(self) -> bool:
@@ -224,13 +229,8 @@ class RISCV_Architecture(Architecture):
             scan's requirement that ROP gadgets restore ra from the stack. '''
         return self._terminates_rop(insn, self.rop_termination_mnemonics)
 
-    def is_frame_load(self, insn) -> bool:
-        ''' The framed-scan frame load on RISC-V is the ra restore. '''
-        return self.is_ra_load(insn)
-
-    def is_frame_prefix(self, insn) -> bool:
-        ''' The ra restore frames a RISC-V ROP gadget, so an operation may
-            follow it (e.g. `ld ra, off(sp) ; add a0, a1, a2 ; ret`). '''
+    def restores_return_address(self, insn) -> bool:
+        ''' The frame load on RISC-V is the ra restore. '''
         return self.is_ra_load(insn)
 
     def is_ra_load(self, insn) -> bool:
@@ -260,3 +260,36 @@ class RISCV_Architecture(Architecture):
         if ops and ops[0].type == self.op_reg:
             return {ops[0].reg}
         return set()
+
+    # --- ropblock (abstract-gadget) predicates ------------------------------
+
+    def is_pc_reg_write(self, insn) -> bool:
+        # `ret` (jalr x0,0(ra)) and the pure indirect jumps `jr`/`c.jr`; the
+        # linking `jalr`/`c.jalr` are calls and excluded.
+        return self.base_mnemonic(insn.mnemonic) in ('ret', 'jr', 'c.jr')
+
+    def ropblock_branch_reg(self, insn):
+        if self.base_mnemonic(insn.mnemonic) == 'ret':
+            return 'ra'
+        regs = [op for op in insn.operands if op.type == self.op_reg]
+        return insn.reg_name(regs[0].reg) if regs else None
+
+    def is_stack_load(self, insn, reg) -> bool:
+        if self.base_mnemonic(insn.mnemonic) not in LOAD_MNEMONICS:
+            return False
+        ops = insn.operands
+        if not ops or ops[0].type != self.op_reg or insn.reg_name(ops[0].reg) != reg:
+            return False
+        for op in ops[1:]:
+            if op.type == self.op_mem and insn.reg_name(op.mem.base) == 'sp':
+                return True
+            if op.type == self.op_reg and insn.reg_name(op.reg) == 'sp':
+                return True
+        return False
+
+    def clobbers_reg(self, insn, reg) -> bool:
+        for rid in self.written_registers(insn):
+            name = insn.reg_name(rid)
+            if name and name == reg:
+                return True
+        return False

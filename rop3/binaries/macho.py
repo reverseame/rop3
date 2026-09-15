@@ -15,7 +15,6 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import capstone
 import io
 import struct
 
@@ -132,6 +131,7 @@ class MachO:
                         self._file.seek(offset + section.offset)
                         section_data = self._file.read(section.size)
                         ret.append({
+                            'name': section.sectname.rstrip(b'\x00').decode('utf-8', 'replace'),
                             'vaddr': section.addr + self._base_delta,
                             'opcodes': section_data
                         })

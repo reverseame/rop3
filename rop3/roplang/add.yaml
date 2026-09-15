@@ -47,3 +47,9 @@ add:
         - mnemonic: c.addi
           op1: op1
           op2: op2
+    # c.addi16sp sp, imm   (sp <- sp + imm; rd is always sp, so this only ever
+    # realizes add(sp, imm) -- i.e. spa/sps).
+    - steps:
+        - mnemonic: c.addi16sp
+          op1: op1
+          op2: op2

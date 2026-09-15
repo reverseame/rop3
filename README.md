@@ -11,6 +11,7 @@ rop3 is a tool developed in [Python](https://www.python.org/downloads/) and it r
 - **Multi-format, multi-arch**: analyzes ELF, PE and Mach-O binaries across **x86, x86-64, AArch64 (ARM64) and RISC-V (RV64, including the compressed RVC extension)**. Architecture is detected from the binary; for fat/universal Mach-O binaries, `--arch` selects the slice to analyze.
 - **Gadget search**: ROP, JOP and RETF gadgets, with controls for search depth (`--depth`, architecture-specific by default), `ret <imm>`/`retf <imm>` terminators (`--ret-imm`, off by default), undeterministic gadgets (`--allow-undeterministic-gadgets`) and complex memory operands (`--allow-complex-memory-ops`).
 - **Framed gadget search** (`--frame`/`--no-frame`): on AArch64 and RISC-V, where the return address lives in a register, framed search (on by default) keeps only gadgets that restore it from the stack — the ones actually reachable in a ROP chain. It has no effect on x86, where `ret` already consumes the stack.
+- **Abstract-gadget search** (`--ropblock`): treats a gadget as *any run whose tail writes the program counter with a stack-derived value*, not just `ret`. It finds register returns such as `pop rax ; … ; jmp rax` (x86) and `ldr x9,[sp] ; … ; br x9` (AArch64), accepting them only when the branch register is loaded from the stack and not clobbered before the branch (x86 `ret` is the degenerate case). Applies to all architectures and runs single-threaded.
 - **Operations and ROP chains**: search for high-level operations with `--op` and **positional, n-ary operands** (`--operands op1 op2 op3`), and build ROP chains from a ROPLang file (`--ropchain`, `--exhaustive`), including multi-step composite operations. `--keep-contradictory` disables the filtering of gadgets whose destination is overwritten before the terminator; `--reg-aliases` lets sub-registers (`al`, `ax`, `eax`) stand in for their full register.
 - **Relocation**: rebase any binary (ELF/PE/Mach-O) with `--base`, one address per binary.
 - **Bad-char filtering**: avoid bytes in the gadget address (`--badchar`) and/or in the gadget opcode bytes (`--badchar-bytes`). By default, duplicate gadgets prefer canary-free addresses (`0x00`, `0x0a`, `0x0d`, `0xff`); disable with `--keep-canary-address`.
@@ -68,7 +69,8 @@ $ python rop3.py --binary /bin/ls --interactive         # REPL, scans once
 ```
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop]
                [--retf | --no-retf] [--ret-imm | --no-ret-imm]
-               [--jop | --no-jop] [--frame | --no-frame] [--reg-aliases]
+               [--jop | --no-jop] [--frame | --no-frame] [--ropblock]
+               [--reg-aliases]
                [--allow-undeterministic-gadgets] [--allow-complex-memory-ops]
                [--keep-contradictory] [--verbose]
                [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]]
@@ -93,6 +95,7 @@ options:
                         include gadgets ending in a `ret <imm>` / `retf <imm>` (disabled by default)
   --jop, --no-jop       search for JOP gadgets
   --frame, --no-frame   framed gadget search (default on): on AArch64/RISC-V keep only gadgets that restore the return address from the stack; no effect on x86
+  --ropblock            abstract-gadget search: find gadgets whose tail branches through a register loaded from the stack and not clobbered (e.g. `pop rax ; ... ; jmp rax`, `ldr x9,[sp] ; ... ; br x9`), x86 `ret` being the degenerate case; runs single-threaded
   --reg-aliases         allow sub-register aliases (al, ax, eax, ...) to substitute their full register when matching operations; they are then treated as the same register for chain assignment and side effects
   --allow-undeterministic-gadgets
                         allow gadgets with conditional branches (e.g. jne) as intermediate instructions
@@ -138,6 +141,27 @@ With `--cache`, the gadgets discovered for a binary are stored on disk and reuse
 ```Shell
 $ python rop3.py --binary libc.so.6 --cache        # first run scans and caches
 $ python rop3.py --binary libc.so.6 --cache --op mov --operands rdi rax   # reuses the cache
+```
+
+### ROP chain files
+
+A `--ropchain` file is a plain-text list of steps, one per line; `;` starts a comment. Each step is either a high-level ROPLang operation with positional operands, or an **explicit (raw) gadget** matched exactly as written:
+
+```
+; high-level operations (resolved against the ROPLang catalog)
+mov(rdi, rax)
+lc(rsi)
+
+; explicit, architecture-specific gadgets:  raw([mnemonics], [operands], [dst], [src])
+raw([pop, ret], [rdi], [rdi], [])              ; pop rdi ; ret
+raw([mov, ret], [[rdi], rax], [rdi], [rax])    ; mov [rdi], rax ; ret   (store)
+raw([syscall], [], [], [rax, rdi])             ; syscall
+```
+
+A raw gadget lists its instruction mnemonics, their operands, and the concrete registers it writes (`dst`) and reads (`src`) — the last two feed the assembler's side-effect tracking, so a raw gadget composes with the rest of the chain like any operation. It is matched verbatim (a memory operand is written `[reg]`), so raw gadgets are architecture specific and are not translated across architectures. By default every operand belongs to the first instruction; to spread operands over several instructions, wrap each instruction's operands in parentheses:
+
+```
+raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])   ; pop rdi ; pop rsi ; ret
 ```
 
 ### Interactive mode

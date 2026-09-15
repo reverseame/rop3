@@ -1,0 +1,6 @@
+lc(REG1)
+mov(x0, REG1)
+lc(x1)
+lc(x2)
+; raw([svc], [], [], [x0, x1, x2])
+

@@ -49,7 +49,7 @@ import rop3.parser as parser
 from rop3.arch import arch_singleton
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.gadget import Gadget
-from conftest import make_operation
+from conftest import make_operation, scan_frame
 
 # --- The set of all ROPLang operations, straight from the YAML directory ------
 
@@ -180,8 +180,10 @@ class ArchSpec:
         code = self.wrap(body)
         md = capstone.Cs(self.cs_arch, self.cs_mode)
         md.detail = True
+        decodes = list(md.disasm(code, 0x1000))
         return Gadget(filename='t', arch=self.cs_arch, mode=self.cs_mode,
-                      vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
+                      vaddr=0x1000, decodes=decodes, bytes=code,
+                      frame=scan_frame(decodes))
 
 
 def _cs(name, default=None):

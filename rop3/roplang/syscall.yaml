@@ -1,0 +1,25 @@
+# syscall
+syscall:
+  operands: 0
+  dst: []
+  src: [rax, rdi, rdx, rax, rbx]
+
+  x86:
+    - steps:
+        - mnemonic: syscall
+
+  arm:
+    - steps:
+        - mnemonic: ldr
+          op1: op1
+          op2: '[sp]'
+
+  riscv:
+    - steps:
+        - mnemonic: ld
+          op1: op1
+          op2: '[sp]'
+    - steps:
+        - mnemonic: lw
+          op1: op1
+          op2: '[sp]'

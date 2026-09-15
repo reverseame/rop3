@@ -23,7 +23,7 @@ import tempfile
 import rop3.debug as debug
 
 ''' Bump when the on-disk record format changes to invalidate old entries '''
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def default_cache_dir():

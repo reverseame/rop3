@@ -16,28 +16,20 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
-import math
 import bisect
 import capstone
-import multiprocessing
 from itertools import product, count
 
 from rop3.cache import GadgetCache
 import rop3.utils as utils
 import rop3.debug as debug
 import rop3.binary
+import rop3.search as search
 from rop3.operation import OperationDef, match_gadgets, realize
-from rop3.arch import arch_singleton, DEFAULT_DEPTH
-from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
-from rop3.archs.riscv_arch import RISCV_Architecture
+from rop3.arch import arch_singleton
 import rop3.parser as parser
 
 from .gadget import Gadget
-
-''' Default (x86) search depth in bytes; kept for backward compatibility.
-    The effective default is architecture-specific (Architecture.default_depth,
-    used when --depth is omitted). '''
-DEPTH = DEFAULT_DEPTH
 
 ''' Flags when searching gadgets '''
 DEFAULT = 0
@@ -52,6 +44,7 @@ ALLOW_RET_IMM = 128
 ALLOW_REG_ALIASES = 256
 KEEP_CONTRADICTORY = 512
 UNFRAMED = 1024
+ROPBLOCK = 2048
 
 ''' Terminator canary bytes to avoid in gadget addresses by default:
     0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
@@ -137,7 +130,7 @@ class GadFinder:
         if arch_singleton.is_initialized() and not arch_singleton.matches(binary_arch):
             debug.error(f'{filename}: mixing architectures (x86/x64) in a single run is not supported')
         arch_singleton.initialize(binary_arch)
-        arch_singleton.allow_reg_aliases = bool(self._allow_reg_aliases())
+        arch_singleton.allow_reg_aliases = self._allow_reg_aliases()
         return binary
 
     def _symbol_table(self, binary):
@@ -172,8 +165,7 @@ class GadFinder:
                 'data': f'{op}({", ".join(operands)})'}
 
         # Operations realized as multi-step chains (containing operation refs or
-        # more than one gadget) expand into ROP chains; purely single-gadget
-        # operations return a flat list of matching gadgets.
+        # more than one gadget) expand into ROP chains.
         has_chain = any(not real.is_single_gadget for real in resolved.realizations)
         if has_chain:
             try:
@@ -181,7 +173,6 @@ class GadFinder:
             except RopChainNotFound:
                 return []
 
-        # Operands are positional: op1, op2, op3, ...
         return self.match_operation(gadgets, resolved, operands,
                                     reject_clobbered=not self._keep_contradictory())
 
@@ -204,8 +195,9 @@ class GadFinder:
         fresh = count()   # source of fresh generic slots for unbound operands
         per_step_alternatives = []
         for step in steps:
-            binding = self.bind_step(step, fresh)
-            alternatives = self.expand_operation(step['op'], binding)
+            defn = self._step_defn(step)
+            binding = self.bind_step(step, fresh, defn=defn)
+            alternatives = self.expand_operation(defn, binding)
             if not alternatives:
                 from rop3.ropchain import RopChainNotFound
                 raise RopChainNotFound(
@@ -257,7 +249,17 @@ class GadFinder:
             parser), keeping the matcher free of name lookups. '''
         return match_gadgets(defn, operands, gadgets, reject_clobbered=reject_clobbered)
 
-    def bind_step(self, step, fresh):
+    def _step_defn(self, step):
+        ''' The OperationDef backing a chain step. A step may carry its own
+            `defn` (an explicit gadget defined inline in the ROP-chain file, see
+            RopChain._parse_raw_line); otherwise the ROPLang name is resolved
+            against the operation catalog. '''
+        defn = step.get('defn')
+        if defn is not None:
+            return defn
+        return parser.Parser().get_op(step['op'])
+
+    def bind_step(self, step, fresh, defn=None):
         '''
         Resolve a requested chain step's operands to values, so a compound
         operation can be searched as a single operation with unbound (None)
@@ -270,7 +272,8 @@ class GadFinder:
 
         Raises parser.ParserException if the operation is undefined.
         '''
-        defn = parser.Parser().get_op(step['op'])
+        if defn is None:
+            defn = self._step_defn(step)
         operands = step.get('operands')
         if operands is None:
             operands = [step.get('op1'), step.get('op2')]
@@ -282,14 +285,15 @@ class GadFinder:
             binding[f'op{i + 1}'] = value
         return binding
 
-    def expand_operation(self, op: str, binding: dict) -> list[list[dict]]:
-        ''' Flatten a ROPLang operation (named `op`) into its alternative
-            2-operand primitive step chains. The name is resolved to its
-            definition here (via the parser); an undefined operation surfaces as
+    def expand_operation(self, defn, binding: dict) -> list[list[dict]]:
+        ''' Flatten a ROPLang operation definition into its alternative
+            2-operand primitive step chains. `defn` is the resolved
+            OperationDef (from the catalog or an explicit inline gadget); any
+            operation referenced during realization but undefined surfaces as
             RopChainNotFound, the assembler's own error type. '''
         from rop3.ropchain import RopChainNotFound
         try:
-            return realize(parser.Parser().get_op(op), binding)
+            return realize(defn, binding)
         except parser.ParserException as exc:
             raise RopChainNotFound(str(exc))
 
@@ -331,68 +335,44 @@ class GadFinder:
 
         ''' The parallel scanner chunks by termination byte-offset, which only
             the Galileo backward walk supports; other strategies (the linear
-            sweep) run single-threaded. '''
-        parallelizable = arch_singleton.arch.parallelizable
+            sweep, the abstract-gadget backward search) run single-threaded. The
+            scanning itself lives in rop3.search; the finder only decides whether
+            to use it and rebuilds gadgets from the raw records it returns. '''
+        parallelizable = arch_singleton.arch.parallelizable and not self.ropblock
         if self._jobs > 1 and parallelizable:
-            records = self._scan_parallel(binary, badchars, badchar_bytes)
+            arch_obj = arch_singleton.arch
+            sections = [(s['opcodes'], s['vaddr'])
+                        for s in binary.get_exec_sections()]
+            records = search.scan_parallel(
+                sections, arch_obj.arch, arch_obj.mode, self.depth, self.flags,
+                self._gad_terminations(), badchars, badchar_bytes, self._jobs)
             if self._cache is not None:
                 self._cache.store(key, records)
             yield from self._reconstruct(binary, records, symbol_table)
             return
 
         if self._jobs > 1 and not parallelizable:
-            debug.info(f'{arch_singleton.arch.scan_name} scan runs '
-                       f'single-threaded; --jobs ignored')
+            name = arch_singleton.arch.scan_name(
+                ropblock=self.ropblock, framed=self.framed)
+            debug.info(f'{name} scan runs single-threaded; --jobs ignored')
 
         records = [] if self._cache is not None else None
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
-        for vaddr, raw, decodes in self._scan_sections(binary, badchars, badchar_bytes):
+        for vaddr, raw, decodes, frame in self._scan_sections(binary, badchars, badchar_bytes):
+            # Every scan attaches its own frame mask inline, so use the one it
+            # yields -- and cache it, so a reconstructed gadget carries exactly
+            # the mask the scan produced (no re-derivation).
             if records is not None:
-                records.append([vaddr, raw.hex()])
+                records.append([vaddr, raw.hex(),
+                                [bool(f) for f in frame] if frame is not None else None])
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
-                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
+                         frame=frame)
 
         if records is not None:
             self._cache.store(key, records)
-
-    def _scan_parallel(self, binary, badchars, badchar_bytes):
-        '''
-        Scan the executable sections across worker processes. Each section is
-        split into chunks; a chunk emits only the gadgets whose termination
-        falls inside its window (the slice extends `depth` bytes earlier so
-        gadgets straddling a boundary are still complete), so there are no
-        cross-chunk duplicates. Returns sorted [vaddr, hex] records.
-        '''
-        arch = arch_singleton.arch.arch
-        mode = arch_singleton.arch.mode
-        terminations = self._gad_terminations()
-
-        tasks = []
-        for section in binary.get_exec_sections():
-            opcodes = section['opcodes']
-            sec_vaddr = section['vaddr']
-            n = len(opcodes)
-            chunk = max(4096, math.ceil(n / (self._jobs * 4)))
-            for lo in range(0, n, chunk):
-                hi = min(lo + chunk, n)
-                start = max(0, lo - self.depth)
-                ''' Termination END offsets run in [0, n]; the final chunk owns
-                    the closing n as well, so make its window inclusive. '''
-                emit_hi = hi + 1 if hi == n else hi
-                tasks.append((
-                    arch, mode, self.depth, int(self.flags), terminations,
-                    badchars, badchar_bytes,
-                    opcodes[start:hi], start, sec_vaddr, lo, emit_hi,
-                ))
-
-        records = []
-        with multiprocessing.Pool(self._jobs) as pool:
-            for part in pool.imap_unordered(_scan_worker, tasks):
-                records.extend(part)
-        records.sort()   # deterministic order regardless of worker scheduling
-        return records
 
     def _scan_sections(self, binary, badchars, badchar_bytes):
         ''' Single pass over the executable sections, delegating to the
@@ -417,26 +397,34 @@ class GadFinder:
             yield from arch_obj.scan(
                 opcodes, vaddr, self.depth, md.disasm, self._is_valid_gadget,
                 terminations=terminations, accept_candidate=accept_candidate,
-                framed=self._framed())
+                framed=self.framed, ropblock=self.ropblock)
 
     def _reconstruct(self, binary, records, symbol_table):
-        ''' Rebuild Gadget objects from cached (vaddr, hex-bytes) records. '''
+        ''' Rebuild Gadget objects from cached (vaddr, hex-bytes, frame) records.
+            The frame mask is the one the scan produced (cached alongside the
+            bytes), so a reconstructed gadget matches a freshly scanned one. '''
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
         md = capstone.Cs(arch, mode)
         md.detail = True
-        for vaddr, hexbytes in records:
+        for record in records:
+            vaddr, hexbytes = record[0], record[1]
             raw = bytes.fromhex(hexbytes)
             decodes = list(md.disasm(raw, vaddr))
+            frame = tuple(record[2]) if len(record) > 2 and record[2] is not None else None
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
-                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol)
+                         vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
+                         frame=frame)
 
     def _record_params(self, binary, badchars, badchar_bytes) -> dict:
         ''' Everything (besides file content) that changes the raw record set,
             so a different option misses the cache cleanly. '''
         arch = arch_singleton.arch
         return {
+            # Record layout version: bumped when the cached record shape changes
+            # (now [vaddr, hex, frame] for every gadget) so older caches miss.
+            'record_version': 2,
             'depth': self.depth,
             'flags': int(self.flags),
             'arch': [arch.arch, arch.mode],
@@ -451,7 +439,7 @@ class GadFinder:
 
         arch = arch_singleton.arch
 
-        ret_imm = bool(self._allow_ret_imm())
+        ret_imm = self._allow_ret_imm()
         if self._rop():
             ret.extend(arch.get_rop_terminations(include_ret_imm=ret_imm))
         if self._retf():
@@ -461,39 +449,48 @@ class GadFinder:
 
         return ret
 
-    def _rop(self):
-        return self.flags & ROP
+    def _rop(self) -> bool:
+        return bool(self.flags & ROP)
 
-    def _jop(self):
-        return self.flags & JOP
+    def _jop(self) -> bool:
+        return bool(self.flags & JOP)
 
-    def _retf(self):
-        return self.flags & RETF
+    def _retf(self) -> bool:
+        return bool(self.flags & RETF)
 
-    def _allow_undeterministic(self):
-        return self.flags & ALLOW_UNDETERMINISTIC
+    def _allow_undeterministic(self) -> bool:
+        return bool(self.flags & ALLOW_UNDETERMINISTIC)
 
-    def _allow_complex_mem(self):
-        return self.flags & ALLOW_COMPLEX_MEM
+    def _allow_complex_mem(self) -> bool:
+        return bool(self.flags & ALLOW_COMPLEX_MEM)
 
-    def _keep_duplicates(self):
-        return self.flags & KEEP_DUPLICATES
+    def _keep_duplicates(self) -> bool:
+        return bool(self.flags & KEEP_DUPLICATES)
 
-    def _avoid_canary(self):
-        return self.flags & AVOID_CANARY
+    def _avoid_canary(self) -> bool:
+        return bool(self.flags & AVOID_CANARY)
 
-    def _allow_ret_imm(self):
-        return self.flags & ALLOW_RET_IMM
+    def _allow_ret_imm(self) -> bool:
+        return bool(self.flags & ALLOW_RET_IMM)
 
-    def _allow_reg_aliases(self):
-        return self.flags & ALLOW_REG_ALIASES
+    def _allow_reg_aliases(self) -> bool:
+        return bool(self.flags & ALLOW_REG_ALIASES)
 
-    def _keep_contradictory(self):
-        return self.flags & KEEP_CONTRADICTORY
+    def _keep_contradictory(self) -> bool:
+        return bool(self.flags & KEEP_CONTRADICTORY)
 
-    def _framed(self):
-        ''' Framed search is the default; UNFRAMED disables it. '''
+    @property
+    def framed(self) -> bool:
+        ''' Whether the framed search is enabled. It is the default; the
+            UNFRAMED flag disables it. '''
         return not (self.flags & UNFRAMED)
+
+    @property
+    def ropblock(self) -> bool:
+        ''' Whether the abstract-gadget (ropblock) search is enabled: back a
+            terminator with a stack-loaded branch register (see
+            search.backwards_framed_search). '''
+        return bool(self.flags & ROPBLOCK)
 
     def _is_valid_gadget(self, decodes):
         ''' Invalid instructions and, thus, not decoded '''
@@ -502,8 +499,8 @@ class GadFinder:
 
         ret = False
         arch = arch_singleton.arch
-        allow_undeterministic = bool(self._allow_undeterministic())
-        allow_ret_imm = bool(self._allow_ret_imm())
+        allow_undeterministic = self._allow_undeterministic()
+        allow_ret_imm = self._allow_ret_imm()
         if self._rop():
             ret |= arch.is_valid_rop_gadget(decodes, allow_undeterministic=allow_undeterministic, allow_ret_imm=allow_ret_imm)
         if self._retf():
@@ -526,54 +523,11 @@ class GadFinder:
         return not any([bytes([int(badchar, 0)]) in vaddr for badchar in badchars])
 
     def _is_valid_bytes(self, gadget_bytes, badchar_bytes):
-        ''' Reject gadgets whose opcode bytes contain a forbidden byte (#21). '''
+        ''' Reject gadgets whose opcode bytes contain a forbidden byte. See
+            issue #21. '''
         if not badchar_bytes:
             return True
 
         forbidden = {int(b, 0) for b in badchar_bytes}
         return not any(byte in forbidden for byte in gadget_bytes)
-
-
-def _arch_for(arch_const, mode):
-    ''' Rebuild the architecture object inside a worker process. '''
-    if arch_const == capstone.CS_ARCH_RISCV:
-        return RISCV_Architecture(compressed=bool(mode & capstone.CS_MODE_RISCVC))
-    return X64_Architecture() if mode == capstone.CS_MODE_64 else X86_Architecture()
-
-
-def _scan_worker(task):
-    '''
-    Worker (runs in its own process): scan one section chunk and return the
-    raw [vaddr, hex] records for the gadgets whose termination lies in the
-    chunk's window. Decodes are not returned (capstone objects are not
-    picklable); the parent rebuilds them.
-    '''
-    (arch_const, mode, depth, flags, terminations, badchars, badchar_bytes,
-     slice_bytes, slice_start, sec_vaddr, emit_lo, emit_hi) = task
-
-    arch_obj = _arch_for(arch_const, mode)
-    arch_singleton.reset()
-    arch_singleton.initialize(arch_obj)
-    finder = GadFinder(depth, flags)
-
-    md = capstone.Cs(arch_const, mode)
-    md.detail = True
-
-    def accept_match(ref):
-        ''' Only this chunk owns terminations ending in [emit_lo, emit_hi). '''
-        return emit_lo <= slice_start + ref < emit_hi
-
-    def accept_candidate(vaddr, raw):
-        return (finder._is_valid_address(vaddr, badchars, arch_obj.address_size)
-                and finder._is_valid_bytes(raw, badchar_bytes))
-
-    # The slice starts `slice_start` bytes into the section.
-    base_vaddr = sec_vaddr + slice_start
-    out = []
-    for vaddr, raw, _decodes in arch_obj.scan(
-            slice_bytes, base_vaddr, depth, md.disasm, finder._is_valid_gadget,
-            terminations=terminations, accept_candidate=accept_candidate,
-            accept_match=accept_match, framed=finder._framed()):
-        out.append([vaddr, raw.hex()])
-    return out
 
