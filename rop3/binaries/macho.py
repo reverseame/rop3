@@ -131,6 +131,7 @@ class MachO:
                         self._file.seek(offset + section.offset)
                         section_data = self._file.read(section.size)
                         ret.append({
+                            'name': section.sectname.rstrip(b'\x00').decode('utf-8', 'replace'),
                             'vaddr': section.addr + self._base_delta,
                             'opcodes': section_data
                         })

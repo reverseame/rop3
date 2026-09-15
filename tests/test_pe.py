@@ -52,6 +52,7 @@ def test_pe_arm64_exec_section_bytes():
     pe = PE(build_minimal_pe(IMAGE_FILE_MACHINE_ARM64, RET_ARM * 3), None)
     secs = pe.get_exec_sections()
     assert len(secs) == 1 and secs[0]['opcodes'] == RET_ARM * 3
+    assert secs[0]['name'] == '.text'
 
 
 def test_pe_unsupported_machine_raises():
