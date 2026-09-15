@@ -18,7 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import capstone.arm64_const as arm64_const
 from rop3.arch import Architecture
-from rop3.search import aligned_scan, framed_aligned_scan
+from rop3.search import aligned_scan
 
 # ABI register names capstone prints for the 64-bit integer file. xzr (the
 # hardwired zero register) is not a usable destination and is excluded.
@@ -56,9 +56,13 @@ class AArch64_Architecture(Architecture):
     (see `scan`).
     '''
 
-    @property
-    def scan_name(self) -> str:
-        return 'aligned'
+    def scan_name(self, ropblock=False, framed=True) -> str:
+        # Mirror `scan`: --ropblock -> abstract-gadget search; otherwise the
+        # aligned linear sweep, gated on the return-address frame unless
+        # --no-frame drops it to a plain aligned sweep.
+        if ropblock:
+            return 'ropblock'
+        return 'framed aligned' if framed else 'aligned'
 
     @property
     def parallelizable(self) -> bool:
@@ -83,14 +87,11 @@ class AArch64_Architecture(Architecture):
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
                                            accept_candidate=accept_candidate)
             return
-        gen = framed_aligned_scan(
-            opcodes, base_vaddr, depth, self.alignment, disasm,
-            is_valid_gadget, self.is_frame_load, self.is_return,
-            accept_candidate=accept_candidate) if framed else aligned_scan(
-            opcodes, base_vaddr, depth, self.alignment, disasm,
-            is_valid_gadget, accept_candidate=accept_candidate)
-        for vaddr, raw, decodes in gen:
-            yield vaddr, raw, decodes, None
+        yield from aligned_scan(
+            opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
+            restores_return_address=self.restores_return_address,
+            is_return=self.is_return if framed else None,
+            accept_candidate=accept_candidate)
 
     @property
     def name(self) -> str:
@@ -176,7 +177,7 @@ class AArch64_Architecture(Architecture):
             that a ROP gadget restore lr from the stack. '''
         return self.base_mnemonic(insn.mnemonic) == 'ret'
 
-    def is_frame_load(self, insn) -> bool:
+    def restores_return_address(self, insn) -> bool:
         ''' Whether `insn` restores the return address (lr/x30) from the stack,
             e.g. `ldr x30, [sp, #off]` or `ldp x29, x30, [sp], #off`. Capstone
             exposes lr as a register operand and sp as the memory base. '''

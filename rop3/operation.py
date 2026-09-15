@@ -64,7 +64,7 @@ def match_gadgets(defn: OperationDef, operands: list | None,
     ''' Gadgets whose instructions realize `defn` with the given positional
         operands. The operation's instructions must be a consecutive run, the
         first sitting right after the architecture's frame prologue
-        (Set.is_equal).
+        (Set.iter_matches).
 
         With `reject_clobbered` (the default), a gadget is discarded when its
         destination register is overwritten before the terminator (a
@@ -453,9 +453,18 @@ class Set:
                     operand.reg = mapping[operand.reg]
         return clone
 
-    def is_equal(self, decodes, frame=None):
+    def all_matches(self, decodes, frame=None):
+        ''' Every (bindings, indices) at which this pattern matches -- one per
+            matchable body position, so each restored register in a frame is a
+            separate operation (`ld ra ; ld s0 ; ld s1 ; ld s7 ; ret` yields
+            `lc(s0)`, `lc(s1)` and `lc(s7)`). See `iter_matches` for the
+            anchoring rules. '''
+        return list(self.iter_matches(decodes, frame))
+
+    def iter_matches(self, decodes, frame=None):
         '''
-        Match this pattern against a gadget's decoded instructions.
+        Match this pattern against a gadget's decoded instructions, yielding
+        (bindings, indices) for every anchor at which it matches.
 
         Matching is a two-phase walk over the gadget, driven by the `frame` mask
         (True where an instruction is framing -- the branch-register stack-load
@@ -479,7 +488,13 @@ class Set:
             one `lc` per restored register (`lc(s0)`, `lc(s1)`, `lc(s7)` for
             `ld ra ; ld s0 ; ld s1 ; ld s7 ; addi sp ; ret`) and an operation
             deeper in the frame matches even behind another body instruction
-            (`add` in `ld ra ; add a0, a1, a2 ; ld s0 ; ret`).
+            (`add` in `ld ra ; add a0, a1, a2 ; ld s0 ; ret`). This holds only
+            when nothing junk precedes the frame: the gadget must open with the
+            prologue. `<junk> ; ld ra ; addi sp ; jr ra` does not realize
+            `add(sp, imm)` -- the pre-prologue junk executes but is unaccounted
+            for, so in-frame matches are suppressed. The backward scan emits the
+            junk-free window that starts at the prologue separately, so the clean
+            gadget is still found.
 
         An operation never anchors *on* a framing instruction (the prologue load
         of the branch register is not an `lc`; the terminator is not matched).
@@ -490,31 +505,13 @@ class Set:
 
         `frame` is a per-instruction framing mask (parallel to `decodes`). Every
         search attaches one; when it is None (a synthetic gadget built without
-        one) it is derived here (search.frame_mask_for) so matching is uniformly
-        frame-aware.
+        one) it is derived here (the terminator plus any return-address restore)
+        so matching is uniformly frame-aware.
 
-        Returns (matched, bindings, indices) for the *first* anchor that
-        matches; `indices` are the (contiguous) positions of the matched pattern
-        instructions, used by the caller (Gadget.result_clobbered) to reject
-        contradictory gadgets. `all_matches` returns every anchor instead (one
-        per matchable body position).
-        '''
-        for binds, indices in self.iter_matches(decodes, frame):
-            return (True, binds, indices)
-        return (False, {}, [])
-
-    def all_matches(self, decodes, frame=None):
-        ''' Every (bindings, indices) at which this pattern matches -- one per
-            matchable body position, so each restored register in a frame is a
-            separate operation (`ld ra ; ld s0 ; ld s1 ; ld s7 ; ret` yields
-            `lc(s0)`, `lc(s1)` and `lc(s7)`). '''
-        return list(self.iter_matches(decodes, frame))
-
-    def iter_matches(self, decodes, frame=None):
-        '''
-        Yield (bindings, indices) for every anchor at which this pattern matches
-        (see `is_equal` for the two-phase anchoring rules). `frame` is derived
-        when absent, so matching is always frame-aware.
+        Each yielded `indices` are the (contiguous) positions of the matched
+        pattern instructions, used by the caller (Gadget.result_clobbered) to
+        reject contradictory gadgets. `all_matches` collects the full sequence
+        into a list.
         '''
         if not self.items:
             yield ({}, [])
@@ -526,14 +523,26 @@ class Set:
             return
 
         if frame is None:
-            import rop3.search as search
-            frame = search.frame_mask_for(decodes, arch_singleton.arch)
+            # No mask supplied (a synthetic gadget built without a scan): derive
+            # the same one the scans build inline -- the terminator (last) plus
+            # any stacked return-address restore.
+            rra = arch_singleton.arch.restores_return_address
+            last = len(decodes) - 1
+            frame = tuple(i == last or rra(insn) for i, insn in enumerate(decodes))
 
+        # Junk before the prologue is never allowed. If the gadget does not
+        # begin with a framing instruction, every instruction ahead of the frame
+        # is junk relative to an operation matched *inside* the frame, so
+        # in-frame anchors are suppressed: only an operation at the gadget's
+        # first instruction (ahead of the frame) may match. The backward scan
+        # emits the junk-free window -- the one that starts at the prologue --
+        # separately, so no coverage is lost.
+        no_pre_frame_junk = frame[0]
         entered_frame = False    # has a framing instruction been passed yet?
         for anchor in range(n - k + 1):
             # An operation anchors on a body instruction only, and either at the
-            # gadget's start (no junk before it) or once inside the frame.
-            if not frame[anchor] and (anchor == 0 or entered_frame):
+            # gadget's start (no junk before it) or once inside a junk-free frame.
+            if not frame[anchor] and (anchor == 0 or (entered_frame and no_pre_frame_junk)):
                 matched = self._match_run(decodes, anchor)
                 if matched is not None:
                     yield (matched[1], matched[2])

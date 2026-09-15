@@ -25,6 +25,8 @@ from rop3.binary import Binary
 from conftest import (build_minimal_elf, EM_386, EM_X86_64, EM_RISCV,
                       EF_RISCV_RVC, ET_DYN)
 
+EM_AARCH64 = 183
+
 _riscv = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
                             reason='capstone build without RISC-V support')
 
@@ -97,6 +99,27 @@ def test_binary_info_lines_tolerates_missing_optional_fields():
     assert lines[0] == 'x.bin: unknown, x86, 32-bit'
     assert lines[1] == 'instruction alignment: 1 byte(s)'
     assert lines[-1] == '  section @ 0x400000 (4 bytes)'
+
+
+def test_describe_algorithm_names_the_search_actually_run(tmp_path):
+    # describe() reports whichever strategy the flags select, not a fixed label.
+    x86 = _write(tmp_path, build_minimal_elf(64, EM_X86_64, b'\x90\xc3', 0x1000, ET_DYN), 'x.elf')
+    assert Binary(x86, None).describe()['algorithm'] == 'galileo'
+    assert Binary(x86, None).describe(ropblock=True)['algorithm'] == 'ropblock'
+
+    # The aligned ISAs distinguish framed vs unframed, and ropblock overrides both.
+    arm = _write(tmp_path, build_minimal_elf(64, EM_AARCH64, b'\xc0\x03\x5f\xd6', 0x1000, ET_DYN), 'a.elf')
+    assert Binary(arm, None).describe()['algorithm'] == 'framed aligned'
+    assert Binary(arm, None).describe(framed=False)['algorithm'] == 'aligned'
+    assert Binary(arm, None).describe(ropblock=True)['algorithm'] == 'ropblock'
+
+
+def test_rop3_describe_threads_search_flags(tmp_path):
+    # The runtime flags reach describe() through the finder, so the reported
+    # algorithm matches the search actually run.
+    path = _write(tmp_path, build_minimal_elf(64, EM_X86_64, b'\x90\xc3', 0x1000, ET_DYN))
+    assert Rop3([path]).describe()[0]['algorithm'] == 'galileo'
+    assert Rop3([path], ropblock=True).describe()[0]['algorithm'] == 'ropblock'
 
 
 def test_rop3_describe_one_per_binary(tmp_path):

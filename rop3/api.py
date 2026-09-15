@@ -116,7 +116,8 @@ class Rop3:
             verbose reporting; does not scan for gadgets. '''
         bases = self.base if isinstance(self.base, list) \
             else [self.base] * len(self.binaries)
-        return [Binary(fn, b, self.arch).describe()
+        ropblock, framed = self._finder.ropblock, self._finder.framed
+        return [Binary(fn, b, self.arch).describe(ropblock=ropblock, framed=framed)
                 for fn, b in zip(self.binaries, bases)]
 
     def find_op(self, op, operands=None):

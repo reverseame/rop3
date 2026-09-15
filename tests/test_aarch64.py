@@ -23,13 +23,16 @@ from rop3 import Rop3
 from rop3.archs.aarch64_arch import AArch64_Architecture
 from rop3.binaries.elf import ELF
 
-from conftest import build_minimal_elf, ET_DYN, make_operation
+from conftest import build_minimal_elf, ET_DYN, make_operation, scan_frame
 
 EM_AARCH64 = 183
 
 ADD = b'\x20\x00\x02\x8b'          # add x0, x1, x2
 RET = b'\xc0\x03\x5f\xd6'          # ret            (0xd65f03c0)
 BR_X0 = b'\x00\x00\x1f\xd6'        # br x0          (indirect jump, JOP)
+BR_X9 = bytes.fromhex('20011fd6')  # br x9          (indirect jump through x9)
+BLR_X9 = bytes.fromhex('20013fd6') # blr x9         (indirect CALL, not a return)
+LDR_X9_SP = bytes.fromhex('e90340f9')  # ldr x9, [sp]   (stack-load of x9)
 # Return-address restores from the stack (frame the gadget for framed search).
 LDP_FRAME = bytes.fromhex('fd7bc1a8')  # ldp x29, x30, [sp], #16
 LDR_LR = bytes.fromhex('fe0740f9')     # ldr x30, [sp, #8]
@@ -49,7 +52,7 @@ def test_elf_detects_aarch64_and_selects_aligned():
     assert isinstance(arch, AArch64_Architecture)
     assert arch.arch == capstone.CS_ARCH_ARM64
     assert (arch.address_size, arch.alignment) == (8, 4)
-    assert arch.scan_name == 'aligned'
+    assert arch.scan_name() == 'framed aligned'
     assert not arch.parallelizable
 
 
@@ -128,15 +131,16 @@ def test_aarch64_scan_is_serial_even_with_jobs(tmp_path):
 
 # --- Framed gadget search (default on for AArch64) ------------------------
 
-def test_aarch64_is_frame_load_and_is_return_predicates():
+def test_aarch64_restores_return_address_and_is_return_predicates():
     arch = AArch64_Architecture()
     md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     md.detail = True
     one = lambda code: list(md.disasm(code, 0x1000))[0]
-    assert arch.is_frame_load(one(LDP_FRAME))     # ldp x29, x30, [sp], #16
-    assert arch.is_frame_load(one(LDR_LR))        # ldr x30, [sp, #8]
-    assert not arch.is_frame_load(one(ADD))       # add does not touch the stack
-    assert not arch.is_frame_load(one(RET))       # ret is not a load
+    # The lr/x30 restore is the frame prologue (the framed scan's frame load).
+    assert arch.restores_return_address(one(LDP_FRAME))   # ldp x29, x30, [sp], #16
+    assert arch.restores_return_address(one(LDR_LR))      # ldr x30, [sp, #8]
+    assert not arch.restores_return_address(one(ADD))     # add does not touch the stack
+    assert not arch.restores_return_address(one(RET))     # ret is not a load
     assert arch.is_return(one(RET))
     assert not arch.is_return(one(ADD))
 
@@ -186,9 +190,10 @@ def _aarch64_op_matches(op, operands, body):
     md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     md.detail = True
     code = body + LDP_FRAME + RET
+    decodes = list(md.disasm(code, 0x1000))
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_ARM64,
                     mode=capstone.CS_MODE_ARM, vaddr=0x1000,
-                    decodes=list(md.disasm(code, 0x1000)), bytes=code)
+                    decodes=decodes, bytes=code, frame=scan_frame(decodes))
     return bool(make_operation(op, operands).filter_gadgets([gadget]))
 
 
@@ -243,3 +248,58 @@ def test_aarch64_end_to_end_find_op_mov(tmp_path):
     path = _elf(tmp_path, MOV + LDP_FRAME + RET)
     gadgets = Rop3(str(path), depth=24).find_op('mov', operands=['x0', 'x1'])
     assert any('mov x0, x1' in g.text_repr for g in gadgets)
+
+
+# --- ropblock (abstract-gadget) return strategies -------------------------
+# The abstract-gadget search frames a gadget by its *return strategy*: the tail
+# writes PC from a register the gadget first loads off the stack. On AArch64 the
+# non-trivial terminators are `ret` (through x30/lr) and `br Xn`; `blr` is a call
+# and is not a return strategy.
+
+def test_aarch64_ropblock_terminators_and_branch_regs():
+    arch = AArch64_Architecture()
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+    md.detail = True
+    one = lambda code: list(md.disasm(code, 0x1000))[0]
+
+    ret, br9, br0, blr = one(RET), one(BR_X9), one(BR_X0), one(BLR_X9)
+    # `ret` branches implicitly through x30/lr; `br Xn` through the named reg.
+    assert arch.is_pc_reg_write(ret) and arch.ropblock_branch_reg(ret) == 'x30'
+    assert arch.is_pc_reg_write(br9) and arch.ropblock_branch_reg(br9) == 'x9'
+    assert arch.is_pc_reg_write(br0) and arch.ropblock_branch_reg(br0) == 'x0'
+    # `blr` is an indirect call, not a return: excluded from ropblock terminators.
+    assert not arch.is_pc_reg_write(blr)
+
+
+def test_aarch64_ropblock_finds_register_return_through_stack(tmp_path):
+    # ldr x9, [sp] ; ... ; br x9 -- the tail branches through x9, loaded from the
+    # stack and never clobbered: a register-return ropblock gadget.
+    path = _elf(tmp_path, LDR_X9_SP + ADD + BR_X9)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ldr x9, [sp] ; add x0, x1, x2 ; br x9' in reprs
+
+
+def test_aarch64_ropblock_ret_must_restore_x30(tmp_path):
+    # `ret` returns through x30, so a ropblock `ret` gadget must reload x30 from
+    # the stack -- via a bare `ldr x30, [sp]` or the `ldp x29, x30, [sp]` epilogue.
+    path = _elf(tmp_path, LDR_LR + ADD + RET)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ldr x30, [sp, #8] ; add x0, x1, x2 ; ret' in reprs
+
+    path = _elf(tmp_path, ADD + LDP_FRAME + RET)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ldp x29, x30, [sp], #0x10 ; ret' in reprs
+
+
+def test_aarch64_ropblock_needs_a_stack_prologue_for_the_branch_reg(tmp_path):
+    # `br x9` with no prior stack load of x9 has an attacker-uncontrolled target:
+    # not a ropblock gadget.
+    path = _elf(tmp_path, ADD + BR_X9)
+    assert Rop3(path, depth=16, ropblock=True).gadgets() == []
+
+
+def test_aarch64_ropblock_excludes_blr_call(tmp_path):
+    # Even with x9 stack-loaded, `blr x9` is a call (it links x30), not a return
+    # strategy, so it frames nothing.
+    path = _elf(tmp_path, LDR_X9_SP + BLR_X9)
+    assert Rop3(path, depth=16, ropblock=True).gadgets() == []

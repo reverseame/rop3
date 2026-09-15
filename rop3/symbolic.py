@@ -18,7 +18,6 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 
 from rop3.arch import arch_singleton
-import rop3.debug as debug
 
 from .gadget import Gadget
 
@@ -324,7 +323,7 @@ class SymbolicAnalyzer:
                 ctx.processing(tinst)
                 self._collect_accesses(ctx, tinst, gad.vaddr, base, accesses)
 
-                if lr_name is not None and arch.is_frame_load(insn):
+                if lr_name is not None and arch.restores_return_address(insn):
                     lr_slot = self._lr_load_address(arch, insn, tinst, lr_name, ptr)
 
                 if arch.is_return(insn):

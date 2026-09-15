@@ -139,6 +139,10 @@ class X86_Architecture(Architecture):
         return 'x86'
 
     @property
+    def default_depth(self) -> int:
+        return 5 
+
+    @property
     def arch(self):
         return capstone.CS_ARCH_X86
 
@@ -149,6 +153,10 @@ class X86_Architecture(Architecture):
     @property
     def address_size(self) -> int:
         return 4
+
+    @property
+    def alignment(self):
+        return 1
 
     @property
     def op_reg(self):

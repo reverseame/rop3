@@ -238,12 +238,12 @@ def test_reg_alias_substitution_flag(x64):
 
 # --- The two-phase matching model -----------------------------------------
 #
-# Every case runs off the gadget's *derived* frame mask (make_gadget leaves it
-# None, so Set.iter_matches derives it via search.frame_mask_for), exercising
-# the real framing computation rather than a hand-set mask. Before the frame an
-# operation must be the gadget's first instruction; once inside the frame any
-# body instruction matches, in any order; a framing instruction is never
-# matched, but a stack pivot is body, not framing.
+# Every case runs off the gadget's real frame mask (make_gadget builds it the
+# way a scan marks it -- the terminator plus any return-address restore),
+# exercising the real framing computation rather than a hand-set mask. Before
+# the frame an operation must be the gadget's first instruction; once inside the
+# frame any body instruction matches, in any order; a framing instruction is
+# never matched, but a stack pivot is body, not framing.
 
 @pytest.mark.parametrize('desc, code, op, operands, expected', [
     # before the frame: the operation must be first -- no junk may precede it
@@ -263,14 +263,13 @@ def test_reg_alias_substitution_flag(x64):
      b'\x53\x90\x58\xc3', 'mov', ['rax', 'rbx'], []),               # push rbx ; nop ; pop rax ; ret
     ('consecutive body is matched',
      b'\x53\x58\xc3', 'mov', ['rax', 'rbx'], ['push rbx ; pop rax ; ret']),  # push rbx ; pop rax ; ret
-    # inside the frame: an operation after the prologue matches
-    ('op after the prologue',
-     b'\x58\x48\x89\xf7\xff\xe0', 'mov', ['rdi', 'rsi'],           # pop rax ; mov rdi,rsi ; jmp rax
-     ['pop rax ; mov rdi, rsi ; jmp rax']),
-    # a stack pivot is body, not framing, so it still matches add
-    ('sp-add in a JOP body is a real add',
-     b'\x58\x48\x83\xc4\x08\xff\xe0', 'add', ['rsp', '8'],         # pop rax ; add rsp,8 ; jmp rax
-     ['pop rax ; add rsp, 8 ; jmp rax']),
+    # x86 galileo marks only the terminator as framing, so there is no prologue
+    # to be "inside": an operation past the first instruction never matches (the
+    # inside-the-frame phase is exercised by the framed RISC-V / AArch64 tests).
+    ('op past the first instruction on x86 (no prologue frame)',
+     b'\x58\x48\x89\xf7\xff\xe0', 'mov', ['rdi', 'rsi'], []),      # pop rax ; mov rdi,rsi ; jmp rax
+    ('sp-add past the first instruction on x86 does not match',
+     b'\x58\x48\x83\xc4\x08\xff\xe0', 'add', ['rsp', '8'], []),    # pop rax ; add rsp,8 ; jmp rax
     ('leading sp-add (ret self-frames) is a real add',
      b'\x48\x83\xc4\x08\xc3', 'add', ['rsp', '8'], ['add rsp, 8 ; ret']),  # add rsp, 8 ; ret
 ])

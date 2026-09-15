@@ -27,6 +27,17 @@ from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.gadget import Gadget
 
 
+def scan_frame(decodes):
+    ''' The frame mask a scan attaches to a gadget, recomputed for synthesized
+        test gadgets: the terminator (the last instruction) and any stacked
+        return-address restore (`restores_return_address`) -- exactly what the scans mark
+        inline. Needs the architecture singleton initialized. '''
+    arch = arch_singleton.arch
+    last = len(decodes) - 1
+    return tuple(i == last or arch.restores_return_address(insn)
+                 for i, insn in enumerate(decodes))
+
+
 class _OpMatcher:
     ''' Test shim standing in for the former Operation class: it resolves a
         ROPLang name to its OperationDef and matches gadgets via
@@ -82,6 +93,10 @@ def make_gadget(code: bytes, vaddr: int, mode=capstone.CS_MODE_64,
     md = capstone.Cs(capstone.CS_ARCH_X86, mode)
     md.detail = True
     decodes = list(md.disasm(code, vaddr))
+    # Real scans attach a frame mask to every gadget, so mirror that here (via
+    # scan_frame) when an architecture is active -- operation matching consults
+    # it and no longer reconstructs one.
+    frame = (scan_frame(decodes) if arch_singleton.is_initialized() else None)
     return Gadget(
         filename=filename,
         arch=capstone.CS_ARCH_X86,
@@ -89,6 +104,7 @@ def make_gadget(code: bytes, vaddr: int, mode=capstone.CS_MODE_64,
         vaddr=vaddr,
         decodes=decodes,
         bytes=code,
+        frame=frame,
     )
 
 

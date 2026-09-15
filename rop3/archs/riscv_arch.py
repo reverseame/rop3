@@ -18,7 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import capstone.riscv_const as riscv_const
 from rop3.arch import Architecture
-from rop3.search import aligned_scan, framed_aligned_scan
+from rop3.search import aligned_scan
 
 # ABI register names capstone prints for the integer file (x0 is the hardwired
 # zero register and is not a usable destination, so it is excluded).
@@ -84,9 +84,13 @@ class RISCV_Architecture(Architecture):
     def __init__(self, compressed: bool = False):
         self._compressed = bool(compressed)
 
-    @property
-    def scan_name(self) -> str:
-        return 'framed aligned'
+    def scan_name(self, ropblock=False, framed=True) -> str:
+        # Mirror `scan`: --ropblock -> abstract-gadget search; otherwise the
+        # aligned linear sweep, gated on the return-address frame (`ret` jumps
+        # through ra) unless --no-frame drops it to a plain aligned sweep.
+        if ropblock:
+            return 'ropblock'
+        return 'framed aligned' if framed else 'aligned'
 
     @property
     def parallelizable(self) -> bool:
@@ -112,14 +116,11 @@ class RISCV_Architecture(Architecture):
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
                                            accept_candidate=accept_candidate)
             return
-        gen = framed_aligned_scan(
-            opcodes, base_vaddr, depth, self.alignment, disasm,
-            is_valid_gadget, self.is_frame_load, self.is_return,
-            accept_candidate=accept_candidate) if framed else aligned_scan(
-            opcodes, base_vaddr, depth, self.alignment, disasm,
-            is_valid_gadget, accept_candidate=accept_candidate)
-        for vaddr, raw, decodes in gen:
-            yield vaddr, raw, decodes, None
+        yield from aligned_scan(
+            opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
+            restores_return_address=self.restores_return_address,
+            is_return=self.is_return if framed else None,
+            accept_candidate=accept_candidate)
 
     @property
     def compressed(self) -> bool:
@@ -228,13 +229,8 @@ class RISCV_Architecture(Architecture):
             scan's requirement that ROP gadgets restore ra from the stack. '''
         return self._terminates_rop(insn, self.rop_termination_mnemonics)
 
-    def is_frame_load(self, insn) -> bool:
-        ''' The framed-scan frame load on RISC-V is the ra restore. '''
-        return self.is_ra_load(insn)
-
-    def is_frame_prefix(self, insn) -> bool:
-        ''' The ra restore frames a RISC-V ROP gadget, so an operation may
-            follow it (e.g. `ld ra, off(sp) ; add a0, a1, a2 ; ret`). '''
+    def restores_return_address(self, insn) -> bool:
+        ''' The frame load on RISC-V is the ra restore. '''
         return self.is_ra_load(insn)
 
     def is_ra_load(self, insn) -> bool:
