@@ -130,7 +130,7 @@ class GadFinder:
         if arch_singleton.is_initialized() and not arch_singleton.matches(binary_arch):
             debug.error(f'{filename}: mixing architectures (x86/x64) in a single run is not supported')
         arch_singleton.initialize(binary_arch)
-        arch_singleton.allow_reg_aliases = bool(self._allow_reg_aliases())
+        arch_singleton.allow_reg_aliases = self._allow_reg_aliases()
         return binary
 
     def _symbol_table(self, binary):
@@ -338,7 +338,7 @@ class GadFinder:
             sweep, the abstract-gadget backward search) run single-threaded. The
             scanning itself lives in rop3.search; the finder only decides whether
             to use it and rebuilds gadgets from the raw records it returns. '''
-        parallelizable = arch_singleton.arch.parallelizable and not self._ropblock()
+        parallelizable = arch_singleton.arch.parallelizable and not self.ropblock
         if self._jobs > 1 and parallelizable:
             arch_obj = arch_singleton.arch
             sections = [(s['opcodes'], s['vaddr'])
@@ -353,7 +353,7 @@ class GadFinder:
 
         if self._jobs > 1 and not parallelizable:
             name = arch_singleton.arch.scan_name(
-                ropblock=bool(self._ropblock()), framed=self._framed())
+                ropblock=self.ropblock, framed=self.framed)
             debug.info(f'{name} scan runs single-threaded; --jobs ignored')
 
         records = [] if self._cache is not None else None
@@ -397,7 +397,7 @@ class GadFinder:
             yield from arch_obj.scan(
                 opcodes, vaddr, self.depth, md.disasm, self._is_valid_gadget,
                 terminations=terminations, accept_candidate=accept_candidate,
-                framed=self._framed(), ropblock=bool(self._ropblock()))
+                framed=self.framed, ropblock=self.ropblock)
 
     def _reconstruct(self, binary, records, symbol_table):
         ''' Rebuild Gadget objects from cached (vaddr, hex-bytes, frame) records.
@@ -439,7 +439,7 @@ class GadFinder:
 
         arch = arch_singleton.arch
 
-        ret_imm = bool(self._allow_ret_imm())
+        ret_imm = self._allow_ret_imm()
         if self._rop():
             ret.extend(arch.get_rop_terminations(include_ret_imm=ret_imm))
         if self._retf():
@@ -449,56 +449,48 @@ class GadFinder:
 
         return ret
 
-    def _rop(self):
-        return self.flags & ROP
+    def _rop(self) -> bool:
+        return bool(self.flags & ROP)
 
-    def _jop(self):
-        return self.flags & JOP
+    def _jop(self) -> bool:
+        return bool(self.flags & JOP)
 
-    def _retf(self):
-        return self.flags & RETF
+    def _retf(self) -> bool:
+        return bool(self.flags & RETF)
 
-    def _allow_undeterministic(self):
-        return self.flags & ALLOW_UNDETERMINISTIC
+    def _allow_undeterministic(self) -> bool:
+        return bool(self.flags & ALLOW_UNDETERMINISTIC)
 
-    def _allow_complex_mem(self):
-        return self.flags & ALLOW_COMPLEX_MEM
+    def _allow_complex_mem(self) -> bool:
+        return bool(self.flags & ALLOW_COMPLEX_MEM)
 
-    def _keep_duplicates(self):
-        return self.flags & KEEP_DUPLICATES
+    def _keep_duplicates(self) -> bool:
+        return bool(self.flags & KEEP_DUPLICATES)
 
-    def _avoid_canary(self):
-        return self.flags & AVOID_CANARY
+    def _avoid_canary(self) -> bool:
+        return bool(self.flags & AVOID_CANARY)
 
-    def _allow_ret_imm(self):
-        return self.flags & ALLOW_RET_IMM
+    def _allow_ret_imm(self) -> bool:
+        return bool(self.flags & ALLOW_RET_IMM)
 
-    def _allow_reg_aliases(self):
-        return self.flags & ALLOW_REG_ALIASES
+    def _allow_reg_aliases(self) -> bool:
+        return bool(self.flags & ALLOW_REG_ALIASES)
 
-    def _keep_contradictory(self):
-        return self.flags & KEEP_CONTRADICTORY
-
-    def _framed(self):
-        ''' Framed search is the default; UNFRAMED disables it. '''
-        return not (self.flags & UNFRAMED)
-
-    def _ropblock(self):
-        ''' Abstract-gadget search: back a terminator with a stack-loaded
-            branch register (see search.backwards_framed_search). '''
-        return self.flags & ROPBLOCK
-
-    @property
-    def ropblock(self) -> bool:
-        ''' Whether the abstract-gadget (ropblock) search is enabled -- public
-            accessor for callers reporting the active strategy. '''
-        return bool(self.flags & ROPBLOCK)
+    def _keep_contradictory(self) -> bool:
+        return bool(self.flags & KEEP_CONTRADICTORY)
 
     @property
     def framed(self) -> bool:
-        ''' Whether the framed search is enabled (the default) -- public
-            accessor for callers reporting the active strategy. '''
-        return self._framed()
+        ''' Whether the framed search is enabled. It is the default; the
+            UNFRAMED flag disables it. '''
+        return not (self.flags & UNFRAMED)
+
+    @property
+    def ropblock(self) -> bool:
+        ''' Whether the abstract-gadget (ropblock) search is enabled: back a
+            terminator with a stack-loaded branch register (see
+            search.backwards_framed_search). '''
+        return bool(self.flags & ROPBLOCK)
 
     def _is_valid_gadget(self, decodes):
         ''' Invalid instructions and, thus, not decoded '''
@@ -507,8 +499,8 @@ class GadFinder:
 
         ret = False
         arch = arch_singleton.arch
-        allow_undeterministic = bool(self._allow_undeterministic())
-        allow_ret_imm = bool(self._allow_ret_imm())
+        allow_undeterministic = self._allow_undeterministic()
+        allow_ret_imm = self._allow_ret_imm()
         if self._rop():
             ret |= arch.is_valid_rop_gadget(decodes, allow_undeterministic=allow_undeterministic, allow_ret_imm=allow_ret_imm)
         if self._retf():
@@ -531,7 +523,8 @@ class GadFinder:
         return not any([bytes([int(badchar, 0)]) in vaddr for badchar in badchars])
 
     def _is_valid_bytes(self, gadget_bytes, badchar_bytes):
-        ''' Reject gadgets whose opcode bytes contain a forbidden byte (#21). '''
+        ''' Reject gadgets whose opcode bytes contain a forbidden byte. See
+            issue #21. '''
         if not badchar_bytes:
             return True
 

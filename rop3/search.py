@@ -431,7 +431,7 @@ def _scan_chunk(task):
     for vaddr, raw, _decodes, frame in arch_obj.scan(
             slice_bytes, base_vaddr, depth, md.disasm, finder._is_valid_gadget,
             terminations=terminations, accept_candidate=accept_candidate,
-            accept_match=accept_match, framed=finder._framed()):
+            accept_match=accept_match, framed=finder.framed):
         out.append([vaddr, raw.hex(),
                     [bool(f) for f in frame] if frame is not None else None])
     return out

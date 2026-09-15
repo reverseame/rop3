@@ -214,8 +214,8 @@ def _inline_operation_def(set_):
     positional = list(rename.values())
     renamed = set_.renamed(rename)
     mnemonic = renamed.items[0].mnemonic if renamed.items else 'inline'
-    dst_roles = positional[:1] + list(getattr(set_, 'extra_writes', None) or [])
-    src_roles = positional + list(getattr(set_, 'extra_reads', None) or [])
+    dst_roles = positional[:1] + list(set_.extra_writes)
+    src_roles = positional + list(set_.extra_reads)
     defn = OperationDef(mnemonic, operands=len(positional),
                         dst_roles=dst_roles, src_roles=src_roles)
     real = Realization()
@@ -464,54 +464,31 @@ class Set:
     def iter_matches(self, decodes, frame=None):
         '''
         Match this pattern against a gadget's decoded instructions, yielding
-        (bindings, indices) for every anchor at which it matches.
+        (bindings, indices) for every anchor at which it matches. The pattern
+        instructions must be adjacent (`push src ; pop dst`, not with a `nop`
+        between), and an operation never anchors *on* a framing instruction.
 
-        Matching is a two-phase walk over the gadget, driven by the `frame` mask
-        (True where an instruction is framing -- the branch-register stack-load
-        prologue, the terminator, or a position-independent framing prefix):
+        `frame` is the per-instruction framing mask (parallel to `decodes`,
+        True on prologue/terminator instructions). It drives a two-phase walk:
 
-          * *Before the frame* -- no framing instruction has been seen yet -- an
-            operation may only anchor at the gadget's first instruction. If the
-            first instruction is not the operation, the gadget is discarded: no
-            junk may precede an operation that sits ahead of the frame. So
-            `mov rdi, rsi ; pop rax ; jmp rax` realizes `mov(rdi, rsi)` (the mov
-            is first), but `mov rdi, rax ; pop rbx ; ret` does not realize
-            `lc(rbx)` and `leave ; add ; ret` does not realize `add` (junk
-            precedes the body). On x86 the last instruction is both prologue and
-            epilogue for a normal ROP gadget, so the whole body is "before the
-            frame" and only the junk-free gadget (the operation first) matches --
-            the backward scan emits that shorter gadget separately.
+          * Before any framing instruction, an operation may anchor only at the
+            gadget's first instruction -- no junk may precede it. On x86 the
+            whole body is "before the frame" (only the terminator is framed), so
+            only this phase applies.
+          * Once a framing instruction has been passed, any body instruction
+            matches in any order, so a register-restore frame yields one match
+            per restored register. This phase is suppressed unless the gadget
+            opens with the prologue (`frame[0]`); pre-prologue junk would run
+            unaccounted for.
 
-          * *Inside the frame* -- once a framing instruction has been passed --
-            any body instruction matches, in no fixed order, until the epilogue.
-            Each is an independent operation, so a register-restore frame yields
-            one `lc` per restored register (`lc(s0)`, `lc(s1)`, `lc(s7)` for
-            `ld ra ; ld s0 ; ld s1 ; ld s7 ; addi sp ; ret`) and an operation
-            deeper in the frame matches even behind another body instruction
-            (`add` in `ld ra ; add a0, a1, a2 ; ld s0 ; ret`). This holds only
-            when nothing junk precedes the frame: the gadget must open with the
-            prologue. `<junk> ; ld ra ; addi sp ; jr ra` does not realize
-            `add(sp, imm)` -- the pre-prologue junk executes but is unaccounted
-            for, so in-frame matches are suppressed. The backward scan emits the
-            junk-free window that starts at the prologue separately, so the clean
-            gadget is still found.
+        Either way the backward scan also emits the junk-free window as its own
+        gadget, so nothing is lost. When `frame` is None (a synthetic gadget) it
+        is derived here (terminator plus any return-address restore).
 
-        An operation never anchors *on* a framing instruction (the prologue load
-        of the branch register is not an `lc`; the terminator is not matched).
-        The pattern instructions must be adjacent: `push src ; pop dst` realizes
-        `mov(dst, src)`, but `push src ; nop ; pop dst` does not. A raw verbatim
-        gadget needs no special handling -- its pattern anchors at the first
-        instruction and its run simply includes the terminator.
-
-        `frame` is a per-instruction framing mask (parallel to `decodes`). Every
-        search attaches one; when it is None (a synthetic gadget built without
-        one) it is derived here (the terminator plus any return-address restore)
-        so matching is uniformly frame-aware.
-
-        Each yielded `indices` are the (contiguous) positions of the matched
-        pattern instructions, used by the caller (Gadget.result_clobbered) to
-        reject contradictory gadgets. `all_matches` collects the full sequence
-        into a list.
+        Yielded `indices` are the matched instructions' (contiguous) positions,
+        used by Gadget.result_clobbered; `all_matches` collects them into a list.
+        The behavioural cases are pinned in tests/test_operation.py and
+        tests/test_search.py.
         '''
         if not self.items:
             yield ({}, [])

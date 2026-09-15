@@ -61,6 +61,7 @@ def test_inmemory_arm64_exec_section_bytes():
     macho = machomod.MachO(build_minimal_macho(CPU_TYPE_ARM64, RET_ARM * 3), None)
     secs = macho.get_exec_sections()
     assert len(secs) == 1 and secs[0]['opcodes'] == RET_ARM * 3
+    assert secs[0]['name'] == '__text'
 
 
 def test_inmemory_unsupported_cputype_raises():

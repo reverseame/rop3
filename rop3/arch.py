@@ -16,7 +16,6 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 from abc import ABC, abstractmethod
-from typing import List, Any
 
 import capstone
 
@@ -28,11 +27,11 @@ class Architecture(ABC):
     # --- Byte-level gadget terminations (architecture specific) -------------
 
     @abstractmethod
-    def get_rop_terminations(self, **kwargs) -> List[dict]:
+    def get_rop_terminations(self, **kwargs) -> list[dict]:
         pass
 
     @abstractmethod
-    def get_jop_terminations(self) -> List[dict]:
+    def get_jop_terminations(self) -> list[dict]:
         pass
 
     # --- Mnemonic classification (data supplied by each architecture) -------
@@ -77,20 +76,20 @@ class Architecture(ABC):
                 return part
         return mnemonic
 
-    def _has_ret_imm(self, decodes: Any, terminations: tuple[str, ...]) -> bool:
+    def _has_ret_imm(self, decodes, terminations: tuple[str, ...]) -> bool:
         ''' Whether any instruction is a return-with-immediate (which returns
             at that point, shortening the gadget). Architectures without such a
             form (RISC-V) inherit False. '''
         return False
 
-    def _terminates_rop(self, insn: Any, terminations: tuple[str, ...]) -> bool:
+    def _terminates_rop(self, insn, terminations: tuple[str, ...]) -> bool:
         ''' Whether the final instruction returns control the way a ROP
             gadget's tail does. Default: an exact terminator-mnemonic match.
             Architectures whose return shares a mnemonic with other branches
             (RISC-V `c.jr ra`) override this to inspect the operand. '''
         return insn.mnemonic in terminations
 
-    def is_valid_jop_last(self, insn: Any) -> bool:
+    def is_valid_jop_last(self, insn) -> bool:
         ''' Whether the final instruction is a usable indirect branch target
             (i.e. through a register/memory operand, not an immediate). '''
         return True
@@ -100,7 +99,7 @@ class Architecture(ABC):
 
     # --- Shared gadget-validity algorithm (template methods) ----------------
 
-    def is_valid_rop_gadget(self, decodes: Any,
+    def is_valid_rop_gadget(self, decodes,
                             allow_undeterministic: bool = False,
                             allow_ret_imm: bool = False, **kwargs) -> bool:
         if not decodes:
@@ -137,7 +136,7 @@ class Architecture(ABC):
             return False
         return True
 
-    def is_valid_jop_gadget(self, decodes: Any,
+    def is_valid_jop_gadget(self, decodes,
                             allow_undeterministic: bool = False) -> bool:
         if not decodes:
             return False

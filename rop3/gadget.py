@@ -89,7 +89,7 @@ class Gadget:
         return regs
 
     def tuple_repr(self) -> str:
-        ''' Formal tuple representation of the gadget:
+        ''' The gadget as a tuple for --tuple output:
             <op_name, op1[, op2], written registers, read registers> '''
         arch = arch_singleton.arch
         written = self._register_set(arch.written_registers)
@@ -113,27 +113,18 @@ class Gadget:
         return False
 
     def result_clobbered(self, matched_indices, dst_regs) -> bool:
-        ''' Whether this gadget overwrites an operation's result before its
-            terminator -- a "contradictory" gadget (e.g.
-            `add rax, rbx ; mov rax, rcx ; ret`) whose result never reaches the
-            ret. `matched_indices` are the positions of the operation's matched
-            instructions and `dst_regs` its declared destination registers.
+        ''' Whether an instruction between the operation and the terminator
+            overwrites the operation's result register, so it never reaches the
+            ret (e.g. `add rax, rbx ; mov rax, rcx ; ret`). `matched_indices`
+            are the matched instructions' positions, `dst_regs` the destination
+            registers.
 
-            `dst_regs` are intersected with the registers the matched
-            instructions actually write, so a store (whose result is in memory)
-            protects nothing and is never falsely rejected. A gadget is
-            contradictory when an instruction between the last matched one and
-            the terminator writes such a register.
-
-            The final (terminating) instruction is excluded: it is control flow,
-            and its incidental write to the stack pointer (an x86 `ret` pops) is
-            the gadget's exit mechanism, not a clobber of the result -- so a
-            stack-pointer operation like `add rsp, 8 ; ret` is not
-            contradictory.
-
-            `matched_indices` are contiguous (Set.iter_matches matches a consecutive
-            run), so only the tail after `max(matched_indices)` needs scanning;
-            a clobber can never hide between two matched instructions. '''
+            Only registers the matched instructions actually write are guarded
+            (a store leaves its result in memory, so it guards nothing). The
+            terminator is excluded: its stack-pointer write is the exit
+            mechanism, not a clobber, so `add rsp, 8 ; ret` is fine. Matches are
+            contiguous, so only the tail after the last matched index is
+            scanned. '''
         if not dst_regs:
             return False
 
@@ -227,13 +218,8 @@ class Gadget:
         }
 
 def heuristic_basic_count(gadget: "Gadget") -> int:
-    """
-    Cost function — lower is better:
-      side_regs  : each clobbered register costs 4   (shift-left 2)
-      decodes    : each extra instruction costs 2    (shift-left 1)
-    """
-    return (
-        (len(gadget.side_regs) << 2)   # 4 pts per clobbered register
-      + (len(gadget.decodes)   << 1)   # 2 pts per instruction
-    )
+    ''' Cost of a gadget (lower is better): a clobbered register costs 4, an
+        instruction costs 2, so fewer side effects are preferred over fewer
+        instructions. '''
+    return 4 * len(gadget.side_regs) + 2 * len(gadget.decodes)
 

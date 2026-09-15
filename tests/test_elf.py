@@ -51,6 +51,7 @@ def test_elf_exec_section_extraction():
     data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN)
     secs = elfmod.ELF(data, None).get_exec_sections()
     assert len(secs) == 1
+    assert secs[0]['name'] == '.text'
     assert secs[0]['vaddr'] == 0x1000
     assert secs[0]['opcodes'] == TEXT
 

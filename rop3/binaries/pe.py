@@ -57,6 +57,7 @@ class PE:
             ''' Flag means section contains executable code '''
             if sec.Characteristics & IMAGE_SCN_MEM_EXECUTE:
                 ret.append({
+                    'name': sec.Name.rstrip(b'\x00').decode('utf-8', 'replace'),
                     'vaddr': self._pe.OPTIONAL_HEADER.ImageBase + sec.VirtualAddress,
                     'opcodes': sec.get_data()
                 })
