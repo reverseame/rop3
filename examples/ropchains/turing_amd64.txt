@@ -35,4 +35,4 @@ ld(reg5, reg4)
 ; Unconditional jump
 jmp(reg5)
 
-raw([ret], [], [], []) ; nop
+raw([nop], [], [], []) ; nop
