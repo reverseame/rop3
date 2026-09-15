@@ -16,10 +16,8 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
-import math
 import bisect
 import capstone
-import multiprocessing
 from itertools import product, count
 
 from rop3.cache import GadgetCache
@@ -28,17 +26,10 @@ import rop3.debug as debug
 import rop3.binary
 import rop3.search as search
 from rop3.operation import OperationDef, match_gadgets, realize
-from rop3.arch import arch_singleton, DEFAULT_DEPTH
-from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
-from rop3.archs.riscv_arch import RISCV_Architecture
+from rop3.arch import arch_singleton
 import rop3.parser as parser
 
 from .gadget import Gadget
-
-''' Default (x86) search depth in bytes; kept for backward compatibility.
-    The effective default is architecture-specific (Architecture.default_depth,
-    used when --depth is omitted). '''
-DEPTH = DEFAULT_DEPTH
 
 ''' Flags when searching gadgets '''
 DEFAULT = 0
@@ -174,8 +165,7 @@ class GadFinder:
                 'data': f'{op}({", ".join(operands)})'}
 
         # Operations realized as multi-step chains (containing operation refs or
-        # more than one gadget) expand into ROP chains; purely single-gadget
-        # operations return a flat list of matching gadgets.
+        # more than one gadget) expand into ROP chains.
         has_chain = any(not real.is_single_gadget for real in resolved.realizations)
         if has_chain:
             try:
@@ -183,7 +173,6 @@ class GadFinder:
             except RopChainNotFound:
                 return []
 
-        # Operands are positional: op1, op2, op3, ...
         return self.match_operation(gadgets, resolved, operands,
                                     reject_clobbered=not self._keep_contradictory())
 
@@ -346,33 +335,37 @@ class GadFinder:
 
         ''' The parallel scanner chunks by termination byte-offset, which only
             the Galileo backward walk supports; other strategies (the linear
-            sweep, the abstract-gadget backward search) run single-threaded. '''
+            sweep, the abstract-gadget backward search) run single-threaded. The
+            scanning itself lives in rop3.search; the finder only decides whether
+            to use it and rebuilds gadgets from the raw records it returns. '''
         parallelizable = arch_singleton.arch.parallelizable and not self._ropblock()
         if self._jobs > 1 and parallelizable:
-            records = self._scan_parallel(binary, badchars, badchar_bytes)
+            arch_obj = arch_singleton.arch
+            sections = [(s['opcodes'], s['vaddr'])
+                        for s in binary.get_exec_sections()]
+            records = search.scan_parallel(
+                sections, arch_obj.arch, arch_obj.mode, self.depth, self.flags,
+                self._gad_terminations(), badchars, badchar_bytes, self._jobs)
             if self._cache is not None:
                 self._cache.store(key, records)
             yield from self._reconstruct(binary, records, symbol_table)
             return
 
         if self._jobs > 1 and not parallelizable:
-            debug.info(f'{arch_singleton.arch.scan_name} scan runs '
-                       f'single-threaded; --jobs ignored')
+            name = arch_singleton.arch.scan_name(
+                ropblock=bool(self._ropblock()), framed=self._framed())
+            debug.info(f'{name} scan runs single-threaded; --jobs ignored')
 
         records = [] if self._cache is not None else None
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
-        ropblock = bool(self._ropblock())
         for vaddr, raw, decodes, frame in self._scan_sections(binary, badchars, badchar_bytes):
-            if not ropblock:                        # ordinary scan: mark the frame
-                frame = self._classical_frame(decodes)
+            # Every scan attaches its own frame mask inline, so use the one it
+            # yields -- and cache it, so a reconstructed gadget carries exactly
+            # the mask the scan produced (no re-derivation).
             if records is not None:
-                record = [vaddr, raw.hex()]
-                # The abstract-gadget frame is data-flow derived, so cache it;
-                # the ordinary frame is recomputed cheaply on reconstruction.
-                if ropblock and frame is not None:
-                    record.append([bool(f) for f in frame])
-                records.append(record)
+                records.append([vaddr, raw.hex(),
+                                [bool(f) for f in frame] if frame is not None else None])
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
                          vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
@@ -380,43 +373,6 @@ class GadFinder:
 
         if records is not None:
             self._cache.store(key, records)
-
-    def _scan_parallel(self, binary, badchars, badchar_bytes):
-        '''
-        Scan the executable sections across worker processes. Each section is
-        split into chunks; a chunk emits only the gadgets whose termination
-        falls inside its window (the slice extends `depth` bytes earlier so
-        gadgets straddling a boundary are still complete), so there are no
-        cross-chunk duplicates. Returns sorted [vaddr, hex] records.
-        '''
-        arch = arch_singleton.arch.arch
-        mode = arch_singleton.arch.mode
-        terminations = self._gad_terminations()
-
-        tasks = []
-        for section in binary.get_exec_sections():
-            opcodes = section['opcodes']
-            sec_vaddr = section['vaddr']
-            n = len(opcodes)
-            chunk = max(4096, math.ceil(n / (self._jobs * 4)))
-            for lo in range(0, n, chunk):
-                hi = min(lo + chunk, n)
-                start = max(0, lo - self.depth)
-                ''' Termination END offsets run in [0, n]; the final chunk owns
-                    the closing n as well, so make its window inclusive. '''
-                emit_hi = hi + 1 if hi == n else hi
-                tasks.append((
-                    arch, mode, self.depth, int(self.flags), terminations,
-                    badchars, badchar_bytes,
-                    opcodes[start:hi], start, sec_vaddr, lo, emit_hi,
-                ))
-
-        records = []
-        with multiprocessing.Pool(self._jobs) as pool:
-            for part in pool.imap_unordered(_scan_worker, tasks):
-                records.extend(part)
-        records.sort()   # deterministic order regardless of worker scheduling
-        return records
 
     def _scan_sections(self, binary, badchars, badchar_bytes):
         ''' Single pass over the executable sections, delegating to the
@@ -443,34 +399,19 @@ class GadFinder:
                 terminations=terminations, accept_candidate=accept_candidate,
                 framed=self._framed(), ropblock=bool(self._ropblock()))
 
-    def _classical_frame(self, decodes) -> tuple:
-        ''' Per-instruction frame mask for an ordinary (classical-scan) gadget:
-            the branch-register stack-load prologue, the terminator, and any
-            position-independent framing instruction (prologue prefix). The
-            classical scans lack the abstract search's live data-flow, so the
-            prologue is reconstructed here (search.frame_mask_for). Attached to
-            every classical-scan gadget and consulted by operation matching just
-            like the abstract-gadget search's own mask. Excludes explicit
-            stack-pointer pivots (`add rsp, 8`, `leave`, `c.addi16sp sp, imm`),
-            which are meaningful side effects rather than plumbing to dim. '''
-        return search.frame_mask_for(decodes, arch_singleton.arch)
-
     def _reconstruct(self, binary, records, symbol_table):
-        ''' Rebuild Gadget objects from cached (vaddr, hex-bytes) records. '''
+        ''' Rebuild Gadget objects from cached (vaddr, hex-bytes, frame) records.
+            The frame mask is the one the scan produced (cached alongside the
+            bytes), so a reconstructed gadget matches a freshly scanned one. '''
         arch = arch_singleton.arch.arch
         mode = arch_singleton.arch.mode
         md = capstone.Cs(arch, mode)
         md.detail = True
-        ropblock = bool(self._ropblock())
         for record in records:
             vaddr, hexbytes = record[0], record[1]
             raw = bytes.fromhex(hexbytes)
             decodes = list(md.disasm(raw, vaddr))
-            if ropblock:
-                # A 3rd record element is the cached abstract-gadget frame mask.
-                frame = tuple(record[2]) if len(record) > 2 and record[2] is not None else None
-            else:
-                frame = self._classical_frame(decodes)
+            frame = tuple(record[2]) if len(record) > 2 and record[2] is not None else None
             symbol = self._nearest_symbol(vaddr, symbol_table) if symbol_table else None
             yield Gadget(filename=binary.filename, arch=arch, mode=mode,
                          vaddr=vaddr, decodes=decodes, bytes=raw, symbol=symbol,
@@ -481,6 +422,9 @@ class GadFinder:
             so a different option misses the cache cleanly. '''
         arch = arch_singleton.arch
         return {
+            # Record layout version: bumped when the cached record shape changes
+            # (now [vaddr, hex, frame] for every gadget) so older caches miss.
+            'record_version': 2,
             'depth': self.depth,
             'flags': int(self.flags),
             'arch': [arch.arch, arch.mode],
@@ -544,6 +488,18 @@ class GadFinder:
             branch register (see search.backwards_framed_search). '''
         return self.flags & ROPBLOCK
 
+    @property
+    def ropblock(self) -> bool:
+        ''' Whether the abstract-gadget (ropblock) search is enabled -- public
+            accessor for callers reporting the active strategy. '''
+        return bool(self.flags & ROPBLOCK)
+
+    @property
+    def framed(self) -> bool:
+        ''' Whether the framed search is enabled (the default) -- public
+            accessor for callers reporting the active strategy. '''
+        return self._framed()
+
     def _is_valid_gadget(self, decodes):
         ''' Invalid instructions and, thus, not decoded '''
         if not decodes:
@@ -581,50 +537,4 @@ class GadFinder:
 
         forbidden = {int(b, 0) for b in badchar_bytes}
         return not any(byte in forbidden for byte in gadget_bytes)
-
-
-def _arch_for(arch_const, mode):
-    ''' Rebuild the architecture object inside a worker process. '''
-    if arch_const == capstone.CS_ARCH_RISCV:
-        return RISCV_Architecture(compressed=bool(mode & capstone.CS_MODE_RISCVC))
-    return X64_Architecture() if mode == capstone.CS_MODE_64 else X86_Architecture()
-
-
-def _scan_worker(task):
-    '''
-    Worker (runs in its own process): scan one section chunk and return the
-    raw [vaddr, hex] records for the gadgets whose termination lies in the
-    chunk's window. Decodes are not returned (capstone objects are not
-    picklable); the parent rebuilds them.
-    '''
-    (arch_const, mode, depth, flags, terminations, badchars, badchar_bytes,
-     slice_bytes, slice_start, sec_vaddr, emit_lo, emit_hi) = task
-
-    arch_obj = _arch_for(arch_const, mode)
-    arch_singleton.reset()
-    arch_singleton.initialize(arch_obj)
-    finder = GadFinder(depth, flags)
-
-    md = capstone.Cs(arch_const, mode)
-    md.detail = True
-
-    def accept_match(ref):
-        ''' Only this chunk owns terminations ending in [emit_lo, emit_hi). '''
-        return emit_lo <= slice_start + ref < emit_hi
-
-    def accept_candidate(vaddr, raw):
-        return (finder._is_valid_address(vaddr, badchars, arch_obj.address_size)
-                and finder._is_valid_bytes(raw, badchar_bytes))
-
-    # The slice starts `slice_start` bytes into the section.
-    base_vaddr = sec_vaddr + slice_start
-    out = []
-    # The parallel path is Galileo-only (abstract-gadget search runs
-    # single-threaded), so `scan` here always yields a None frame mask.
-    for vaddr, raw, _decodes, _frame in arch_obj.scan(
-            slice_bytes, base_vaddr, depth, md.disasm, finder._is_valid_gadget,
-            terminations=terminations, accept_candidate=accept_candidate,
-            accept_match=accept_match, framed=finder._framed()):
-        out.append([vaddr, raw.hex()])
-    return out
 

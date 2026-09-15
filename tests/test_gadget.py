@@ -139,7 +139,8 @@ def test_display_repr_dims_frame_instructions(x64, monkeypatch):
 
 
 def test_display_repr_plain_without_frame(x64):
-    ''' With no frame mask, display_repr is just the plain text. '''
+    ''' With no frame mask (a bare synthetic gadget), display_repr is just the
+        plain text. '''
     g = make_gadget(b'\x58\xc3', 0x1000)
-    assert g.frame is None
+    g.frame = None
     assert g.display_repr() == g.text_repr

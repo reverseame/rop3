@@ -131,7 +131,7 @@ class Gadget:
             stack-pointer operation like `add rsp, 8 ; ret` is not
             contradictory.
 
-            `matched_indices` are contiguous (Set.is_equal matches a consecutive
+            `matched_indices` are contiguous (Set.iter_matches matches a consecutive
             run), so only the tail after `max(matched_indices)` needs scanning;
             a clobber can never hide between two matched instructions. '''
         if not dst_regs:

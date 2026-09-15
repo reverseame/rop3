@@ -18,9 +18,8 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import pytest
 
-from rop3.search import (galileo_scan, aligned_scan, framed_aligned_scan,
-                         _linear_disasm, backward_instructions,
-                         backwards_framed_search)
+from rop3.search import (galileo_scan, aligned_scan, linear_instructions,
+                         backward_instructions, backwards_framed_search)
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
 _riscv = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
@@ -35,7 +34,7 @@ def _x86_md():
 
 def _texts(gen):
     out = {}
-    for vaddr, _raw, decodes in gen:
+    for vaddr, _raw, decodes, *_frame in gen:
         text = ' ; '.join(f'{d.mnemonic} {d.op_str}'.strip() for d in decodes)
         out.setdefault(vaddr, set()).add(text)
     return out
@@ -46,11 +45,19 @@ def _texts(gen):
 def test_scan_name_and_parallelism_are_architecture_dependent():
     from rop3.archs.riscv_arch import RISCV_Architecture
     from rop3.archs.aarch64_arch import AArch64_Architecture
-    # scan_name is a descriptive label; parallelizable gates chunked scanning.
-    assert X86_Architecture().scan_name == 'galileo'
-    assert X64_Architecture().scan_name == 'galileo'
-    assert RISCV_Architecture(compressed=True).scan_name == 'framed aligned'
-    assert AArch64_Architecture().scan_name == 'aligned'
+    # scan_name mirrors scan()'s strategy selection for the given flags;
+    # parallelizable gates chunked scanning.
+    assert X86_Architecture().scan_name() == 'galileo'
+    assert X64_Architecture().scan_name() == 'galileo'
+    assert RISCV_Architecture(compressed=True).scan_name() == 'framed aligned'
+    assert AArch64_Architecture().scan_name() == 'framed aligned'
+    # --no-frame drops the aligned sweeps to a plain aligned scan.
+    assert AArch64_Architecture().scan_name(framed=False) == 'aligned'
+    assert RISCV_Architecture().scan_name(framed=False) == 'aligned'
+    # --ropblock selects the abstract-gadget search on every architecture.
+    assert X64_Architecture().scan_name(ropblock=True) == 'ropblock'
+    assert AArch64_Architecture().scan_name(ropblock=True) == 'ropblock'
+    assert RISCV_Architecture().scan_name(ropblock=True) == 'ropblock'
     # Only the Galileo backward walk is chunkable across worker processes.
     assert X64_Architecture().parallelizable
     assert not RISCV_Architecture(compressed=True).parallelizable
@@ -124,10 +131,24 @@ def test_aligned_resyncs_past_undecodable_tail():
     assert _aligned(b'\xc3\xb8', 0x1000, depth=4) == {0x1000: {'ret'}}
 
 
-def test_linear_disasm_is_program_order():
-    insns = _linear_disasm(UNINTENDED, 0x1000, 1, _x86_md().disasm)
+def test_linear_instructions_is_program_order():
+    insns = list(linear_instructions(UNINTENDED, 0x1000, 1, _x86_md().disasm))
     assert [i.mnemonic for i in insns] == ['mov', 'ret']
     assert [i.address for i in insns] == [0x1000, 0x1005]
+
+
+def test_galileo_frame_marks_only_the_terminator():
+    ''' The classical scans build the frame mask inline as they recognize each
+        gadget. On x86 (no return-address-restore prologue) that is just the
+        terminator the walk anchored on. '''
+    arch = X64_Architecture()
+    frames = {}
+    for vaddr, _raw, decodes, frame in galileo_scan(
+            b'\x58\xc3', 0x1000, arch.get_rop_terminations(), 5, 1,
+            _x86_md().disasm, arch.is_valid_rop_gadget):
+        frames[' ; '.join(f'{d.mnemonic} {d.op_str}'.strip() for d in decodes)] = frame
+    assert frames['pop rax ; ret'] == (False, True)      # pop = body, ret = frame
+    assert frames['ret'] == (True,)
 
 
 @_riscv
@@ -139,7 +160,7 @@ def test_aligned_equals_galileo_on_fixed_width():
     code = b'\x33\x85\xc5\x00' + b'\x93\x06\x07\x00' + b'\x67\x80\x00\x00'  # add;mv;ret
 
     def keys(gen):
-        return {(v, r.hex()) for v, r, _ in gen}
+        return {(v, r.hex()) for v, r, *_ in gen}
 
     galileo = keys(galileo_scan(code, 0x1000, arch.get_rop_terminations(), 16, 4,
                                 md.disasm, arch.is_valid_rop_gadget))
@@ -165,9 +186,10 @@ def _riscv_texts(code, base=0x1000, depth=16, compressed=True):
     mode = capstone.CS_MODE_RISCV64 | (capstone.CS_MODE_RISCVC if compressed else 0)
     md = capstone.Cs(capstone.CS_ARCH_RISCV, mode)
     md.detail = True
-    return _texts(framed_aligned_scan(code, base, depth, arch.alignment, md.disasm,
-                                      arch.is_valid_rop_gadget, arch.is_frame_load,
-                                      arch.is_return))
+    return _texts(aligned_scan(code, base, depth, arch.alignment, md.disasm,
+                               arch.is_valid_rop_gadget,
+                               restores_return_address=arch.restores_return_address,
+                               is_return=arch.is_return))
 
 
 @_riscv
@@ -199,6 +221,26 @@ def test_riscv_scan_compressed_ra_load():
 
 
 @_riscv
+def test_riscv_framed_sweep_frames_ra_load_and_terminator():
+    ''' The framed aligned sweep builds the frame inline: the ra restore it
+        walked past (`restores_return_address`) and the `ret` it anchored on are frame;
+        the operation body between them is not. '''
+    from rop3.archs.riscv_arch import RISCV_Architecture
+    arch = RISCV_Architecture(compressed=True)
+    mode = capstone.CS_MODE_RISCV64 | capstone.CS_MODE_RISCVC
+    md = capstone.Cs(capstone.CS_ARCH_RISCV, mode)
+    md.detail = True
+    frames = {}
+    for _v, _r, decodes, frame in aligned_scan(
+            LD_RA_SP + ADD + RET, 0x1000, 16, arch.alignment, md.disasm,
+            arch.is_valid_rop_gadget, restores_return_address=arch.restores_return_address,
+            is_return=arch.is_return):
+        frames[tuple(d.mnemonic for d in decodes)] = frame
+    # ld ra (prologue) / add (body) / ret (terminator)
+    assert frames[('ld', 'add', 'ret')] == (True, False, True)
+
+
+@_riscv
 def test_riscv_is_ra_load_predicate():
     from rop3.archs.riscv_arch import RISCV_Architecture
     arch = RISCV_Architecture(compressed=True)
@@ -226,7 +268,7 @@ def _backwards_framed(opcodes, base, depth=8):
     for vaddr, raw, decodes, _frame in backwards_framed_search(
             opcodes, base, depth, arch.alignment, md.disasm,
             arch.is_pc_reg_write, arch.ropblock_branch_reg,
-            arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction):
+            arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address):
         yield vaddr, raw, decodes
 
 
@@ -282,7 +324,7 @@ def test_backwards_framed_marks_prologue_body_epilogue():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x58\x48\x89\xf7\xff\xe0', 0x1000, 8, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
     assert runs[('pop', 'mov', 'jmp')] == (True, False, True)
 
 
@@ -296,7 +338,7 @@ def test_backwards_framed_sp_pivot_is_not_framed():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x58\x48\x83\xc4\x08\xff\xe0', 0x1000, 12, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
     assert runs[('pop', 'add', 'jmp')] == (True, False, True)
 
 
@@ -309,5 +351,5 @@ def test_backwards_framed_leading_sp_pivot_is_body():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x48\x83\xc4\x08\xc3', 0x1000, 12, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.is_frame_instruction)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
     assert runs[('add', 'ret')] == (False, True)

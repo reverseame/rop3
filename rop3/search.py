@@ -16,9 +16,12 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import re
+import math
+import multiprocessing
 
 def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
-                 is_valid_gadget, accept_match=None, accept_candidate=None):
+                 is_valid_gadget, accept_match=None, accept_candidate=None,
+                 restores_return_address=None):
     '''
     The Galileo algorithm.
 
@@ -50,10 +53,13 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
         termination's end offset (used to partition parallel chunks).
     accept_candidate : callable(vaddr, raw) -> bool, optional -- drop bad-char
         addresses/bytes before disassembly.
+    restores_return_address : callable(insn) -> bool, optional -- marks the
+        stacked return-address restore in the inline frame mask. Default: none
+        (x86 -- `ret` pops the PC off the stack, so only the terminator is framed).
 
     Yields
     ------
-    (vaddr, raw, decodes)
+    (vaddr, raw, decodes, frame)
     '''
     for termination in terminations:
         term_size = termination['size']
@@ -79,12 +85,21 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                 raw = opcodes[start:ref]
                 if accept_candidate is not None and not accept_candidate(vaddr, raw):
                     continue
-                decodes = list(disasm(raw, vaddr))
+                # Decode the candidate once, building the frame mask in the same
+                # pass: an instruction is framing if it restores the return
+                # address off the stack; the terminator (set below) always is.
+                decodes = []
+                frame = []
+                for insn in disasm(raw, vaddr):
+                    decodes.append(insn)
+                    frame.append(bool(restores_return_address)
+                                 and restores_return_address(insn))
                 if is_valid_gadget(decodes):
-                    yield vaddr, raw, decodes
+                    frame[-1] = True                # the terminator frames the run
+                    yield vaddr, raw, decodes, tuple(frame)
 
 
-def _linear_disasm(opcodes, base_vaddr, alignment, disasm):
+def linear_instructions(opcodes, base_vaddr, alignment, disasm):
     '''
     Linear sweep: disassemble `opcodes` as the intended instruction stream, in
     program order. Capstone stops at the first byte it cannot decode; when that
@@ -109,7 +124,8 @@ def _linear_disasm(opcodes, base_vaddr, alignment, disasm):
 
 
 def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
-                 is_valid_gadget, accept_candidate=None):
+                 is_valid_gadget, restores_return_address=None, is_return=None,
+                 accept_candidate=None):
     '''
     Aligned (intended-instruction) gadget search.
 
@@ -125,22 +141,43 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     Galileo but far faster (one disassembly pass, not one per candidate); on a
     variable-length ISA it returns strictly the aligned/intended subset.
 
+    Framing (optional). A frame-establishing return (e.g. RISC-V `ret`, which
+    jumps to whatever is in `ra`) only yields a useful gadget if the run first
+    reloads the return target from the (attacker-controlled) stack. When
+    `is_return` is given, a return terminator is emitted only once the backward
+    walk has covered a return-address restore (`restores_return_address`); a
+    single boolean carried across the walk records this, so the check is O(1)
+    per candidate. Non-return terminators (indirect JOP branches) carry no such
+    requirement. When `is_return` is omitted the scan degrades to the plain
+    sweep, emitting every contiguous run.
+
     Parameters mirror `galileo_scan`, minus the byte-pattern `terminations`
     (termination points are found by disassembly here, not by a byte regex).
 
+    restores_return_address : callable(insn) -> bool, optional -- the frame load
+        that restores the return target from the stack (RISC-V `ld ra, off(sp)`,
+        AArch64 `ldp .. x30, [sp]`). Gates return emission when `is_return` is
+        set, and marks the inline frame mask built during the walk.
+    is_return : callable(insn) -> bool, optional -- is the terminator a return
+        (so the gadget must establish its frame). Omit for the plain sweep.
+
     Yields
     ------
-    (vaddr, raw, decodes)
+    (vaddr, raw, decodes, frame)
     '''
-    insns = _linear_disasm(opcodes, base_vaddr, alignment, disasm)
+    insns = linear_instructions(opcodes, base_vaddr, alignment, disasm)
 
     for i, terminator in enumerate(insns):
         # A termination is any instruction that is a valid gadget on its own.
         if not is_valid_gadget([terminator]):
             continue
+        requires_frame = bool(is_return) and is_return(terminator)
         term_end = terminator.address + terminator.size
 
-        # Walk backward over the contiguous run of intended instructions.
+        # Walk backward over the contiguous run of intended instructions,
+        # growing the frame mask at its front to stay parallel to the candidate.
+        frame_loaded = False
+        frame = []
         j = i
         while j >= 0:
             # Stop at a discontinuity (a resync gap): a gadget's bytes must be
@@ -150,69 +187,13 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
             if term_end - insns[j].address > depth:
                 break
 
-            vaddr = insns[j].address
-            raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
-            if accept_candidate is None or accept_candidate(vaddr, raw):
-                candidate = insns[j:i + 1]
-                if is_valid_gadget(candidate):
-                    yield vaddr, raw, candidate
-            j -= 1
-
-
-# --------------------------------------------------------------------------
-# Framed aligned: aligned sweep restricted to gadgets that set up a return frame
-# --------------------------------------------------------------------------
-
-def framed_aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
-                        is_valid_gadget, is_frame_load, is_return,
-                        accept_candidate=None):
-    '''
-    Framed aligned gadget search.
-
-    A frame-establishing return (e.g. RISC-V `ret`, which jumps to whatever is
-    in `ra`) only yields a useful gadget if the run first reloads the return
-    target from the (attacker-controlled) stack. This specialization of the
-    aligned sweep keeps exactly those: it anchors on each return terminator,
-    walks backward over the intended instructions up to `depth`, and emits a
-    gadget only once the run contains a frame load. A single boolean carried
-    across the backward walk records whether such a load has been seen -- once
-    true it stays true for every longer gadget, so the check is O(1) per
-    candidate rather than a re-scan.
-
-    Non-return terminators (indirect JOP branches, when enabled) carry no such
-    requirement and are emitted as usual.
-
-    Parameters mirror `aligned_scan`, plus:
-
-    is_frame_load : callable(insn) -> bool  -- is `insn` the frame load that
-        restores the return target from the stack (RISC-V `ld ra, off(sp)`).
-    is_return     : callable(insn) -> bool  -- is `insn` a return (so the gadget
-        must establish its frame); false for indirect JOP terminators.
-
-    Yields
-    ------
-    (vaddr, raw, decodes)
-    '''
-    insns = _linear_disasm(opcodes, base_vaddr, alignment, disasm)
-
-    for i, terminator in enumerate(insns):
-        if not is_valid_gadget([terminator]):
-            continue
-        requires_frame = is_return(terminator)
-        term_end = terminator.address + terminator.size
-
-        frame_loaded = False
-        j = i
-        while j >= 0:
-            if j < i and insns[j].address + insns[j].size != insns[j + 1].address:
-                break
-            if term_end - insns[j].address > depth:
-                break
-
-            # Prepending insns[j]; once we cover the frame load the whole
-            # (and every longer) run establishes its return frame.
-            if is_frame_load(insns[j]):
+            # Prepending insns[j]: it is framing if it restores the return
+            # address; once covered, the whole (and every longer) run establishes
+            # its return frame.
+            is_restore = bool(restores_return_address) and restores_return_address(insns[j])
+            if is_restore:
                 frame_loaded = True
+            frame.insert(0, is_restore)
 
             if frame_loaded or not requires_frame:
                 vaddr = insns[j].address
@@ -220,7 +201,9 @@ def framed_aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
                 if accept_candidate is None or accept_candidate(vaddr, raw):
                     candidate = insns[j:i + 1]
                     if is_valid_gadget(candidate):
-                        yield vaddr, raw, candidate
+                        mask = frame.copy()
+                        mask[-1] = True             # the terminator frames the run
+                        yield vaddr, raw, candidate, tuple(mask)
             j -= 1
 
 
@@ -383,23 +366,108 @@ def _frame_mask(decodes, prologue, is_frame):
         for i, insn in enumerate(decodes))
 
 
-def frame_mask_for(decodes, arch):
-    '''
-    Derive the framing mask for an already-decoded gadget whose terminator is
-    ``decodes[-1]`` -- the branch-register stack-load prologue (found by the
-    same backward data-flow walk `backwards_framed_search` uses), the terminator
-    itself, and any position-independent framing instruction. The complement of
-    the mask is the operation body: everything a matcher may anchor on, wherever
-    it sits (before the prologue, or interleaved through the frame).
+# --------------------------------------------------------------------------
+# Parallel scanning: chunk the executable sections across worker processes
+# --------------------------------------------------------------------------
+#
+# Only the Galileo backward walk supports this (it chunks by termination byte
+# offset via `accept_match`); the linear sweeps and the abstract-gadget search
+# run single-threaded. The scanning lives here, isolated from the finder's
+# policy: the finder hands over a picklable spec (arch consts, flags, byte
+# slices) and gets back raw ``[vaddr, hex]`` records to rebuild into gadgets.
 
-    This is the classical scans' frame (they lack the abstract search's live
-    data-flow, so it is reconstructed here) and operation matching's fallback
-    when a gadget carries no precomputed mask. Stack pivots are deliberately
-    *not* framed (see `_frame_mask`).
+
+def _arch_for(arch_const, mode):
+    ''' Rebuild the architecture object inside a worker process from picklable
+        capstone constants. Imported lazily so this module stays free of any
+        top-level rop3.archs dependency (arch.py / archs import *this* module). '''
+    import capstone
+    from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
+    from rop3.archs.riscv_arch import RISCV_Architecture
+    if arch_const == capstone.CS_ARCH_RISCV:
+        return RISCV_Architecture(compressed=bool(mode & capstone.CS_MODE_RISCVC))
+    return X64_Architecture() if mode == capstone.CS_MODE_64 else X86_Architecture()
+
+
+def _scan_chunk(task):
     '''
-    if not decodes:
-        return tuple()
-    reg = arch.ropblock_branch_reg(decodes[-1])
-    prologue = _ropblock_prologue_index(decodes, reg, arch.is_stack_load,
-                                        arch.clobbers_reg)
-    return _frame_mask(decodes, prologue, arch.is_frame_instruction)
+    Worker (runs in its own process): scan one section chunk and return the raw
+    ``[vaddr, hex]`` records for the gadgets whose termination lies in the
+    chunk's window. Decodes are not returned (capstone objects are not
+    picklable); the parent rebuilds them.
+
+    The flag-driven validity/bad-char predicates live on GadFinder, so a
+    throwaway one is rebuilt here rather than duplicating that logic -- imported
+    lazily so this module has no top-level dependency on the finder.
+    '''
+    import capstone
+    from rop3.arch import arch_singleton
+    from rop3.gadfinder import GadFinder
+
+    (arch_const, mode, depth, flags, terminations, badchars, badchar_bytes,
+     slice_bytes, slice_start, sec_vaddr, emit_lo, emit_hi) = task
+
+    arch_obj = _arch_for(arch_const, mode)
+    arch_singleton.reset()
+    arch_singleton.initialize(arch_obj)
+    finder = GadFinder(depth, flags)
+
+    md = capstone.Cs(arch_const, mode)
+    md.detail = True
+
+    def accept_match(ref):
+        ''' Only this chunk owns terminations ending in [emit_lo, emit_hi). '''
+        return emit_lo <= slice_start + ref < emit_hi
+
+    def accept_candidate(vaddr, raw):
+        return (finder._is_valid_address(vaddr, badchars, arch_obj.address_size)
+                and finder._is_valid_bytes(raw, badchar_bytes))
+
+    # The slice starts `slice_start` bytes into the section.
+    base_vaddr = sec_vaddr + slice_start
+    out = []
+    # Carry the scan's inline frame mask through so the parent rebuilds gadgets
+    # without re-deriving it (records are [vaddr, hex, frame]).
+    for vaddr, raw, _decodes, frame in arch_obj.scan(
+            slice_bytes, base_vaddr, depth, md.disasm, finder._is_valid_gadget,
+            terminations=terminations, accept_candidate=accept_candidate,
+            accept_match=accept_match, framed=finder._framed()):
+        out.append([vaddr, raw.hex(),
+                    [bool(f) for f in frame] if frame is not None else None])
+    return out
+
+
+def scan_parallel(sections, arch_const, mode, depth, flags, terminations,
+                  badchars, badchar_bytes, jobs):
+    '''
+    Scan the executable `sections` across `jobs` worker processes and return
+    sorted ``[vaddr, hex]`` records. `sections` is a list of picklable
+    ``(opcodes: bytes, sec_vaddr: int)`` pairs.
+
+    Each section is split into chunks; a chunk emits only the gadgets whose
+    termination falls inside its window (the slice extends `depth` bytes earlier
+    so gadgets straddling a boundary are still complete), so there are no
+    cross-chunk duplicates.
+    '''
+    tasks = []
+    for opcodes, sec_vaddr in sections:
+        n = len(opcodes)
+        chunk = max(4096, math.ceil(n / (jobs * 4)))
+        for lo in range(0, n, chunk):
+            hi = min(lo + chunk, n)
+            start = max(0, lo - depth)
+            ''' Termination END offsets run in [0, n]; the final chunk owns the
+                closing n as well, so make its window inclusive. '''
+            emit_hi = hi + 1 if hi == n else hi
+            tasks.append((
+                arch_const, mode, depth, int(flags), terminations,
+                badchars, badchar_bytes,
+                opcodes[start:hi], start, sec_vaddr, lo, emit_hi,
+            ))
+
+    records = []
+    with multiprocessing.Pool(jobs) as pool:
+        for part in pool.imap_unordered(_scan_chunk, tasks):
+            records.extend(part)
+    records.sort()   # deterministic order regardless of worker scheduling
+    return records

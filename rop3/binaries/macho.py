@@ -15,7 +15,6 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import capstone
 import io
 import struct
 

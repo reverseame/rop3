@@ -22,12 +22,6 @@ import capstone
 
 from rop3.search import galileo_scan, backwards_framed_search
 
-# Default search depth in bytes when the user does not pass --depth. Tuned for
-# x86, whose 1-3 byte instructions pack several into a short gadget. Fixed-width
-# ISAs (RISC-V, AArch64) need a larger window to fit even a two-instruction
-# gadget and override `Architecture.default_depth`.
-DEFAULT_DEPTH = 5
-
 class Architecture(ABC):
     """Abstract base class for all architectures"""
 
@@ -178,27 +172,29 @@ class Architecture(ABC):
         ''' Human-readable architecture name, used for verbose reporting. '''
         return type(self).__name__
 
-    @property
-    def scan_name(self) -> str:
-        ''' Short descriptive label for the gadget-search strategy this
-            architecture uses -- for verbose reporting only, never dispatch. '''
-        return 'galileo'
+    def scan_name(self, ropblock=False, framed=True) -> str:
+        ''' Short label for the gadget-search strategy actually run given the
+            runtime flags -- for verbose reporting only, never dispatch. Mirrors
+            `scan`'s strategy selection so the reported name matches what ran;
+            each architecture overrides this in lockstep with its own `scan`.
+
+            The default (variable-length ISAs) is the Galileo backward walk,
+            which ignores `framed`; `--ropblock` selects the abstract-gadget
+            backward search instead. '''
+        return 'ropblock' if ropblock else 'galileo'
 
     @property
     def parallelizable(self) -> bool:
         ''' Whether this architecture's scan can be split into byte-offset
-            chunks and run across worker processes (see
-            GadFinder._scan_parallel). Only the Galileo backward walk supports
+            chunks and run across worker processes (see search.scan_parallel). Only the Galileo backward walk supports
             it; the linear-sweep strategies run single-threaded. '''
         return True
 
     @property
+    @abstractmethod
     def default_depth(self) -> int:
-        ''' Search depth in bytes used when the user does not pass --depth.
-            Fixed-width ISAs override this: on RISC-V a framed ROP gadget needs
-            at least `ld ra, off(sp) ; ret` (8 bytes), so the x86 default of
-            DEFAULT_DEPTH would find nothing. '''
-        return DEFAULT_DEPTH
+        ''' Search depth in bytes used when the user does not pass --depth. '''
+        pass
 
     def splits_gadget(self, insn) -> bool:
         """
@@ -218,7 +214,7 @@ class Architecture(ABC):
         yield from backwards_framed_search(
             opcodes, base_vaddr, depth, self.alignment, disasm,
             self.is_pc_reg_write, self.ropblock_branch_reg,
-            self.is_stack_load, self.clobbers_reg, self.is_frame_instruction,
+            self.is_stack_load, self.clobbers_reg, self.restores_return_address,
             splits=self.splits_gadget, accept_candidate=accept_candidate)
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
@@ -235,7 +231,7 @@ class Architecture(ABC):
         The default is the Galileo backward walk -- required on variable-length
         (x86) ISAs, where gadgets hide inside longer instructions -- driven by
         the byte-pattern `terminations` the finder supplies. `accept_match`
-        partitions terminations across parallel chunks (see _scan_parallel) and
+        partitions terminations across parallel chunks (see search.scan_parallel) and
         is ignored by strategies that do not chunk. `framed` is honored only by
         architectures with a framed scan (AArch64, RISC-V); Galileo ignores it.
         `ropblock` selects the abstract-gadget backward search instead.
@@ -244,11 +240,11 @@ class Architecture(ABC):
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
                                            accept_candidate=accept_candidate)
             return
-        for vaddr, raw, decodes in galileo_scan(
-                opcodes, base_vaddr, terminations, depth, self.alignment, disasm,
-                is_valid_gadget, accept_match=accept_match,
-                accept_candidate=accept_candidate):
-            yield vaddr, raw, decodes, None
+        yield from galileo_scan(
+            opcodes, base_vaddr, terminations, depth, self.alignment, disasm,
+            is_valid_gadget, accept_match=accept_match,
+            accept_candidate=accept_candidate,
+            restores_return_address=self.restores_return_address)
 
     @property
     @abstractmethod
@@ -269,12 +265,13 @@ class Architecture(ABC):
         pass
 
     @property
+    @abstractmethod
     def alignment(self) -> int:
         ''' Minimum instruction alignment in bytes. Gadgets may only start (and
             terminate) at addresses that are a multiple of this value. x86 is
             byte-aligned (1); RISC-V is 4-byte aligned, or 2-byte when the
             compressed (C) extension is present. '''
-        return 1
+        pass
 
     @property
     @abstractmethod
@@ -332,18 +329,6 @@ class Architecture(ABC):
         """
         return False
 
-    def is_frame_prefix(self, insn) -> bool:
-        """
-        Whether `insn` may appear in a gadget's frame prologue -- the leading
-        run of instructions that an operation is allowed to follow. When
-        matching an operation, this prologue is skipped, so the operation's
-        first instruction must be the first instruction after it (position 0
-        when the prologue is empty). Default: no prologue (the operation must be
-        the gadget's first instruction). RISC-V overrides this to allow the ra
-        restore that frames a real ROP gadget.
-        """
-        return False
-
     def is_return(self, insn) -> bool:
         """
         Whether `insn` returns control the way a ROP gadget's tail does (x86
@@ -370,18 +355,6 @@ class Architecture(ABC):
             return False
         return (self.normalize_reg(insn.reg_name(ops[0].reg))
                 == self.normalize_reg(self.sp))
-
-    def is_frame_instruction(self, insn) -> bool:
-        """
-        Whether `insn` is a *position-independent* framing instruction -- a frame
-        prologue prefix, a return, or a PC-writing terminator.
-        Marks the prologue/epilogue of a gadget: dimmed in the gadget view, and
-        (for an abstract gadget) skipped by operation matching. The data-flow
-        prologue -- the stack load of the terminator's branch register -- is
-        marked separately by the search, which knows that register.
-        """
-        return (self.is_frame_prefix(insn) or self.is_return(insn)
-                or self.is_pc_reg_write(insn))
 
     def is_pc_reg_write(self, insn) -> bool:
         """
@@ -413,11 +386,14 @@ class Architecture(ABC):
         """
         return False
 
-    def is_frame_load(self, insn) -> bool:
+    def restores_return_address(self, insn) -> bool:
         """
         Whether `insn` establishes the gadget's return frame by restoring the
-        return target from the stack (e.g. RISC-V `ld ra, off(sp)`). The framed
-        scan emits a return gadget only once its run covers one. Default: none.
+        return target from the stack (e.g. RISC-V `ld ra, off(sp)`, AArch64
+        `ldp x29, x30, [sp], #16`). The framed aligned scan emits a return gadget
+        only once its run covers one, and the scan marks it in the frame mask it
+        builds inline. Default: none (x86 -- `ret` pops the program counter
+        straight off the stack, no restore prologue).
         """
         return False
 

@@ -61,12 +61,16 @@ class Binary:
         else:
             raise BinaryException(f'{self.filename}: Format file not supported')
 
-    def describe(self):
+    def describe(self, ropblock=False, framed=True):
         '''
         @returns a dict of human-readable metadata about the binary (format,
         architecture, pointer width, instruction alignment, executable
         sections) for verbose reporting. Format loaders may contribute extra
         fields (entry point, image base, ...) via an optional get_info().
+
+        `ropblock`/`framed` mirror the runtime search flags so the reported
+        `algorithm` names the search actually run, not just a fixed default
+        (see Architecture.scan_name).
         '''
         arch = self.get_arch()
         info = {
@@ -76,7 +80,7 @@ class Binary:
             'arch': arch.name,
             'bits': arch.address_size * 8,
             'alignment': arch.alignment,
-            'algorithm': arch.scan_name,
+            'algorithm': arch.scan_name(ropblock=ropblock, framed=framed),
             'sections': [
                 {'name': s.get('name'), 'vaddr': s['vaddr'],
                  'size': len(s['opcodes'])}

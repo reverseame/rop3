@@ -19,10 +19,12 @@ import capstone
 import pytest
 
 import rop3.gadfinder as gadfinder
+from rop3 import Rop3
 from rop3.archs.riscv_arch import RISCV_Architecture
 from rop3.binaries.elf import ELF
 
-from conftest import build_minimal_elf, EM_RISCV, EF_RISCV_RVC, ET_DYN, make_operation
+from conftest import (build_minimal_elf, EM_RISCV, EF_RISCV_RVC, ET_DYN,
+                      make_operation, scan_frame)
 
 # jalr x0, 0(ra)  == ret            (0x00008067, little-endian)
 RET = b'\x67\x80\x00\x00'
@@ -34,6 +36,16 @@ MV_A0_A1 = b'\x13\x85\x05\x00'
 LD_RA_SP = b'\x83\x30\x81\x00'
 # c.ldsp ra, 8(sp)  -- compressed ra restore (0x60a2)
 C_LDSP_RA = b'\xa2\x60'
+# ld a5, 8(sp)  -- stack-load of a5 (0x00813783)
+LD_A5_SP = bytes.fromhex('83378100')
+# jr a5    == jalr x0, 0(a5)  -- indirect jump through a5 (0x00078067)
+JR_A5 = bytes.fromhex('67800700')
+# c.jr a5  -- compressed indirect jump through a5 (0x8782)
+C_JR_A5 = bytes.fromhex('8287')
+# jalr a5  == jalr ra, 0(a5)  -- indirect CALL (links ra); not a return
+JALR_A5 = bytes.fromhex('e7800700')
+# c.jalr ra  -- compressed indirect CALL; not a return (0x9082)
+C_JALR_RA = bytes.fromhex('8290')
 
 pytestmark = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
                                 reason='capstone build without RISC-V support')
@@ -160,18 +172,20 @@ def test_riscv_stack_cleanup_is_not_frame():
     ''' A constant stack-pointer cleanup (`c.addi16sp sp, imm`) is a stack pivot
         (is_stack_pivot) but not a framing instruction: control returns through
         `ra`, not the stack pointer, so the adjustment is a meaningful side
-        effect, not plumbing. It stays undimmed and matchable (is_frame_instruction
-        is False). The ra restore and terminator are framed. Regression:
-        c.addi16sp was wrongly dimmed / masked. '''
+        effect, not plumbing. It is neither a frame prefix nor a return, so a
+        scan leaves it undimmed and matchable. The ra restore (frame prefix) and
+        terminator (return) are framed. Regression: c.addi16sp was wrongly
+        dimmed / masked. '''
     arch = RISCV_Architecture(compressed=True)
     addi16sp = _disasm(b'\x25\x61', compressed=True)[0]        # c.addi16sp sp, 0x60
     assert arch.is_stack_pivot(addi16sp) is True
-    assert arch.is_frame_instruction(addi16sp) is False        # real op, not framing
+    assert arch.restores_return_address(addi16sp) is False             # real op, not framing
+    assert arch.is_return(addi16sp) is False
 
     ld_ra = _disasm(b'\xf2\x60', compressed=True)[0]           # c.ldsp ra, ...
     ret = _disasm(b'\x82\x80', compressed=True)[0]             # c.jr ra
-    assert arch.is_frame_instruction(ld_ra) is True            # prologue: framed
-    assert arch.is_frame_instruction(ret) is True              # terminator: framed
+    assert arch.restores_return_address(ld_ra) is True                 # prologue: framed
+    assert arch.is_return(ret) is True                         # terminator: framed
 
 
 def test_riscv_written_registers_from_encoding():
@@ -202,8 +216,10 @@ def test_riscv_written_registers_from_encoding():
     md.detail = True
 
     def gadget(code):
+        decodes = list(md.disasm(code, 0x1000))
         return Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
-                      vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
+                      vaddr=0x1000, decodes=decodes, bytes=code,
+                      frame=scan_frame(decodes))
 
     # (1) An immediate operand (addi a0, a0, 8) must not leak into the src
     # register set or slot_op2, and an immediate query must not match a register
@@ -251,8 +267,10 @@ def _riscv_op_matches(op, operands, body):
     md = capstone.Cs(capstone.CS_ARCH_RISCV, mode)
     md.detail = True
     code = LD_RA_SP + body + RET
+    decodes = list(md.disasm(code, 0x1000))
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
-                    vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
+                    vaddr=0x1000, decodes=decodes, bytes=code,
+                    frame=scan_frame(decodes))
     return bool(make_operation(op, operands).filter_gadgets([gadget]))
 
 
@@ -317,6 +335,36 @@ def test_riscv_roplang_patterns_match(op, operands, body):
     assert _riscv_op_matches(op, operands, body)
 
 
+def test_riscv_junk_before_prologue_suppresses_in_frame_match():
+    ''' Junk ahead of the prologue is never allowed. An operation that sits
+        inside the restore frame (here `c.addi16sp sp, 0x20` -> add(sp, 32))
+        matches when the gadget opens with the `ld ra` prologue, but NOT when a
+        non-framing instruction precedes it -- that leading instruction would
+        execute unaccounted-for. The junk-free window (opening at the prologue)
+        is emitted separately by the scan, so coverage is not lost. '''
+    import capstone
+    from rop3.arch import arch_singleton
+    from rop3.gadget import Gadget
+    arch_singleton.reset()
+    arch_singleton.initialize(RISCV_Architecture(compressed=True))
+    mode = capstone.CS_MODE_RISCV64 | capstone.CS_MODE_RISCVC
+    md = capstone.Cs(capstone.CS_ARCH_RISCV, mode)
+    md.detail = True
+
+    def gadget(code):
+        decodes = list(md.disasm(code, 0x1000))
+        return Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
+                      vaddr=0x1000, decodes=decodes, bytes=code,
+                      frame=scan_frame(decodes))
+
+    addi16sp = b'\x05\x61'                              # c.addi16sp sp, 0x20
+    clean = gadget(LD_RA_SP + addi16sp + RET)          # ld ra ; c.addi16sp ; ret
+    junked = gadget(MV_A0_A1 + LD_RA_SP + addi16sp + RET)  # mv a0,a1 ; ld ra ; c.addi16sp ; ret
+    add_sp = make_operation('add', ['sp', '32'])
+    assert add_sp.filter_gadgets([clean])              # prologue-first: matches
+    assert add_sp.filter_gadgets([junked]) == []       # pre-prologue junk: rejected
+
+
 def test_riscv_lc_realization_set():
     ''' Complete set of RISC-V `lc` single-gadget realizations: the plain
         `ld`/`lw` (rd, [sp]) loads and the compressed `c.ldsp`/`c.lwsp` stack
@@ -347,8 +395,10 @@ def test_riscv_lc_enumerates_every_pop_in_frame():
     # ld ra ; ld s0 ; c.ldsp a0 ; ld s7 ; ret  -- mixes a compressed pop
     code = (LD_RA_SP + _i(0x03, 3, 8, 2, 8) + b'\x02\x65'
             + _i(0x03, 3, 23, 2, 24) + RET)
+    decodes = list(md.disasm(code, 0x1000))
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_RISCV, mode=mode,
-                    vaddr=0x1000, decodes=list(md.disasm(code, 0x1000)), bytes=code)
+                    vaddr=0x1000, decodes=decodes, bytes=code,
+                    frame=scan_frame(decodes))
 
     matched = make_operation('lc').filter_gadgets([gadget])
     dsts = sorted(next(iter(g.dst)) for g in matched)
@@ -427,3 +477,65 @@ def test_gadfinder_compressed_2byte_ra_restore(tmp_path):
     gadgets = finder.find([path])
     assert {g.text_repr for g in gadgets} == {'c.ldsp ra, 8(sp) ; c.jr ra'}
     assert all(g.vaddr % 2 == 0 for g in gadgets)
+
+
+# --- ropblock (abstract-gadget) return strategies -------------------------
+# The abstract-gadget search frames a gadget by its *return strategy*: the tail
+# writes PC from a register the gadget first loads off the stack. On RISC-V the
+# non-trivial terminators are `ret` (jalr x0, 0(ra)), the pure indirect jumps
+# `jr`/`c.jr`, and the compressed return `c.jr ra`; the linking `jalr`/`c.jalr`
+# are calls and are not return strategies.
+
+def test_riscv_ropblock_terminators_and_branch_regs():
+    arch = RISCV_Architecture(compressed=True)
+    one = lambda code: _disasm(code, compressed=True)[0]
+
+    ret, c_ret = one(RET), one(C_RET)          # ret / c.jr ra
+    jr_a5, c_jr_a5 = one(JR_A5), one(C_JR_A5)  # jr a5 / c.jr a5
+    jalr, c_jalr = one(JALR_A5), one(C_JALR_RA)
+
+    # `ret`/`c.jr ra` return through ra; `jr`/`c.jr` through the named register.
+    assert arch.is_pc_reg_write(ret) and arch.ropblock_branch_reg(ret) == 'ra'
+    assert arch.is_pc_reg_write(c_ret) and arch.ropblock_branch_reg(c_ret) == 'ra'
+    assert arch.is_pc_reg_write(jr_a5) and arch.ropblock_branch_reg(jr_a5) == 'a5'
+    assert arch.is_pc_reg_write(c_jr_a5) and arch.ropblock_branch_reg(c_jr_a5) == 'a5'
+    # `jalr`/`c.jalr` link ra (they are calls): excluded from ropblock terminators.
+    assert not arch.is_pc_reg_write(jalr)
+    assert not arch.is_pc_reg_write(c_jalr)
+
+
+def test_riscv_ropblock_ret_reloads_ra(tmp_path):
+    # `ret` returns through ra, so a ropblock `ret` gadget must reload ra from the
+    # stack: ld ra, 8(sp) ; ... ; ret.
+    path = _elf_path(tmp_path, LD_RA_SP + MV_A0_A1 + RET)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ld ra, 8(sp) ; mv a0, a1 ; ret' in reprs
+
+
+def test_riscv_ropblock_compressed_cjr_ra(tmp_path):
+    # The compressed return c.jr ra, framed by a compressed ra restore.
+    path = _elf_path(tmp_path, C_LDSP_RA + MV_A0_A1 + C_RET, e_flags=EF_RISCV_RVC)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'c.ldsp ra, 8(sp) ; mv a0, a1 ; c.jr ra' in reprs
+
+
+def test_riscv_ropblock_indirect_jump_through_stack_loaded_reg(tmp_path):
+    # ld a5, 8(sp) ; ... ; jr a5 -- the tail jumps through a5, loaded from the
+    # stack and never clobbered: a register-return ropblock gadget.
+    path = _elf_path(tmp_path, LD_A5_SP + MV_A0_A1 + JR_A5)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ld a5, 8(sp) ; mv a0, a1 ; jr a5' in reprs
+
+
+def test_riscv_ropblock_needs_a_stack_prologue_for_the_branch_reg(tmp_path):
+    # `jr a5` with no prior stack load of a5 has an attacker-uncontrolled target:
+    # not a ropblock gadget.
+    path = _elf_path(tmp_path, MV_A0_A1 + JR_A5)
+    assert Rop3(path, depth=16, ropblock=True).gadgets() == []
+
+
+def test_riscv_ropblock_excludes_call(tmp_path):
+    # Even with ra stack-loaded, `c.jalr ra` is a call (it links ra), not a return
+    # strategy, so it frames nothing.
+    path = _elf_path(tmp_path, C_LDSP_RA + C_JALR_RA, e_flags=EF_RISCV_RVC)
+    assert Rop3(path, depth=16, ropblock=True).gadgets() == []
