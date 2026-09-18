@@ -45,6 +45,7 @@ ALLOW_REG_ALIASES = 256
 KEEP_CONTRADICTORY = 512
 UNFRAMED = 1024
 ROPBLOCK = 2048
+ALLOW_SEGMENT_OVERRIDE = 4096
 
 ''' Terminator canary bytes to avoid in gadget addresses by default:
     0x00 (string terminator for strcpy() and alike), 0x0a and 0x0d (line
@@ -464,6 +465,9 @@ class GadFinder:
     def _allow_complex_mem(self) -> bool:
         return bool(self.flags & ALLOW_COMPLEX_MEM)
 
+    def _allow_segment_override(self) -> bool:
+        return bool(self.flags & ALLOW_SEGMENT_OVERRIDE)
+
     def _keep_duplicates(self) -> bool:
         return bool(self.flags & KEEP_DUPLICATES)
 
@@ -510,6 +514,9 @@ class GadFinder:
 
         if ret and not self._allow_complex_mem():
             if arch.first_insn_has_complex_mem(decodes):
+                return False
+        if ret and not self._allow_segment_override():
+            if arch.first_insn_has_segment_override(decodes):
                 return False
 
         return ret

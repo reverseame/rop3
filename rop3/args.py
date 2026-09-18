@@ -40,6 +40,7 @@ class ArgumentParser:
         self.argparser.add_argument('--reg-aliases', action='store_true', default=False, help='allow sub-register aliases (al, ax, eax, ...) to substitute their full register when matching operations; they are then treated as the same register for chain assignment and side effects')
         self.argparser.add_argument('--allow-undeterministic-gadgets', action='store_true', default=False, help='allow gadgets with conditional branches (e.g. jne) as intermediate instructions')
         self.argparser.add_argument('--allow-complex-memory-ops', action='store_true', default=False, help='allow gadgets whose first instruction uses complex memory addressing (e.g. [r1*r2], [r1+r2*s+disp])')
+        self.argparser.add_argument('--allow-segment-override', action='store_true', default=False, help='allow gadgets whose first instruction uses a segment override (e.g. gs:[reg], fs:[reg])')
         self.argparser.add_argument('--keep-contradictory', action='store_true', default=False, help="keep 'contradictory' operation gadgets whose destination register is overwritten before the ret (e.g. `add rax, rbx ; mov rax, rcx ; ret`); by default these are filtered out of --op results")
         self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
@@ -117,6 +118,8 @@ class ArgumentParser:
             flags |= gadfinder.ALLOW_UNDETERMINISTIC
         if args.allow_complex_memory_ops:
             flags |= gadfinder.ALLOW_COMPLEX_MEM
+        if args.allow_segment_override:
+            flags |= gadfinder.ALLOW_SEGMENT_OVERRIDE
         if not args.keep_canary_address:
             flags |= gadfinder.AVOID_CANARY
         if args.ret_imm:

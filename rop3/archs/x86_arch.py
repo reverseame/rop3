@@ -189,6 +189,13 @@ class X86_Architecture(Architecture):
                 return True
         return False
 
+    def first_insn_has_segment_override(self, decodes) -> bool:
+        first = decodes[0]
+        for op in first.operands:
+            if op.type == x86_const.X86_OP_MEM and op.mem.segment != 0:
+                return True
+        return False
+
     def is_return(self, insn) -> bool:
         ''' An x86 gadget tail returns with a near or far return (ret/retf). '''
         return self.base_mnemonic(insn.mnemonic) in ('ret', 'retf')

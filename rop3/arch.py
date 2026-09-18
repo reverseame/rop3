@@ -328,6 +328,13 @@ class Architecture(ABC):
         """
         return False
 
+    def first_insn_has_segment_override(self, decodes) -> bool:
+        """
+        Returns True if the first instruction's memory operand uses a segment
+        override (e.g. gs:[ecx], fs:[eax]). Default: False
+        """
+        return False
+
     def is_return(self, insn) -> bool:
         """
         Whether `insn` returns control the way a ROP gadget's tail does (x86
