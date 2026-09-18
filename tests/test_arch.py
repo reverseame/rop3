@@ -129,6 +129,24 @@ def test_is_valid_rop_gadget_ret_imm_gating():
     assert arch.is_valid_rop_gadget(plain)
 
 
+def test_first_insn_has_segment_override_x86():
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32); md.detail = True
+    arch = X86_Architecture()
+    plain = list(md.disasm(b'\x89\x01\xc3', 0))          # mov [ecx], eax ; ret
+    segment = list(md.disasm(b'\x65\x89\x01\xc3', 0))    # mov gs:[ecx], eax ; ret
+    assert not arch.first_insn_has_segment_override(plain)
+    assert arch.first_insn_has_segment_override(segment)
+
+
+def test_first_insn_has_segment_override_x64():
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
+    arch = X64_Architecture()
+    plain = list(md.disasm(b'\x89\x01\xc3', 0))          # mov [rcx], eax ; ret
+    segment = list(md.disasm(b'\x65\x89\x01\xc3', 0))    # mov gs:[rcx], eax ; ret
+    assert not arch.first_insn_has_segment_override(plain)
+    assert arch.first_insn_has_segment_override(segment)
+
+
 def test_ret_imm_anywhere_gated():
     ''' A `ret <imm>` returns at that point. As the gadget's terminator it is a
         ret-imm gadget, gated by allow_ret_imm (see
