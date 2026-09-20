@@ -24,13 +24,18 @@ from rop3.archs.x86_arch import X64_Architecture
 from rop3.archs.aarch64_arch import AArch64_Architecture
 from rop3.archs.riscv_arch import RISCV_Architecture
 
-from conftest import make_gadget
+from conftest import make_gadget, build_minimal_elf, EM_X86_64, ET_DYN
 
 
 def _op(op, dst=None, src=None):
     ''' A requested chain step. Operand slots are the positional op1/op2
         (op1 is the destination, op2 the source). '''
     return {'data': f'{op}({dst or ""},{src or ""})', 'op': op, 'op1': dst, 'op2': src}
+
+
+def _free(name):
+    ''' A `free(NAME)` directive step, as RopChain._parse_free_line builds it. '''
+    return {'data': f'free({name})', 'op': 'free', 'free': name}
 
 
 def test_search_simple_concrete_chain(x64):
@@ -203,6 +208,164 @@ def test_reg_aliases_unify_across_chain_steps(x64):
         assert [g.text_repr for g in results[0]] == ['pop ax ; ret', 'neg rax ; ret']
     finally:
         arch_singleton.allow_reg_aliases = False
+
+
+# --- free(NAME) directive --------------------------------------------------
+
+def test_free_decouples_name_reuse_new_engine(x64):
+    '''
+    Two structurally different steps reuse the same generic names (REG1,
+    REG2): a `mov` step only has a `mov rax, rbx` gadget (so REG1=rax,
+    REG2=rbx), and an `xor` step only has a `xor rcx, rdx` gadget (so
+    REG1=rcx, REG2=rdx). Without `free`, REG1/REG2 are one identity for the
+    whole chain: {rax} intersected with {rcx} is empty, so no chain exists
+    (both engines). `free(REG1); free(REG2)` between the steps lets the
+    default (order-aware) engine resolve each occurrence independently.
+    '''
+    gadgets = [
+        make_gadget(b'\x48\x89\xd8\xc3', 0x1000),   # mov rax, rbx ; ret
+        make_gadget(b'\x48\x31\xd1\xc3', 0x1010),   # xor rcx, rdx ; ret
+    ]
+    without_free = [
+        _op('mov', dst='REG1', src='REG2'),
+        _op('xor', dst='REG1', src='REG2'),
+    ]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(gadgets, without_free))
+
+    with_free = [
+        _op('mov', dst='REG1', src='REG2'),
+        _free('REG1'),
+        _free('REG2'),
+        _op('xor', dst='REG1', src='REG2'),
+    ]
+    results = list(RopChain(GadFinder()).search(gadgets, with_free))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['mov rax, rbx ; ret', 'xor rcx, rdx ; ret']
+
+
+def test_legacy_free_rename_decouples(x64):
+    ''' The same scenario as test_free_decouples_name_reuse_new_engine, but
+        with legacy=True: free is only approximated by a parse-time rename of
+        the second block's names, which is enough to decouple this case too. '''
+    gadgets = [
+        make_gadget(b'\x48\x89\xd8\xc3', 0x1000),   # mov rax, rbx ; ret
+        make_gadget(b'\x48\x31\xd1\xc3', 0x1010),   # xor rcx, rdx ; ret
+    ]
+    chain = [
+        _op('mov', dst='REG1', src='REG2'),
+        _free('REG1'),
+        _free('REG2'),
+        _op('xor', dst='REG1', src='REG2'),
+    ]
+    results = list(RopChain(GadFinder()).search(gadgets, chain, legacy=True))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['mov rax, rbx ; ret', 'xor rcx, rdx ; ret']
+
+
+def test_rewrite_legacy_frees_renames_each_epoch():
+    ''' Direct unit test of the rename pass: a name freed and reused twice
+        gets three distinct identities (original, and one fresh name per
+        free), and identical names within one epoch still share it. '''
+    rc = RopChain(GadFinder())
+    steps = [
+        _op('mov', dst='REG1', src='REG2'),
+        _free('REG1'),
+        _op('mov', dst='REG1', src='REG2'),
+        _free('REG1'),
+        _op('mov', dst='REG1', src='REG2'),
+    ]
+    rewritten = rc._rewrite_legacy_frees(steps)
+    assert len(rewritten) == 3
+    assert all('free' not in step for step in rewritten)
+    names = [step['op1'] for step in rewritten]
+    assert names[0] == 'REG1'                 # first epoch: untouched
+    assert len({names[0], names[1], names[2]}) == 3   # three distinct identities
+    # within each rewritten step, op1/op2 still refer to each other (REG2 was
+    # never freed, so it always resolves to itself)
+    assert all(step['op2'] == 'REG2' for step in rewritten)
+
+
+def test_free_with_no_frees_matches_no_free_legacy_and_new(x64):
+    ''' Compatibility requirement: with no free() anywhere in the file, the
+        default engine and --legacy-ropchain must agree with each other (and
+        with today's behavior) on ordinary generic-register chains. '''
+    gadgets = [
+        make_gadget(b'\x48\x89\xd8\xc3', 0x1000),   # mov rax, rbx ; ret
+        make_gadget(b'\x48\x89\xd1\xc3', 0x1010),   # mov rcx, rdx ; ret
+    ]
+    chain = [_op('mov', dst='REG1', src='REG2')]
+    new_results = list(RopChain(GadFinder()).search(gadgets, chain))
+    legacy_results = list(RopChain(GadFinder()).search(gadgets, chain, legacy=True))
+    assert new_results
+    assert ([g.text_repr for g in new_results[0]] ==
+            [g.text_repr for g in legacy_results[0]])
+    assert {tuple(g.text_repr for g in r) for r in new_results} == \
+           {tuple(g.text_repr for g in r) for r in legacy_results}
+
+
+def test_free_same_step_both_generic_pairing_still_enforced(x64):
+    ''' A step with both operands generic, freed and reused: each block must
+        only resolve to a real (op1, op2) gadget pair, never a cross-pair
+        mismatch (e.g. rax paired with rdx, which no gadget realizes). '''
+    gadgets = [
+        make_gadget(b'\x48\x89\xd8\xc3', 0x1000),   # mov rax, rbx ; ret
+        make_gadget(b'\x48\x89\xd1\xc3', 0x1010),   # mov rcx, rdx ; ret
+    ]
+    chain = [
+        _op('mov', dst='REG1', src='REG2'),
+        _free('REG1'),
+        _free('REG2'),
+        _op('mov', dst='REG1', src='REG2'),
+    ]
+    results = list(RopChain(GadFinder()).search(gadgets, chain))
+    assert results
+    valid_pairs = {'mov rax, rbx ; ret', 'mov rcx, rdx ; ret'}
+    for result in results:
+        assert len(result) == 2
+        assert all(g.text_repr in valid_pairs for g in result)
+    assert len(results) == 4   # 2 independent choices per block
+
+
+@pytest.mark.parametrize('bad_free, warning_snippet', [
+    ('rax', 'only a generic register-slot name'),
+    ('REG9', 'was never used before this point'),
+])
+def test_free_invalid_target_warns_and_continues(x64, monkeypatch, bad_free, warning_snippet):
+    warnings = []
+    monkeypatch.setattr(ropchain_mod.debug, 'warning', lambda msg: warnings.append(msg))
+    gadgets = [make_gadget(b'\x58\xc3', 0x1000)]   # pop rax ; ret
+    chain = [_free(bad_free), _op('lc', dst='rax')]
+    results = list(RopChain(GadFinder()).search(gadgets, chain))
+    assert results
+    assert any(warning_snippet in w for w in warnings)
+
+
+def test_free_double_free_without_use_warns(x64, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(ropchain_mod.debug, 'warning', lambda msg: warnings.append(msg))
+    gadgets = [make_gadget(b'\x58\xc3', 0x1000)]   # pop rax ; ret
+    chain = [_op('lc', dst='REG1'), _free('REG1'), _free('REG1')]
+    results = list(RopChain(GadFinder()).search(gadgets, chain))
+    assert results
+    assert any('already freed with no intervening use' in w for w in warnings)
+
+
+def test_parse_free_line(x64, tmp_path):
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('free(REG1)  ; release REG1\n')
+    parsed = RopChain(GadFinder())._parse_ropfile(str(ropfile))
+    assert len(parsed) == 1
+    step = parsed[0]
+    assert step['op'] == 'free'
+    assert step['free'] == 'REG1'
+    assert 'operands' not in step and 'op1' not in step and 'op2' not in step and 'defn' not in step
+
+
+@pytest.mark.parametrize('line', ['free()', 'free(REG1, REG2)'])
+def test_parse_free_line_malformed_raises(line):
+    with pytest.raises(ropchain_mod.FreeDirectiveError):
+        RopChain(GadFinder())._parse_free_line(line, [] if line == 'free()' else ['REG1', 'REG2'])
 
 
 # Full expansion of every compound (compose:) operation, per architecture, as
@@ -479,3 +642,121 @@ def test_parse_raw_gadget_malformed_raises(x64, line, reason):
     with pytest.raises(ropchain_mod.RawGadgetError) as exc:
         RopChain(GadFinder())._parse_raw_line(line)
     assert reason in str(exc.value)
+
+
+# --- Explicit no-terminator (noret) gadget definitions ---------------------
+
+def test_parse_noret_gadget_single_instruction(x64, tmp_path):
+    ''' A noret gadget line parses exactly like raw(), but its OperationDef
+        is marked no_terminator so it never needs a ret/branch terminator. '''
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('noret([syscall], [], [], [rdi, rax])\n')
+    parsed = RopChain(GadFinder())._parse_ropfile(str(ropfile))
+    assert len(parsed) == 1
+    step = parsed[0]
+    assert step['op'] == 'syscall'
+    defn = step['defn']
+    assert defn.no_terminator is True
+    assert defn.literal_gadgets is None
+    assert defn.dst_roles == [] and defn.src_roles == ['rdi', 'rax']
+    insns = [str(i) for i in defn.realizations[0].links[0].items]
+    assert insns == ['syscall ']
+
+
+def test_search_noret_gadget_matches_gadget_with_no_terminator(x64):
+    ''' Unlike raw(), a noret gadget matches a candidate gadget that does not
+        end in a ret/branch -- proving the matching layer itself never
+        required a terminator (only the normal backward scan does): neither
+        `syscall` nor `nop` is a valid ROP/JOP terminator, so GadFinder.find()
+        could never have produced this candidate itself. '''
+    gadgets = [make_gadget(b'\x0f\x05\x90', 0x1000)]   # syscall ; nop -- no ret
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_noret_line('noret([syscall], [], [], [])')]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    assert results[0][0].op == 'syscall'
+
+
+def test_search_noret_gadget_no_match_raises(x64):
+    gadgets = [make_gadget(b'\x90\xc3', 0x1000)]   # nop ; ret (no syscall)
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_noret_line('noret([syscall], [], [], [])')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(rc.search(gadgets, chain, symbolic=False))
+
+
+def test_noret_position_last_real_step_is_accepted(x64):
+    rc = RopChain(GadFinder())
+    steps = [_op('lc', dst='rdi'), rc._parse_noret_line('noret([syscall], [], [], [])')]
+    RopChain._check_noret_position(steps)   # must not raise
+
+
+def test_noret_position_followed_only_by_free_is_accepted(x64):
+    ''' free(...) directives never correspond to a real gadget, so a
+        noret(...) followed only by free(...) is still "last". '''
+    rc = RopChain(GadFinder())
+    steps = [
+        _op('lc', dst='rdi'),
+        rc._parse_noret_line('noret([syscall], [], [], [])'),
+        _free('rdi'),
+    ]
+    RopChain._check_noret_position(steps)   # must not raise
+
+
+def test_noret_position_before_another_step_raises(x64):
+    rc = RopChain(GadFinder())
+    steps = [rc._parse_noret_line('noret([syscall], [], [], [])'), _op('lc', dst='rdi')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        RopChain._check_noret_position(steps)
+
+
+def test_search_rejects_misplaced_noret_step(x64):
+    ''' The same check is enforced end-to-end from search(), before assembly
+        even starts -- a misplaced noret(...) never silently builds a chain. '''
+    gadgets = [
+        make_gadget(b'\x5f\xc3', 0x1000),   # pop rdi ; ret
+        make_gadget(b'\x0f\x05', 0x1010),   # syscall
+    ]
+    rc = RopChain(GadFinder())
+    chain = [rc._parse_noret_line('noret([syscall], [], [], [])'), _op('lc', dst='rdi')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(rc.search(gadgets, chain, symbolic=False))
+
+
+def test_noret_gadget_found_via_literal_scan_not_normal_gadget_scan(tmp_path):
+    '''
+    End-to-end: a bare `syscall` with nothing reachable after it (no ret
+    anywhere in the section) is structurally invisible to the normal backward
+    gadget scan -- GadFinder.find() never emits it as a candidate at all, so
+    raw(...) could never match it either. noret(...) finds it anyway via its
+    own direct literal scan (GadFinder.find_literal_gadgets), wired in through
+    Rop3.ropchain -> RopChain.search_from_gadgets(..., binaries=...).
+    '''
+    from rop3 import Rop3
+
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, b'\x0f\x05', 0x1000, ET_DYN))
+
+    r3 = Rop3(str(path))
+    assert not any('syscall' in g.text_repr for g in r3.gadgets())
+
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('noret([syscall], [], [], [])\n')
+    results = list(r3.ropchain(str(ropfile)))
+    assert results
+    assert results[0][0].text_repr == 'syscall'
+    assert results[0][0].vaddr == 0x1000
+
+
+def test_find_literal_gadgets_tries_unintended_offsets_on_x86(tmp_path):
+    ''' The `noret(...)` scan tries every byte offset on x86 (alignment 1),
+        not just intended instruction boundaries -- so a `syscall` hiding
+        inside another instruction's encoding is still found. '''
+    text = b'\xb8\x0f\x05\x00\x00\xc3'   # mov eax, 0x50f ; ret (syscall @ +1)
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, text, 0x1000, ET_DYN))
+
+    finder = GadFinder()
+    defn = RopChain(finder)._parse_noret_line('noret([syscall], [], [], [])')['defn']
+    found = finder.find_literal_gadgets([str(path)], defn)
+    assert any(g.vaddr == 0x1001 and g.text_repr == 'syscall' for g in found)

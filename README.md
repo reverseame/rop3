@@ -12,7 +12,7 @@ rop3 is a tool developed in [Python](https://www.python.org/downloads/) and it r
 - **Gadget search**: ROP, JOP and RETF gadgets, with controls for search depth (`--depth`, architecture-specific by default), `ret <imm>`/`retf <imm>` terminators (`--ret-imm`, off by default), undeterministic gadgets (`--allow-undeterministic-gadgets`) and complex memory operands (`--allow-complex-memory-ops`).
 - **Framed gadget search** (`--frame`/`--no-frame`): on AArch64 and RISC-V, where the return address lives in a register, framed search (on by default) keeps only gadgets that restore it from the stack — the ones actually reachable in a ROP chain. It has no effect on x86, where `ret` already consumes the stack.
 - **Abstract-gadget search** (`--ropblock`): treats a gadget as *any run whose tail writes the program counter with a stack-derived value*, not just `ret`. It finds register returns such as `pop rax ; … ; jmp rax` (x86) and `ldr x9,[sp] ; … ; br x9` (AArch64), accepting them only when the branch register is loaded from the stack and not clobbered before the branch (x86 `ret` is the degenerate case). Applies to all architectures and runs single-threaded.
-- **Operations and ROP chains**: search for high-level operations with `--op` and **positional, n-ary operands** (`--operands op1 op2 op3`), and build ROP chains from a ROPLang file (`--ropchain`, `--exhaustive`), including multi-step composite operations. `--keep-contradictory` disables the filtering of gadgets whose destination is overwritten before the terminator; `--reg-aliases` lets sub-registers (`al`, `ax`, `eax`) stand in for their full register.
+- **Operations and ROP chains**: search for high-level operations with `--op` and **positional, n-ary operands** (`--operands op1 op2 op3`), and build ROP chains from a ROPLang file (`--ropchain`, `--exhaustive`), including multi-step composite operations. `--keep-contradictory` disables the filtering of gadgets whose destination is overwritten before the terminator; `--reg-aliases` lets sub-registers (`al`, `ax`, `eax`) stand in for their full register. `free(NAME)` releases a generic register-slot name for independent reuse later in the file; `--legacy-ropchain` restores the pre-`free` global name resolution.
 - **Relocation**: rebase any binary (ELF/PE/Mach-O) with `--base`, one address per binary.
 - **Bad-char filtering**: avoid bytes in the gadget address (`--badchar`) and/or in the gadget opcode bytes (`--badchar-bytes`). By default, duplicate gadgets prefer canary-free addresses (`0x00`, `0x0a`, `0x0d`, `0xff`); disable with `--keep-canary-address`.
 - **Symbol annotation**: with `--symbols`, each gadget is tagged with the nearest symbol (`name+offset`) when the binary is not stripped.
@@ -70,15 +70,17 @@ $ python rop3.py --binary /bin/ls --interactive         # REPL, scans once
 usage: rop3.py [-h] [-v] [--depth <bytes>] [--all] [--rop | --no-rop]
                [--retf | --no-retf] [--ret-imm | --no-ret-imm]
                [--jop | --no-jop] [--frame | --no-frame] [--ropblock]
-               [--reg-aliases]
-               [--allow-undeterministic-gadgets] [--allow-complex-memory-ops]
+               [--reg-aliases] [--allow-undeterministic-gadgets]
+               [--allow-complex-memory-ops] [--allow-segment-override]
                [--keep-contradictory] [--verbose]
                [--binary <file> [<file> ...]] [--badchar <hex> [<hex> ...]]
                [--badchar-bytes <hex> [<hex> ...]] [--keep-canary-address]
                [--base <hex> [<hex> ...]] [--arch <name>] [--symbols]
                [--output {text,json,csv}] [--tuple] [--op <op>]
-               [--operands <reg> [<reg> ...]] [--ropchain <file>]
-               [--exhaustive | --no-exhaustive] [--interactive] [--jobs <n>]
+               [--operands <reg> [<reg> ...]] [--dst <reg>] [--src <reg>]
+               [--ropchain <file>] [--exhaustive | --no-exhaustive]
+               [--legacy-ropchain | --no-legacy-ropchain]
+               [--symbolic | --no-symbolic] [--interactive] [--jobs <n>]
                [--cache] [--cache-dir <dir>]
 
 This tool allows you to search for gadgets, operations, and ROP chains using a
@@ -101,6 +103,8 @@ options:
                         allow gadgets with conditional branches (e.g. jne) as intermediate instructions
   --allow-complex-memory-ops
                         allow gadgets whose first instruction uses complex memory addressing (e.g. [r1*r2], [r1+r2*s+disp])
+  --allow-segment-override
+                        allow gadgets whose first instruction uses a segment override (e.g. gs:[reg], fs:[reg])
   --keep-contradictory  keep 'contradictory' operation gadgets whose destination register is overwritten before the ret (e.g. `add rax, rbx ; mov rax, rcx ; ret`); by default these are filtered out of --op results
   --verbose             show progress information (gadget counts, combinations)
   --binary <file> [<file> ...]
@@ -121,9 +125,15 @@ options:
   --op <op>             search for operation
   --operands <reg> [<reg> ...]
                         operation operands, positionally (op1 op2 op3 ...); e.g. --op mov --operands rdi rax
+  --dst <reg>           [legacy] destination operand; maps to op1 on its own, or op1 when --src is also given. Prefer --operands
+  --src <reg>           [legacy] source operand; maps to op1 on its own, or op2 when --dst is also given. Prefer --operands
   --ropchain <file>     plain text file with a ROP chain
   --exhaustive, --no-exhaustive
                         exhaustive search for ROP chains
+  --legacy-ropchain, --no-legacy-ropchain
+                        use the pre-`free` global register-slot resolution for --ropchain assembly (a generic name, e.g. REG1, is one identity for the whole file); free(NAME) is only approximated by a parse-time rename. Default: off (order-aware resolution, where free(NAME) truly releases NAME)
+  --symbolic, --no-symbolic
+                        validate each assembled --ropchain solution with a Triton-based concolic emulation pass (requires Triton; skipped, never fatal, if it's absent). Reports memory side effects, stack pivots, and reachability. Default: off
   --interactive         scan the binary once and drop into an interactive prompt
   --jobs <n>            number of worker processes for the gadget scan (default: 1)
   --cache               cache discovered gadgets on disk and reuse them on repeated runs over the same file and options
@@ -163,6 +173,21 @@ A raw gadget lists its instruction mnemonics, their operands, and the concrete r
 ```
 raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])   ; pop rdi ; pop rsi ; ret
 ```
+
+A generic register-slot name (`REGn`) is normally one identity for the whole file: every occurrence, anywhere, is forced to the same concrete register. `free(NAME)` releases that identity from that point on, so a later reuse of the same literal name (a common idiom when copy-pasting a block, e.g. `lc(REG1); lc(REG2); st(REG2, REG1)` twice) is resolved independently instead of being coupled to the earlier block:
+
+```
+lc(REG1)
+lc(REG2)
+st(REG2, REG1)
+free(REG1)
+free(REG2)
+lc(REG1)      ; a fresh, independent REG1 from here on
+lc(REG2)
+st(REG2, REG1)
+```
+
+`--legacy-ropchain` restores the pre-`free` behavior (one global identity per name for the whole file); under it, `free` is only approximated (a parse-time rename of later occurrences) rather than a true order-aware release.
 
 ### Interactive mode
 

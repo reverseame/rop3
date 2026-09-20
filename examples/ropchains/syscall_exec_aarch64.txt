@@ -1,6 +1,15 @@
 lc(REG1)
-mov(x0, REG1)
-lc(x1)
+lc(REG2)
+st(REG2, REG1)
+free(REG1)
+free(REG2)
+lc(REG1)
+lc(REG2)
+st(REG2, REG1)
+free(REG1)
+free(REG2)
 lc(x2)
-; raw([svc], [], [], [x0, x1, x2])
-
+lc(REG1)
+mov(x0, REG1)    ; x0 <- &path
+lc(x1)           ; x1 <- argv
+noret([mov, svc], [(x8, 0xdd), (0)], [], [x0, x1, x2])

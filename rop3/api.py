@@ -125,6 +125,13 @@ class Rop3:
             `operands` are positional: op1, op2, op3, ... '''
         return self._finder.find_op_from_gadgets(self.gadgets(), op, operands)
 
-    def ropchain(self, ropfile):
-        ''' Iterator over ROP chains satisfying the operations in `ropfile`. '''
-        return RopChain(self._finder).search_from_gadgets(self.gadgets(), ropfile)
+    def ropchain(self, ropfile, legacy=False, symbolic=False):
+        ''' Iterator over ROP chains satisfying the operations in `ropfile`.
+            `symbolic` enables the optional Triton-based concolic validation
+            pass on each assembled chain (off by default). `binaries`/`base`/
+            etc. are passed through so a `noret(...)` step (see
+            RopChain._parse_noret_line) can run its direct literal scan. '''
+        return RopChain(self._finder).search_from_gadgets(
+            self.gadgets(), ropfile, legacy=legacy, symbolic=symbolic,
+            binaries=self.binaries, base=self.base, badchars=self.badchars,
+            badchar_bytes=self.badchar_bytes, arch=self.arch)

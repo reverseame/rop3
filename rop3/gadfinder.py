@@ -184,18 +184,32 @@ class GadFinder:
         Resolve a parsed ROP-chain request into the gadgets that realize it.
 
         `steps` is the parsed request: a list of {'op', 'operands', 'data'}
-        dicts. Each step is bound and expanded into its alternative primitive
-        chains (a compound operation has several); the cartesian product across
-        steps enumerates the candidate realizations, and every 2-operand
-        primitive of a realization is matched against `gadgets`.
+        dicts, or a `free(NAME)` directive step ({'op': 'free', 'free': NAME},
+        see RopChain._parse_free_line). Each real step is bound and expanded
+        into its alternative primitive chains (a compound operation has
+        several); a free step contributes no primitive and is never resolved
+        via _step_defn/bind_step/expand_operation. The cartesian product
+        across steps' alternatives enumerates the candidate realizations, and
+        every 2-operand primitive of a realization is matched against
+        `gadgets`.
 
-        Returns a list of realizations, each a list of (primitive_step, gadgets)
-        pairs -- the per-step classified gadgets the assembler consumes.
+        Returns a list of (realization, free_events) pairs: `realization` is
+        a list of (primitive_step, gadgets) pairs -- the per-step classified
+        gadgets the assembler consumes; `free_events` is a list of
+        (boundary_index, name) pairs, `boundary_index` the count of real
+        primitives already emitted, within this realization, when a
+        free(name) step was reached (position is combo-dependent, since
+        compound-operation alternatives have different primitive counts).
         Realizations in which some primitive matches no gadget are dropped.
         '''
         fresh = count()   # source of fresh generic slots for unbound operands
         per_step_alternatives = []
+        free_names = []   # parallel to per_step_alternatives; None for a real step
         for step in steps:
+            if step.get('free') is not None:
+                per_step_alternatives.append([[]])   # one alternative: no primitives
+                free_names.append(step['free'])
+                continue
             defn = self._step_defn(step)
             binding = self.bind_step(step, fresh, defn=defn)
             alternatives = self.expand_operation(defn, binding)
@@ -204,24 +218,43 @@ class GadFinder:
                 raise RopChainNotFound(
                     f'{step.get("data", step["op"])}: no realization for operation')
             per_step_alternatives.append(alternatives)
+            free_names.append(None)
 
         realizations = []
         for combo in product(*per_step_alternatives):
-            primitives = [prim for chain in combo for prim in chain]
+            primitives = []
+            free_events = []
+            for name, chain in zip(free_names, combo):
+                if name is not None:
+                    free_events.append((len(primitives), name))
+                else:
+                    primitives.extend(chain)
             bundle = self._match_primitives(gadgets, primitives)
             if bundle is not None:
-                realizations.append(bundle)
+                realizations.append((bundle, free_events))
         return realizations
 
     def _match_primitives(self, gadgets, primitives):
         ''' Match each primitive step against `gadgets`, returning a list of
             (step, gadgets) pairs. None if any primitive matches no gadget (the
-            realization is infeasible and is skipped). '''
+            realization is infeasible and is skipped).
+
+            A `noret(...)` primitive (RopChain._parse_noret_line) may carry its
+            own `literal_gadgets` -- candidates found by find_literal_gadgets's
+            direct scan, independent of the normal backward gadget scan. Those
+            are added to the pool for *this primitive only*, never merged into
+            `gadgets` itself: they don't really return control anywhere, so
+            leaking them into the shared pool could let an unrelated step pick
+            one and silently produce a broken chain. '''
         bundle = []
         for prim in primitives:
             operands = [self._resolve_operand(prim.get('op1')),
                         self._resolve_operand(prim.get('op2'))]
-            gads = self.match_operation(gadgets, prim['defn'], operands)
+            defn = prim['defn']
+            pool = gadgets
+            if defn.literal_gadgets:
+                pool = gadgets + defn.literal_gadgets
+            gads = self.match_operation(pool, defn, operands)
             if not gads:
                 debug.info(f'{prim["data"]}: no matching gadgets')
                 return None
@@ -374,6 +407,58 @@ class GadFinder:
 
         if records is not None:
             self._cache.store(key, records)
+
+    def find_literal_gadgets(self, filenames: list[str], defn: OperationDef,
+                             base=None, badchars=None, badchar_bytes=None,
+                             arch=None) -> list[Gadget]:
+        '''
+        Direct, terminator-free scan for `defn`'s literal instruction pattern
+        (a `noret(...)` chain step's single realization, e.g. a bare
+        `syscall`/`svc 0`/`ecall`) -- used because the normal backward gadget
+        scan (`find`/`_search_gadgets`) structurally only ever emits candidates
+        whose last instruction is a valid ROP/JOP terminator
+        (`Architecture.is_valid_rop_gadget`/`is_valid_jop_gadget`), so a bare
+        non-returning sequence with nothing reachable after it is never even
+        considered a candidate. This bypasses that machinery entirely: it just
+        looks for the group of instructions, via `search.literal_scan`.
+
+        Returns synthetic Gadgets with `frame = (False,) * pattern_len` --
+        deliberately not a mask that marks the last position as framing, since
+        that would make a single-instruction pattern permanently unmatchable
+        (Set.iter_matches never anchors on a framing instruction, and for a
+        1-instruction pattern the anchor and the last position are the same).
+
+        Out of scope for now: the on-disk gadget cache and `--jobs`
+        parallelism -- this only runs when a chain file actually contains a
+        `noret(...)` step.
+        '''
+        pattern = defn.realizations[0].links[0]
+        pattern_len = len(pattern.items)
+        bases = base if isinstance(base, list) else [base] * len(filenames)
+
+        ret: list[Gadget] = []
+        for filename, file_base in zip(filenames, bases):
+            binary = self._open_binary(filename, file_base, arch)
+            arch_obj = arch_singleton.arch
+            md = capstone.Cs(arch_obj.arch, arch_obj.mode)
+            md.detail = True
+
+            def accept_candidate(vaddr, raw):
+                return (self._is_valid_address(vaddr, badchars, arch_obj.address_size)
+                        and self._is_valid_bytes(raw, badchar_bytes))
+
+            for section in binary.get_exec_sections():
+                opcodes, vaddr = section['opcodes'], section['vaddr']
+                for cand_vaddr, raw, decodes in search.literal_scan(
+                        opcodes, vaddr, arch_obj.alignment, md.disasm,
+                        pattern_len, accept_candidate=accept_candidate):
+                    if pattern.matches_exactly(decodes) is None:
+                        continue
+                    ret.append(Gadget(
+                        filename=binary.filename, arch=arch_obj.arch,
+                        mode=arch_obj.mode, vaddr=cand_vaddr, decodes=decodes,
+                        bytes=raw, frame=(False,) * pattern_len))
+        return ret
 
     def _scan_sections(self, binary, badchars, badchar_bytes):
         ''' Single pass over the executable sections, delegating to the

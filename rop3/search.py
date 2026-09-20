@@ -19,6 +19,10 @@ import re
 import math
 import multiprocessing
 
+# No single instruction is longer than this on any supported ISA, so decoding a
+# window this wide is enough to recover the one instruction starting at an offset.
+_MAX_INSN_BYTES = 16
+
 def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                  is_valid_gadget, accept_match=None, accept_candidate=None,
                  restores_return_address=None):
@@ -99,6 +103,49 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                     yield vaddr, raw, decodes, tuple(frame)
 
 
+# Bytes handed to a single `disasm()` call in `_linear_instruction_stream`.
+# Capstone's `cs_disasm` decodes its *entire* input eagerly in C before the
+# Python generator yields anything (it is not `cs_disasm_iter`-based), so
+# passing it a whole multi-ten-MB section in one call materializes every
+# decoded instruction of that section at once regardless of how the Python
+# side consumes them. Chunking bounds that native allocation to this size.
+_SCAN_CHUNK_SIZE = 1 << 20
+
+
+def _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
+    '''
+    Generator core of `linear_instructions`/`aligned_scan`: yields the
+    intended instruction stream in program order, one instruction at a time,
+    without ever materializing the whole section (see `_SCAN_CHUNK_SIZE`).
+    For the resynchronization behavior around undecodable bytes, see
+    `linear_instructions`.
+    '''
+    n = len(opcodes)
+    step = max(1, alignment)
+    off = 0
+    while off < n:
+        # Decode a bounded chunk plus a small overlap tail, so an instruction
+        # straddling the chunk boundary still has its full bytes available.
+        # Only instructions that start within the chunk's own (non-overlap)
+        # core are accepted here; one starting in the overlap is left for the
+        # next chunk (which starts exactly at core_end) to decode with full
+        # lookahead -- so the split is invisible to the yielded stream.
+        core_end = min(off + _SCAN_CHUNK_SIZE, n)
+        chunk_end = min(core_end + _MAX_INSN_BYTES, n)
+        core_size = core_end - off
+        produced = 0
+        for insn in disasm(opcodes[off:chunk_end], base_vaddr + off):
+            if insn.address - (base_vaddr + off) >= core_size and core_end < n:
+                break
+            yield insn
+            produced += insn.size
+        # Resume right after the decoded run; if nothing decoded (bad byte at
+        # `off`), skip one aligned unit to move past it.
+        off += produced if produced else step
+        if alignment > 1 and off % alignment:
+            off += alignment - (off % alignment)
+
+
 def linear_instructions(opcodes, base_vaddr, alignment, disasm):
     '''
     Linear sweep: disassemble `opcodes` as the intended instruction stream, in
@@ -106,21 +153,7 @@ def linear_instructions(opcodes, base_vaddr, alignment, disasm):
     happens the sweep resynchronizes by skipping one aligned unit past the
     offending byte and resumes. Returns the list of decoded instructions.
     '''
-    insns = []
-    n = len(opcodes)
-    step = max(1, alignment)
-    off = 0
-    while off < n:
-        produced = 0
-        for insn in disasm(opcodes[off:], base_vaddr + off):
-            insns.append(insn)
-            produced += insn.size
-        # Resume right after the decoded run; if nothing decoded (bad byte at
-        # `off`), skip one aligned unit to move past it.
-        off += produced if produced else step
-        if alignment > 1 and off % alignment:
-            off += alignment - (off % alignment)
-    return insns
+    return list(_linear_instruction_stream(opcodes, base_vaddr, alignment, disasm))
 
 
 def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
@@ -165,55 +198,111 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     ------
     (vaddr, raw, decodes, frame)
     '''
-    insns = linear_instructions(opcodes, base_vaddr, alignment, disasm)
+    # A gadget never reaches back more than `depth` bytes from its terminator,
+    # so only a small trailing window of the (possibly huge, e.g. a >40MB
+    # .text section) instruction stream is ever reachable at once. Consuming
+    # the stream lazily and trimming the window as it advances keeps peak
+    # memory bounded by `depth`/`alignment`, not by section size -- avoiding
+    # materializing every capstone-detail instruction in the whole section
+    # (see `linear_instructions`, still eager, used directly by tests).
+    window = []
+    for terminator in _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
+        window.append(terminator)
+        term_end = terminator.address + terminator.size
+        # Trim from the front once out of `depth` reach of the current tail;
+        # a later (further along) terminator's reach only moves forward, so
+        # anything trimmed here is unreachable for it too.
+        while window and term_end - window[0].address > depth:
+            del window[0]
 
-    for i, terminator in enumerate(insns):
         # A termination is any instruction that is a valid gadget on its own.
         if not is_valid_gadget([terminator]):
             continue
         requires_frame = bool(is_return) and is_return(terminator)
-        term_end = terminator.address + terminator.size
 
         # Walk backward over the contiguous run of intended instructions,
         # growing the frame mask at its front to stay parallel to the candidate.
         frame_loaded = False
         frame = []
-        j = i
-        while j >= 0:
+        n = len(window)
+        idx = n - 1
+        while idx >= 0:
+            insn_j = window[idx]
             # Stop at a discontinuity (a resync gap): a gadget's bytes must be
             # a single contiguous run.
-            if j < i and insns[j].address + insns[j].size != insns[j + 1].address:
+            if idx < n - 1 and insn_j.address + insn_j.size != window[idx + 1].address:
                 break
-            if term_end - insns[j].address > depth:
+            if term_end - insn_j.address > depth:
                 break
 
-            # Prepending insns[j]: it is framing if it restores the return
+            # Prepending insn_j: it is framing if it restores the return
             # address; once covered, the whole (and every longer) run establishes
             # its return frame.
-            is_restore = bool(restores_return_address) and restores_return_address(insns[j])
+            is_restore = bool(restores_return_address) and restores_return_address(insn_j)
             if is_restore:
                 frame_loaded = True
             frame.insert(0, is_restore)
 
             if frame_loaded or not requires_frame:
-                vaddr = insns[j].address
+                vaddr = insn_j.address
                 raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
                 if accept_candidate is None or accept_candidate(vaddr, raw):
-                    candidate = insns[j:i + 1]
+                    candidate = window[idx:n]
                     if is_valid_gadget(candidate):
                         mask = frame.copy()
                         mask[-1] = True             # the terminator frames the run
                         yield vaddr, raw, candidate, tuple(mask)
-            j -= 1
+            idx -= 1
+
+
+def literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
+                 accept_candidate=None):
+    '''
+    Forward, anchor-free scan for a fixed-length instruction window: tries
+    decoding `pattern_len` instructions starting at *every* `alignment`-stepped
+    byte offset -- not just the offsets the binary's own intended (sequential)
+    disassembly would produce, so a pattern hiding "unintended" inside another
+    instruction's encoding is still found (as `galileo_scan` already does for
+    gadget terminators). On a fixed-width ISA (`alignment` > 1) this reduces
+    to scanning only real instruction boundaries anyway.
+
+    Unlike every other strategy in this module there is no terminator/frame
+    concept driving the walk -- every candidate window is tried independently,
+    and the caller (GadFinder.find_literal_gadgets, for a chain's `noret(...)`
+    step) applies the actual pattern-equality test; this stays pattern-agnostic
+    like the rest of this module.
+
+    Parameters mirror `backward_instructions`, plus `pattern_len` (the number
+    of instructions a candidate window must contain) and `accept_candidate`
+    (bad-char filtering, as in the other scans).
+
+    Yields
+    ------
+    (vaddr, raw, decodes) for every offset where exactly `pattern_len`
+    instructions decode cleanly (a single `disasm()` call over one contiguous
+    slice can only ever decode a contiguous run -- it stops at the first
+    undecodable byte rather than skipping it, so there is no separate
+    discontinuity case to guard here, unlike the resync behaviour of the
+    chunked `_linear_instruction_stream`).
+    '''
+    n = len(opcodes)
+    step = max(1, alignment)
+    window_bytes = pattern_len * _MAX_INSN_BYTES
+    off = 0
+    while off < n:
+        vaddr = base_vaddr + off
+        decodes = list(disasm(opcodes[off:off + window_bytes], vaddr))[:pattern_len]
+        if len(decodes) == pattern_len:
+            end = decodes[-1].address + decodes[-1].size
+            raw = opcodes[off:end - base_vaddr]
+            if accept_candidate is None or accept_candidate(vaddr, raw):
+                yield vaddr, raw, decodes
+        off += step
 
 
 # --------------------------------------------------------------------------
 # Backward framed (ropblock) search
 # --------------------------------------------------------------------------
-
-# No single instruction is longer than this on any supported ISA, so decoding a
-# window this wide is enough to recover the one instruction starting at an offset.
-_MAX_INSN_BYTES = 16
 
 
 def backward_instructions(opcodes, base_vaddr, alignment, disasm, start=None):

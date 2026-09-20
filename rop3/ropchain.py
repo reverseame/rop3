@@ -17,6 +17,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 
 import re
 from collections import Counter
+from itertools import count
 from typing import Iterator
 
 import rop3.debug as debug
@@ -48,6 +49,25 @@ Matches an explicit inline gadget:
 '''
 REGEX_RAW = re.compile(r'^\s*raw\s*\(')
 
+'''
+Matches an explicit inline instruction sequence with no ret/branch terminator
+requirement, only ever legal as the chain's last real step:
+    noret([mnemonic, ...], [operands], [dst regs], [src regs])
+'''
+REGEX_NORET = re.compile(r'^\s*noret\s*\(')
+
+# Base for the fresh internal names --legacy-ropchain's free(NAME) rename pass
+# hands out to a post-free reuse of a name. Distinct from
+# gadfinder._FRESH_SLOT_BASE (9000000) so the two fresh-name spaces never
+# collide within one run.
+_LEGACY_FREE_SLOT_BASE = 9500000
+
+
+def _is_generic_slot(key) -> bool:
+    ''' Whether `key` is a generic register-slot name (regN/REGn) rather than
+        a concrete register or None. '''
+    return key is not None and isinstance(key, str) and key.lower().startswith('reg')
+
 
 class RopChain:
     '''
@@ -60,32 +80,62 @@ class RopChain:
 
     def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None,
                           badchar_bytes=None, arch=None, symbols=False,
-                          symbolic=True) -> Iterator[list[Gadget]]:
+                          symbolic=False, legacy=False) -> Iterator[list[Gadget]]:
         gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars,
                                       badchar_bytes=badchar_bytes, arch=arch, symbols=symbols)
-        return self.search_from_gadgets(gadgets, ropfile, symbolic=symbolic)
+        return self.search_from_gadgets(gadgets, ropfile, symbolic=symbolic, legacy=legacy,
+                                        binaries=binaries, base=base, badchars=badchars,
+                                        badchar_bytes=badchar_bytes, arch=arch)
 
-    def search_from_gadgets(self, gadgets, ropfile, symbolic=True) -> Iterator[list[Gadget]]:
+    def search_from_gadgets(self, gadgets, ropfile, symbolic=False, legacy=False,
+                            binaries=None, base=None, badchars=None,
+                            badchar_bytes=None, arch=None) -> Iterator[list[Gadget]]:
         ropchain = self._parse_ropfile(ropfile)
-        return self.search(gadgets, ropchain, symbolic=symbolic)
+        return self.search(gadgets, ropchain, symbolic=symbolic, legacy=legacy,
+                           binaries=binaries, base=base, badchars=badchars,
+                           badchar_bytes=badchar_bytes, arch=arch)
 
     def search(self, gadgets, ropchain, prune_equivalent=True,
-               symbolic=True) -> Iterator[list[Gadget]]:
+               symbolic=False, legacy=False, binaries=None, base=None,
+               badchars=None, badchar_bytes=None, arch=None) -> Iterator[list[Gadget]]:
         '''
-        `ropchain` is the parsed request: a list of steps ({op, operands}). The
-        gadfinder classifies it into realizations -- one per compound-operation
-        alternative -- each a list of (primitive_step, gadgets) pairs; every
-        realization is resolved by Tree and assembled by DFS.
+        `ropchain` is the parsed request: a list of steps ({op, operands}), or
+        a `free(NAME)` directive step ({op: 'free', free: NAME}) releasing a
+        generic register-slot name. The gadfinder classifies it into
+        realizations -- one per compound-operation alternative -- each a list
+        of (primitive_step, gadgets) pairs plus the free directives' positions
+        among them; every realization is resolved and assembled by `_assemble`.
+
+        `legacy` selects the pre-`free` global register-slot resolution: a
+        generic name (e.g. REG1) is one identity for the whole chain (`Tree`),
+        and `free` is only approximated by a parse-time rename
+        (`_rewrite_legacy_frees`). The default (order-aware `_assemble_sequential`)
+        lets `free(NAME)` truly release NAME partway through the chain.
 
         When `symbolic` is set (and Triton is available), each assembled chain
         is symbolically executed as a final validation step before it is
-        yielded.
+        yielded. Disabled by default -- it's an opt-in extra validation pass,
+        not required to assemble a chain.
+
+        `binaries`/`base`/`badchars`/`badchar_bytes`/`arch` are only consulted
+        when `ropchain` contains a `noret(...)` step: they drive
+        GadFinder.find_literal_gadgets, the direct scan that step's candidates
+        come from (see `_resolve_noret_gadgets`). Without `binaries`, a
+        `noret(...)` step degrades to matching only against `gadgets` as given
+        -- exactly like `raw(...)` -- which is what lets a caller with no file
+        access (e.g. a hand-built `gadgets` list in a unit test) still exercise
+        it.
         '''
+        self._check_free_usage(ropchain)
+        self._check_noret_position(ropchain)
+        if legacy:
+            ropchain = self._rewrite_legacy_frees(ropchain)
+        self._resolve_noret_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch)
         realizations = self.gadfinder.classify_ropchain(gadgets, ropchain)
         found = False
-        for bundle in realizations:
+        for bundle, free_events in realizations:
             try:
-                for solution in self._assemble(bundle, prune_equivalent):
+                for solution in self._assemble(bundle, prune_equivalent, free_events, legacy):
                     found = True
                     self._symbolic_check(solution, symbolic)
                     yield solution
@@ -129,15 +179,121 @@ class RopChain:
             debug.warning('concolic emulation did not reach the final gadget: '
                           'the chain may not transfer control as expected')
 
-    def _assemble(self, bundle, prune_equivalent) -> Iterator[list[Gadget]]:
-        ''' Resolve one realization's register slots and assemble it by DFS.
-            `bundle` is a list of (primitive_step, classified_gadgets) pairs. '''
+    def _assemble(self, bundle, prune_equivalent, free_events=(), legacy=False) -> Iterator[list[Gadget]]:
+        ''' Resolve one realization's register slots and assemble it. `bundle`
+            is a list of (primitive_step, classified_gadgets) pairs. `legacy`
+            picks the whole-chain Tree-based pipeline (unmodified); otherwise
+            the order-aware DFS, using `free_events` (from classify_ropchain)
+            to know where among these primitives a free(NAME) directive sits. '''
+        if legacy:
+            steps = [step for step, _ in bundle]
+            ops_gadgets = [gadgets for _, gadgets in bundle]
+            tree = Tree(steps, ops_gadgets, self.gadfinder)
+            combinations = tree.traverse()
+            per_comb = self._build_per_comb_gadgets(steps, combinations, ops_gadgets, prune_equivalent)
+            return self._construct_ropchain(steps, per_comb, combinations)
+        return self._assemble_sequential(bundle, prune_equivalent, free_events)
+
+    def _assemble_sequential(
+        self,
+        bundle: list,
+        prune_equivalent: bool,
+        free_events: list,
+    ) -> Iterator[list[Gadget]]:
+        '''
+        Order-aware assembler (the default engine): register-slot resolution
+        and gadget-clobber tracking share one backtracking DFS, walking the
+        chain steps in file order. A `live` map (generic name -> concrete
+        register) is threaded alongside the clobbered-register Counter:
+        picking a gadget for a step tentatively binds any newly-resolved
+        generic slot, and a free(NAME) boundary releases NAME from `live` for
+        every step from here on, restoring it symmetrically on backtrack -- so
+        a later reuse of the same literal name is resolved independently
+        instead of being forced to match its earlier identity (compare Tree,
+        the --legacy-ropchain equivalent, which has no notion of position and
+        so cannot express this).
+        '''
         steps = [step for step, _ in bundle]
-        ops_gadgets = [gadgets for _, gadgets in bundle]
-        tree = Tree(steps, ops_gadgets, self.gadfinder)
-        combinations = tree.traverse()
-        per_comb = self._build_per_comb_gadgets(steps, combinations, ops_gadgets, prune_equivalent)
-        return self._construct_ropchain(steps, per_comb, combinations)
+        sorted_gadgets = [sorted(gadgets, key=heuristic_basic_count) for _, gadgets in bundle]
+        n = len(steps)
+
+        frees_at: dict[int, list[str]] = {}
+        for boundary, name in free_events:
+            frees_at.setdefault(boundary, []).append(name)
+
+        cache: dict = {}
+
+        def candidates(index, req_op1, req_op2):
+            key = (index, None if req_op1 is None else str(req_op1),
+                          None if req_op2 is None else str(req_op2))
+            if key not in cache:
+                filtered = [g for g in sorted_gadgets[index]
+                            if (req_op1 is None or str(g.slot_op1) == str(req_op1))
+                            and (req_op2 is None or str(g.slot_op2) == str(req_op2))]
+                cache[key] = self._prune(filtered) if prune_equivalent else filtered
+            return cache[key]
+
+        def requirement(key, live):
+            ''' None means "unconstrained": key is concrete (already resolved
+                upstream by match_operation/_resolve_operand) or a generic slot
+                not currently bound (first use, or freed and not reused yet). '''
+            if not _is_generic_slot(key):
+                return None
+            return live.get(key)
+
+        found_any = False
+
+        def backtrack(index: int, live: dict, clobbered: Counter,
+                      chain: list) -> Iterator[list[Gadget]]:
+            nonlocal found_any
+            freed_here = frees_at.get(index, [])
+            saved = {name: live.pop(name) for name in freed_here if name in live}
+            try:
+                if index == n:
+                    found_any = True
+                    yield chain.copy()
+                    return
+
+                step = steps[index]
+                op1_key, op2_key = step.get('op1'), step.get('op2')
+                req_op1 = requirement(op1_key, live)
+                req_op2 = requirement(op2_key, live)
+
+                for gad in candidates(index, req_op1, req_op2):
+                    if any(clobbered.get(reg, 0) > 0 for reg in gad.src):
+                        continue
+
+                    newly_bound = {}
+                    for k, v in ((op1_key, gad.slot_op1), (op2_key, gad.slot_op2)):
+                        if _is_generic_slot(k) and k not in live:
+                            live[k] = v
+                            newly_bound[k] = v
+
+                    for reg in gad.side_regs:
+                        clobbered[reg] += 1
+                    refreshed = {}
+                    for reg in gad.dst:
+                        if gad.writes_reg(reg):
+                            refreshed[reg] = clobbered.get(reg, 0)
+                            clobbered[reg] = 0
+
+                    chain.append(gad)
+                    yield from backtrack(index + 1, live, clobbered, chain)
+                    chain.pop()
+
+                    for reg, old in refreshed.items():
+                        clobbered[reg] = old
+                    for reg in gad.side_regs:
+                        clobbered[reg] -= 1
+                    for k in newly_bound:
+                        del live[k]
+            finally:
+                for name, val in saved.items():
+                    live[name] = val
+
+        yield from backtrack(0, {}, Counter(), [])
+        if not found_any:
+            raise RopChainNotFound('no suitable ropchain combination found in DFS')
 
     def _build_per_comb_gadgets(
         self,
@@ -253,11 +409,24 @@ class RopChain:
                     debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
                 continue
 
+            if REGEX_NORET.match(line):
+                try:
+                    ret.append(self._parse_noret_line(line))
+                except RawGadgetError as exc:
+                    debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
+                continue
+
             match = REGEX_OP.search(line)
             if match:
                 op_name = match.group('OP')
                 args = match.group('ARGS').strip()
                 raw = [a.strip() for a in args.split(',')] if args else []
+                if op_name == 'free':
+                    try:
+                        ret.append(self._parse_free_line(match.group(0), raw))
+                    except FreeDirectiveError as exc:
+                        debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
+                    continue
                 operands = self._strip_legacy_commas(op_name, raw)
                 ret.append({
                     'data': match.group(0),
@@ -292,36 +461,166 @@ class RopChain:
                           f'is ignored (operands are positional: op1, op2, ...)')
         return [a for a in raw if a]
 
-    def _parse_raw_line(self, line: str) -> dict:
+    @staticmethod
+    def _parse_free_line(data: str, raw_args: list[str]) -> dict:
         '''
-        Parse an explicit-gadget line into a chain step carrying its own inline
-        OperationDef:
+        Parse a `free(NAME)` compile-time directive: from here to the end of
+        the file (default engine) or to the next occurrence
+        (--legacy-ropchain), NAME's identity as a generic register slot is
+        released. Produces no gadget and is never resolved via
+        parser.Parser().get_op -- classify_ropchain special-cases a `free`
+        step before _step_defn is ever called.
+        '''
+        if len(raw_args) != 1 or not raw_args[0]:
+            raise FreeDirectiveError(
+                'free(...) takes exactly one register-slot name, e.g. free(REG1)')
+        return {'data': data, 'op': 'free', 'free': raw_args[0]}
 
-            raw([mnemonic, ...], [operands], [dst], [src])
+    @staticmethod
+    def _step_generic_operands(step: dict) -> list:
+        ''' The raw operand tokens of a (non-free) step, whichever form it was
+            parsed in -- positional `operands`, or the legacy op1/op2 keys. '''
+        operands = step.get('operands')
+        if operands is not None:
+            return operands
+        return [step.get('op1'), step.get('op2')]
+
+    @staticmethod
+    def _check_free_usage(steps: list[dict]) -> None:
+        ''' Diagnostics only, for both engines: freeing a non-generic name, a
+            name never used before this point, or a name already freed with
+            no intervening use are all harmless no-ops in both assemblers, so
+            this warns rather than errors (matching _strip_legacy_commas). '''
+        ever_seen: set = set()
+        pending_free: set = set()
+        for step in steps:
+            freed = step.get('free')
+            if freed is not None:
+                if not _is_generic_slot(freed):
+                    debug.warning(f'free({freed}): only a generic register-slot name '
+                                  f'(regN) can be freed; ignoring')
+                elif freed not in ever_seen:
+                    debug.warning(f'free({freed}): {freed} was never used before this '
+                                  f'point in the file; ignoring')
+                elif freed in pending_free:
+                    debug.warning(f'free({freed}): {freed} was already freed with no '
+                                  f'intervening use since; ignoring the repeated free')
+                else:
+                    pending_free.add(freed)
+                continue
+            for v in RopChain._step_generic_operands(step):
+                if _is_generic_slot(v):
+                    ever_seen.add(v)
+                    pending_free.discard(v)
+
+    @staticmethod
+    def _check_noret_position(steps: list[dict]) -> None:
+        ''' A `noret(...)` step (defn.no_terminator) may only be the chain's
+            last *real* (non-free) step: it does not hand control to anything
+            after it, so placed anywhere else it would silently produce a
+            chain that does not actually work. Unlike `_check_free_usage`,
+            this is a hard error -- nothing else validates that a gadget's
+            terminator lands on the next step, so this is the only place a
+            misplaced noret(...) would ever be caught. '''
+        real_steps = [s for s in steps if s.get('free') is None]
+        last_index = len(real_steps) - 1
+        for i, step in enumerate(real_steps):
+            defn = step.get('defn')
+            if defn is not None and getattr(defn, 'no_terminator', False) and i != last_index:
+                raise RopChainNotFound(
+                    f'{step["data"]}: a noret(...) step must be the last step '
+                    'of the chain (it does not transfer control onward)')
+
+    def _resolve_noret_gadgets(self, steps: list[dict], binaries, base,
+                               badchars, badchar_bytes, arch) -> None:
+        ''' For every `noret(...)` step, fill in defn.literal_gadgets via
+            GadFinder.find_literal_gadgets when `binaries` is available. A
+            step whose literal_gadgets is already resolved (e.g. `search` was
+            called more than once with the same parsed steps) is not rescanned. '''
+        if not binaries:
+            return
+        for step in steps:
+            defn = step.get('defn')
+            if defn is None or not getattr(defn, 'no_terminator', False):
+                continue
+            if defn.literal_gadgets is None:
+                defn.literal_gadgets = self.gadfinder.find_literal_gadgets(
+                    binaries, defn, base=base, badchars=badchars,
+                    badchar_bytes=badchar_bytes, arch=arch)
+
+    def _rewrite_legacy_frees(self, steps: list[dict]) -> list[dict]:
+        '''
+        --legacy-ropchain approximation of `free`: rewrite the step list so
+        that, from a free(NAME) line onward, NAME is a brand-new internal
+        identity, decoupling it from its earlier occurrences in Tree's
+        whole-file global intersection. Occurrences between two frees of the
+        same NAME (or before the first / after the last) still share one
+        identity, exactly like today's semantics without `free`. `free` steps
+        are dropped here -- classify_ropchain/Tree never see them.
+        '''
+        epoch: dict = {}
+        fresh_for_epoch: dict = {}
+        counter = count()
+
+        def resolve(value):
+            if not _is_generic_slot(value):
+                return value
+            e = epoch.get(value, 0)
+            if e == 0:
+                return value
+            key = (value, e)
+            if key not in fresh_for_epoch:
+                fresh_for_epoch[key] = f'REG{_LEGACY_FREE_SLOT_BASE + next(counter)}'
+            return fresh_for_epoch[key]
+
+        def rewrite(step):
+            new_step = dict(step)
+            if step.get('operands') is not None:
+                new_step['operands'] = [resolve(v) if isinstance(v, str) else v
+                                        for v in step['operands']]
+            for k in ('op1', 'op2'):
+                if isinstance(step.get(k), str):
+                    new_step[k] = resolve(step[k])
+            return new_step
+
+        out = []
+        for step in steps:
+            freed = step.get('free')
+            if freed is not None:
+                if _is_generic_slot(freed):
+                    epoch[freed] = epoch.get(freed, 0) + 1
+                continue
+            out.append(rewrite(step))
+        return out
+
+    def _parse_explicit_gadget_fields(self, line: str, what: str) -> tuple:
+        '''
+        Shared field parsing for `raw(...)` and `noret(...)`:
+
+            <keyword>([mnemonic, ...], [operands], [dst], [src])
 
         The four bracketed fields are the instruction mnemonics, their operands,
         and the concrete registers written (dst) / read (src) for the
-        assembler's side-effect tracking. The step is otherwise identical to a
-        ROPLang step, so the classifier/assembler consume it unchanged; the only
-        difference is that its definition is built here instead of resolved from
-        the operation catalog. The gadget is matched exactly as written, hence
-        architecture specific (no multi-architecture realizations).
+        assembler's side-effect tracking.
 
         Operands map to instructions positionally: with no parenthesised groups
         every operand belongs to the *first* instruction (the common case:
         `pop rdi ; ret`, `mov [rdi], rax ; ret`); to give operands to several
         instructions, wrap each instruction's operands in `(...)`
         (`raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])`).
+
+        Returns (instructions, name, dst, src); `what` names the construct in
+        error messages (`'raw gadget'` / `'noret gadget'`).
         '''
         body = self._raw_body(line)
         fields = self._split_top_level(body)
         if len(fields) != 4:
-            raise RawGadgetError('a raw gadget needs exactly four bracketed '
+            raise RawGadgetError(f'a {what} needs exactly four bracketed '
                                  'fields: [mnemonics], [operands], [dst], [src]')
 
         mnemonics = self._raw_list(fields[0], 'mnemonics')
         if not mnemonics:
-            raise RawGadgetError('a raw gadget needs at least one mnemonic')
+            raise RawGadgetError(f'a {what} needs at least one mnemonic')
         per_instr_ops = self._raw_operands(fields[1], len(mnemonics))
         dst = self._raw_list(fields[2], 'dst')
         src = self._raw_list(fields[3], 'src')
@@ -332,7 +631,48 @@ class RopChain:
             f"{ins['mnemonic']} {', '.join(ins['operands'])}".strip()
             for ins in instructions)
 
+        return instructions, name, dst, src
+
+    def _parse_raw_line(self, line: str) -> dict:
+        '''
+        Parse an explicit-gadget line into a chain step carrying its own inline
+        OperationDef:
+
+            raw([mnemonic, ...], [operands], [dst], [src])
+
+        The step is otherwise identical to a ROPLang step, so the
+        classifier/assembler consume it unchanged; the only difference is that
+        its definition is built here instead of resolved from the operation
+        catalog. The gadget is matched exactly as written, hence architecture
+        specific (no multi-architecture realizations), and it is matched *inside*
+        whatever the normal backward gadget scan already found -- so, unlike
+        `noret(...)`, it still needs a real ret/branch-terminated gadget
+        somewhere in the binary to match against.
+        '''
+        instructions, name, dst, src = self._parse_explicit_gadget_fields(line, 'raw gadget')
+
         defn = OperationDef(name, operands=0, dst_roles=dst, src_roles=src)
+        defn.add_realization([{'gadget': instructions}])
+
+        return {'data': line.strip(), 'op': name, 'operands': [], 'defn': defn}
+
+    def _parse_noret_line(self, line: str) -> dict:
+        '''
+        Parse a no-terminator explicit-gadget line, same syntax as `raw(...)`:
+
+            noret([mnemonic, ...], [operands], [dst], [src])
+
+        Unlike `raw(...)`, this pattern is never required to sit inside a
+        ret/branch-terminated Gadget -- it also gets matched against candidates
+        from GadFinder.find_literal_gadgets, a direct scan independent of the
+        normal backward gadget-finder machinery (see RopChain.search /
+        _resolve_noret_gadgets). Only ever legal as the chain's last real
+        (non-free) step -- see RopChain._check_noret_position.
+        '''
+        instructions, name, dst, src = self._parse_explicit_gadget_fields(line, 'noret gadget')
+
+        defn = OperationDef(name, operands=0, dst_roles=dst, src_roles=src,
+                            no_terminator=True)
         defn.add_realization([{'gadget': instructions}])
 
         return {'data': line.strip(), 'op': name, 'operands': [], 'defn': defn}
@@ -447,8 +787,7 @@ class Tree:
         state: dict[str, list[str]] = {}
         op_pairs: list = []
 
-        def is_generic(key):
-            return key is not None and isinstance(key, str) and key.lower().startswith('reg')
+        is_generic = _is_generic_slot
 
         for item, op_gadgets in zip(self.ropchain, self.ops_gadgets):
             op1_key, op2_key = item.get('op1'), item.get('op2')
@@ -532,4 +871,9 @@ class RopChainNotFound(Exception):
 
 class RawGadgetError(Exception):
     ''' A malformed explicit-gadget (`raw(...)`) line in a ROP-chain file. '''
+    pass
+
+
+class FreeDirectiveError(Exception):
+    ''' A malformed `free(...)` directive in a ROP-chain file. '''
     pass
