@@ -1,6 +1,11 @@
-lc(a1)
-lc(a2)
-lc(a7)
-lc(a0)
-raw([ecall], [], [], [a0, a1, a2, a7])
-
+lc(REG1)
+mov(a0, REG1)    ; a0 <- &buf
+free(REG1)
+lc(REG1)
+mov(a1, REG1)    ; a1 <- 0
+free(REG1)
+lc(REG1)
+lc(REG2)
+st(REG1, REG2)
+ld(a2, REG1)    ; a2 <- 0
+noret([addi, ecall], [(a7, zero, 0xdd), ()], [], [a0, a1, a2])

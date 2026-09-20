@@ -60,6 +60,15 @@ class ArgumentParser:
         self.argparser.add_argument('--src', type=str, metavar='<reg>', default=None, help='[legacy] source operand; maps to op1 on its own, or op2 when --dst is also given. Prefer --operands')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
+        self.argparser.add_argument('--legacy-ropchain', action=argparse.BooleanOptionalAction, default=False,
+            help="use the pre-`free` global register-slot resolution for --ropchain assembly "
+                 "(a generic name, e.g. REG1, is one identity for the whole file); free(NAME) "
+                 "is only approximated by a parse-time rename. Default: off (order-aware "
+                 "resolution, where free(NAME) truly releases NAME)")
+        self.argparser.add_argument('--symbolic', action=argparse.BooleanOptionalAction, default=False,
+            help="validate each assembled --ropchain solution with a Triton-based concolic "
+                 "emulation pass (requires Triton; skipped, never fatal, if it's absent). "
+                 "Reports memory side effects, stack pivots, and reachability. Default: off")
         self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
         self.argparser.add_argument('--jobs', type=int, metavar='<n>', default=1, help='number of worker processes for the gadget scan (default: 1)')
         self.argparser.add_argument('--cache', action='store_true', default=False, help='cache discovered gadgets on disk and reuse them on repeated runs over the same file and options')

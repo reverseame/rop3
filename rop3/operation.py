@@ -350,7 +350,7 @@ class OperationDef:
     chain of gadget-patterns and operation references).
     '''
     def __init__(self, name, operands=0, dst_roles=None, src_roles=None,
-                 available=True, unavailable_reason=None):
+                 available=True, unavailable_reason=None, no_terminator=False):
         self.name = name
         self.operands = operands
         self.dst_roles = list(dst_roles or [])
@@ -360,6 +360,15 @@ class OperationDef:
         # A YAML `<arch>: {available: false}` marks it unavailable (see parser).
         self.available = available
         self.unavailable_reason = unavailable_reason
+        # Set for a `noret(...)` chain step (RopChain._parse_noret_line): this
+        # definition's single realization needs no ret/branch terminator, so
+        # it is never required to sit inside a terminator-anchored Gadget.
+        # `literal_gadgets`, filled in by RopChain.search once binaries are
+        # available, holds the candidates found by GadFinder.find_literal_gadgets
+        # (a direct forward scan, independent of the normal backward gadget
+        # scan) -- scoped to this one step only (see GadFinder._match_primitives).
+        self.no_terminator = no_terminator
+        self.literal_gadgets: list = None
 
     def add(self, realization):
         self.realizations.append(realization)
@@ -525,6 +534,17 @@ class Set:
                     yield (matched[1], matched[2])
             if frame[anchor]:
                 entered_frame = True
+
+    def matches_exactly(self, decodes):
+        ''' Whether `decodes` is exactly this pattern, position for position --
+            no anchoring/frame skipping, just an exact-length equality check.
+            Used by GadFinder.find_literal_gadgets (the `noret(...)` chain-step
+            scan) to test a candidate window with no gadget/frame concept
+            involved. Returns the (bindings, indices) `_match_run` would, or
+            None when the lengths differ or the pattern does not match. '''
+        if len(decodes) != len(self.items):
+            return None
+        return self._match_run(decodes, 0)
 
     def _match_run(self, decodes, start):
         ''' Match the pattern as a consecutive run anchored at `start`. Returns

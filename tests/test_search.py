@@ -19,7 +19,8 @@ import capstone
 import pytest
 
 from rop3.search import (galileo_scan, aligned_scan, linear_instructions,
-                         backward_instructions, backwards_framed_search)
+                         backward_instructions, backwards_framed_search,
+                         literal_scan)
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
 _riscv = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
@@ -135,6 +136,40 @@ def test_linear_instructions_is_program_order():
     insns = list(linear_instructions(UNINTENDED, 0x1000, 1, _x86_md().disasm))
     assert [i.mnemonic for i in insns] == ['mov', 'ret']
     assert [i.address for i in insns] == [0x1000, 0x1005]
+
+
+@pytest.mark.parametrize('chunk_size', [1, 2, 3, 4, 5, 6, 7])
+def test_linear_instructions_unaffected_by_scan_chunk_size(monkeypatch, chunk_size):
+    ''' `_linear_instruction_stream` decodes in bounded `_SCAN_CHUNK_SIZE`
+        pieces (see its docstring) purely to bound capstone's native
+        allocation on huge sections -- it must still yield the exact same
+        instruction stream as one big call, including across a forced chunk
+        boundary that lands mid-buffer or right at the "unintended" ret
+        byte's offset. '''
+    import rop3.search as search_mod
+    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', chunk_size)
+    insns = list(linear_instructions(UNINTENDED, 0x1000, 1, _x86_md().disasm))
+    assert [i.mnemonic for i in insns] == ['mov', 'ret']
+    assert [i.address for i in insns] == [0x1000, 0x1005]
+
+
+@pytest.mark.parametrize('chunk_size', [4, 8, 12])
+def test_aligned_scan_unaffected_by_scan_chunk_size(monkeypatch, chunk_size):
+    import rop3.search as search_mod
+    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', chunk_size)
+    baseline = _aligned(UNINTENDED, 0x1000, depth=8)
+    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', 1 << 20)
+    assert _aligned(UNINTENDED, 0x1000, depth=8) == baseline
+
+
+@_riscv
+@pytest.mark.parametrize('chunk_size', [1, 2, 3, 4])
+def test_riscv_aligned_scan_unaffected_by_scan_chunk_size(monkeypatch, chunk_size):
+    import rop3.search as search_mod
+    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', chunk_size)
+    chunked = _riscv_texts(LD_RA_SP + RET)
+    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', 1 << 20)
+    assert chunked == _riscv_texts(LD_RA_SP + RET)
 
 
 def test_galileo_frame_marks_only_the_terminator():
@@ -256,6 +291,52 @@ def test_riscv_is_ra_load_predicate():
     assert not is_ra_load(LD_RA_A0)      # ld ra, 8(a0)  -- not the stack
     assert not is_ra_load(b'\x03\x35\x81\x00')  # ld a0, 8(sp)  -- not ra
     assert not is_ra_load(ADD)           # not a load
+
+
+# --- Literal scan (noret() chain-step candidates) --------------------------
+
+# mov eax, 0x0000050f ; ret -- the 2-byte `syscall` encoding (0f 05) sits at
+# offset 1, inside the mov's immediate, not on an intended instruction
+# boundary a normal (sequential) disassembly pass would ever visit.
+HIDDEN_SYSCALL = b'\xb8\x0f\x05\x00\x00\xc3'
+
+
+def _syscall_vaddrs(opcodes, alignment=1, base=0x1000):
+    matches = literal_scan(opcodes, base, alignment, _x86_md().disasm, 1)
+    return [vaddr for vaddr, _raw, decodes in matches if decodes[0].mnemonic == 'syscall']
+
+
+def test_literal_scan_matches_intended_instruction():
+    assert _syscall_vaddrs(b'\x0f\x05\xc3') == [0x1000]
+
+
+def test_literal_scan_finds_pattern_hidden_inside_another_instruction():
+    ''' Unlike a sequential/intended disassembly pass, every byte offset is
+        tried (on x86, alignment 1), so the `syscall` hiding inside the
+        `mov`'s immediate is still found -- this is the whole point of trying
+        "unintended" offsets, not just instruction boundaries. '''
+    assert _syscall_vaddrs(HIDDEN_SYSCALL) == [0x1001]
+
+
+def test_literal_scan_respects_alignment():
+    ''' On a fixed-width ISA (alignment > 1) only aligned offsets are tried,
+        so the same "unintended", unaligned match is never found -- this is
+        what makes the scan reduce to "intended only" on AArch64/RISC-V. '''
+    assert _syscall_vaddrs(HIDDEN_SYSCALL, alignment=4) == []
+
+
+def test_literal_scan_multi_instruction_pattern():
+    matches = list(literal_scan(b'\x48\x31\xc0\x0f\x05', 0x2000, 1,
+                                _x86_md().disasm, 2))   # xor rax, rax ; syscall
+    mnems = [[d.mnemonic for d in decodes] for _v, _r, decodes in matches]
+    assert ['xor', 'syscall'] in mnems
+
+
+def test_literal_scan_rejects_short_trailing_window():
+    ''' Near the end of the buffer, fewer than `pattern_len` instructions can
+        decode -- those offsets yield no candidate rather than a short one. '''
+    matches = list(literal_scan(b'\x0f\x05', 0x1000, 1, _x86_md().disasm, 2))
+    assert matches == []
 
 
 # --- Backward framed (ropblock) search ------------------------------------

@@ -58,7 +58,8 @@ def main():
                 out_fmt = 'tuple' if args.tuple else args.output
 
                 if args.ropchain:
-                    result = rop.ropchain(args.ropchain)
+                    result = rop.ropchain(args.ropchain, legacy=args.legacy_ropchain,
+                                          symbolic=args.symbolic)
                     utils.output_ropchains(result, out_fmt, exhaustive=args.exhaustive)
                 elif args.op:
                     result = rop.find_op(args.op, operands=args.operands)
