@@ -1,0 +1,8 @@
+; mprotect(addr, len, PROT_READ|PROT_WRITE|PROT_EXEC) -> make a page RWX
+; (disable NX/DEP on the target region, then jump into it)
+lc(ebx)          ; ebx <- addr    page-aligned base
+lc(ecx)          ; ecx <- len     region length
+lc(edx)          ; edx <- 7       PROT_READ|PROT_WRITE|PROT_EXEC
+lc(eax)          ; eax <- 125     mprotect
+
+; raw([int], [0x80], [], [eax, ebx, ecx, edx]) ; Commented, as it is usually not a gadget
