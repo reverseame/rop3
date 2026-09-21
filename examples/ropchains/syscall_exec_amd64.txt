@@ -12,5 +12,5 @@ lc(rdi)
 lc(rsi)
 lc(rdx)
 lc(rax)
-noret([syscall], [], [], [rdi, rsi, rdx, rax])
+raw([syscall], [], [], [rdi, rsi, rdx, rax])
 

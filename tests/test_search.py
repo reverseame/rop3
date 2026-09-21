@@ -20,7 +20,8 @@ import pytest
 
 from rop3.search import (galileo_scan, aligned_scan, linear_instructions,
                          backward_instructions, backwards_framed_search,
-                         literal_scan)
+                         literal_scan, aligned_literal_scan,
+                         raw_byte_scan, assemble)
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
 _riscv = pytest.mark.skipif(not hasattr(capstone, 'CS_ARCH_RISCV'),
@@ -293,7 +294,7 @@ def test_riscv_is_ra_load_predicate():
     assert not is_ra_load(ADD)           # not a load
 
 
-# --- Literal scan (noret() chain-step candidates) --------------------------
+# --- Literal scan (raw() chain-step candidates) ----------------------------
 
 # mov eax, 0x0000050f ; ret -- the 2-byte `syscall` encoding (0f 05) sits at
 # offset 1, inside the mov's immediate, not on an intended instruction
@@ -337,6 +338,115 @@ def test_literal_scan_rejects_short_trailing_window():
         decode -- those offsets yield no candidate rather than a short one. '''
     matches = list(literal_scan(b'\x0f\x05', 0x1000, 1, _x86_md().disasm, 2))
     assert matches == []
+
+
+# --- Aligned literal scan (raw() on fixed-width ISAs) ----------------------
+#
+# The single-pass counterpart to literal_scan for aligned ISAs. Exercised with
+# AArch64 (alignment 4): mov x0, x1 = e0 03 01 aa, ret = c0 03 5f d6.
+
+def _arm64_md():
+    if not hasattr(capstone, 'CS_ARCH_ARM64'):
+        pytest.skip('capstone build without ARM64 support')
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+    md.detail = True
+    return md
+
+
+def _aligned_mnems(opcodes, pattern_len, base=0x1000):
+    matches = aligned_literal_scan(opcodes, base, 4, _arm64_md().disasm, pattern_len)
+    return [(vaddr, [d.mnemonic for d in decodes])
+            for vaddr, _raw, decodes in matches]
+
+
+def test_aligned_literal_scan_single_instruction_each_position():
+    ''' Every aligned instruction of the intended stream is yielded once, in a
+        single pass (one disasm call, not one per offset). '''
+    code = b'\xe0\x03\x01\xaa\xc0\x03\x5f\xd6'   # mov x0, x1 ; ret
+    assert _aligned_mnems(code, 1) == [(0x1000, ['mov']), (0x1004, ['ret'])]
+
+
+def test_aligned_literal_scan_multi_instruction_window():
+    ''' A multi-instruction pattern is matched as a contiguous window sliding
+        along the intended stream. '''
+    code = b'\xe0\x03\x01\xaa\xc0\x03\x5f\xd6'   # mov x0, x1 ; ret
+    assert _aligned_mnems(code, 2) == [(0x1000, ['mov', 'ret'])]
+
+
+def test_aligned_literal_scan_resyncs_and_breaks_window_across_gap():
+    ''' An undecodable word (ff ff ff ff) is a resync gap: the two real
+        instructions on either side are not contiguous, so a 2-instruction
+        window never spans the hole -- while a 1-instruction scan still finds
+        each real instruction. '''
+    code = (b'\xe0\x03\x01\xaa'    # mov x0, x1   @ 0x1000
+            b'\xff\xff\xff\xff'    # undecodable  @ 0x1004
+            b'\xc0\x03\x5f\xd6')   # ret          @ 0x1008
+    assert _aligned_mnems(code, 1) == [(0x1000, ['mov']), (0x1008, ['ret'])]
+    assert _aligned_mnems(code, 2) == []          # window can't cross the gap
+
+
+def test_aligned_literal_scan_rejects_short_trailing_window():
+    ''' A stream shorter than `pattern_len` instructions yields no candidate. '''
+    code = b'\xc0\x03\x5f\xd6'                     # just ret
+    assert _aligned_mnems(code, 2) == []
+
+
+# --- Assemble + byte-regex fast path (raw()) -------------------------------
+#
+# raw_byte_scan is fed the needle bytes directly, so it is exercised here
+# independently of whether Keystone is installed / loadable.
+
+def test_assemble_returns_none_or_expected_bytes():
+    ''' assemble() yields the needle when Keystone is available, else None so
+        find_raw_gadgets can fall back -- it is never fatal. '''
+    from rop3.archs.x86_arch import X64_Architecture
+    result = assemble('syscall', X64_Architecture())
+    assert result is None or result == b'\x0f\x05'
+
+
+def test_raw_byte_scan_finds_first_and_all_appearances_x86():
+    ''' On x86 (alignment 1) every occurrence of the needle is yielded in
+        address order; a caller taking the first stops at the lowest address. '''
+    opcodes = b'\x0f\x05\x90\x0f\x05'              # syscall ; nop ; syscall
+    hits = list(raw_byte_scan(opcodes, 0x1000, b'\x0f\x05', 1, _x86_md().disasm))
+    assert [v for v, _r, _d in hits] == [0x1000, 0x1003]
+
+
+def test_raw_byte_scan_finds_unintended_offset_x86():
+    ''' The needle is located by its bytes, so a `syscall` hiding inside the
+        `mov`'s immediate (offset 1, not an intended boundary) is still found. '''
+    hits = list(raw_byte_scan(HIDDEN_SYSCALL, 0x1000, b'\x0f\x05', 1,
+                              _x86_md().disasm))
+    assert [v for v, _r, _d in hits] == [0x1001]
+    assert hits[0][2][0].mnemonic == 'syscall'
+
+
+def test_raw_byte_scan_respects_alignment():
+    ''' On a fixed-width ISA (alignment > 1) only aligned occurrences pass. '''
+    opcodes = b'\x00\x00\xef\xbe\x00\x00\xef\xbe'   # needle at off 2 (unaligned), 6
+    stub = lambda raw, va: []
+    hits = list(raw_byte_scan(opcodes, 0x1000, b'\xef\xbe', 4, stub))
+    assert [v for v, _r, _d in hits] == []          # neither offset is 4-aligned
+    opcodes = b'\x00\x00\x00\x00\xef\xbe'           # needle at off 4 (aligned)
+    hits = list(raw_byte_scan(opcodes, 0x1000, b'\xef\xbe', 4, stub))
+    assert [v for v, _r, _d in hits] == [0x1004]
+
+
+def test_raw_byte_scan_enumerates_overlapping_so_alignment_never_hides_a_hit():
+    ''' Overlapping occurrences are enumerated, so an aligned hit sitting within
+        needle-length of an earlier unaligned one is not skipped (a plain
+        non-overlapping search would jump past it). '''
+    opcodes = b'\x00\x00' + b'\xaa' * 6             # needle 'aaaa' at off 2, 3, 4
+    stub = lambda raw, va: []
+    hits = [v for v, _r, _d in raw_byte_scan(opcodes, 0x1000, b'\xaa\xaa\xaa\xaa',
+                                             4, stub)]
+    assert hits == [0x1004]                          # the one aligned occurrence
+
+
+def test_raw_byte_scan_not_found_yields_nothing():
+    hits = list(raw_byte_scan(b'\x90\x90\xc3', 0x1000, b'\x0f\x05', 1,
+                              _x86_md().disasm))
+    assert hits == []
 
 
 # --- Backward framed (ropblock) search ------------------------------------

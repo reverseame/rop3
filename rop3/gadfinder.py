@@ -239,13 +239,13 @@ class GadFinder:
             (step, gadgets) pairs. None if any primitive matches no gadget (the
             realization is infeasible and is skipped).
 
-            A `noret(...)` primitive (RopChain._parse_noret_line) may carry its
-            own `literal_gadgets` -- candidates found by find_literal_gadgets's
+            A `raw(...)` primitive (RopChain._parse_raw_line) may carry its
+            own `literal_gadgets` -- candidates found by find_raw_gadgets's
             direct scan, independent of the normal backward gadget scan. Those
             are added to the pool for *this primitive only*, never merged into
-            `gadgets` itself: they don't really return control anywhere, so
-            leaking them into the shared pool could let an unrelated step pick
-            one and silently produce a broken chain. '''
+            `gadgets` itself: a raw gadget with no terminator does not return
+            control anywhere, so leaking one into the shared pool could let an
+            unrelated step pick it and silently produce a broken chain. '''
         bundle = []
         for prim in primitives:
             operands = [self._resolve_operand(prim.get('op1')),
@@ -408,19 +408,35 @@ class GadFinder:
         if records is not None:
             self._cache.store(key, records)
 
-    def find_literal_gadgets(self, filenames: list[str], defn: OperationDef,
-                             base=None, badchars=None, badchar_bytes=None,
-                             arch=None) -> list[Gadget]:
+    def find_raw_gadgets(self, filenames: list[str], defn: OperationDef,
+                         base=None, badchars=None, badchar_bytes=None,
+                         arch=None) -> list[Gadget]:
         '''
-        Direct, terminator-free scan for `defn`'s literal instruction pattern
-        (a `noret(...)` chain step's single realization, e.g. a bare
-        `syscall`/`svc 0`/`ecall`) -- used because the normal backward gadget
-        scan (`find`/`_search_gadgets`) structurally only ever emits candidates
-        whose last instruction is a valid ROP/JOP terminator
-        (`Architecture.is_valid_rop_gadget`/`is_valid_jop_gadget`), so a bare
-        non-returning sequence with nothing reachable after it is never even
-        considered a candidate. This bypasses that machinery entirely: it just
-        looks for the group of instructions, via `search.literal_scan`.
+        Direct scan for `defn`'s verbatim instruction pattern (a `raw(...)`
+        chain step's single realization) -- used because the normal backward
+        gadget scan (`find`/`_search_gadgets`) structurally only ever emits
+        candidates whose last instruction is a valid ROP/JOP terminator
+        (`Architecture.is_valid_rop_gadget`/`is_valid_jop_gadget`), so a raw
+        gadget with no ret/branch terminator (e.g. a bare `syscall`/`svc 0`/
+        `ecall`) is never even considered a candidate. This bypasses that
+        machinery entirely: it just looks for the group of instructions.
+
+        Fast path -- **assemble, then byte-regex the binary, take the first
+        appearance**. `search.assemble` (Keystone) turns the pattern into the
+        exact byte needle; `search.raw_byte_scan` locates it directly in each
+        section's bytes (respecting alignment: every offset on x86 so an
+        "unintended" mid-instruction match is still found, aligned offsets only
+        on fixed-width ISAs). This avoids disassembling the whole binary, which
+        is what made the plain forward scan too slow for large targets. Only the
+        **first appearance** per binary is returned -- a raw gadget's copies are
+        interchangeable (same instructions, same side effects), so one is enough.
+
+        Fallback -- when the fast path is unavailable (Keystone missing or its
+        native library won't load, no Keystone backend for the arch such as
+        RISC-V, or the text does not assemble), `search.assemble` returns None
+        and this drops to the Capstone forward scan: `search.literal_scan`
+        (x86, every byte offset) or `search.aligned_literal_scan` (fixed-width,
+        one linear pass). Same first-appearance semantics.
 
         Returns synthetic Gadgets with `frame = (False,) * pattern_len` --
         deliberately not a mask that marks the last position as framing, since
@@ -430,10 +446,11 @@ class GadFinder:
 
         Out of scope for now: the on-disk gadget cache and `--jobs`
         parallelism -- this only runs when a chain file actually contains a
-        `noret(...)` step.
+        `raw(...)` step.
         '''
         pattern = defn.realizations[0].links[0]
         pattern_len = len(pattern.items)
+        asm_text = '\n'.join(str(item) for item in pattern.items)
         bases = base if isinstance(base, list) else [base] * len(filenames)
 
         ret: list[Gadget] = []
@@ -447,17 +464,33 @@ class GadFinder:
                 return (self._is_valid_address(vaddr, badchars, arch_obj.address_size)
                         and self._is_valid_bytes(raw, badchar_bytes))
 
+            needle = search.assemble(asm_text, arch_obj)
+
+            def candidates(opcodes, vaddr):
+                if needle is not None:
+                    return search.raw_byte_scan(
+                        opcodes, vaddr, needle, arch_obj.alignment, md.disasm,
+                        accept_candidate=accept_candidate)
+                scan = (search.literal_scan if arch_obj.alignment == 1
+                        else search.aligned_literal_scan)
+                return scan(opcodes, vaddr, arch_obj.alignment, md.disasm,
+                            pattern_len, accept_candidate=accept_candidate)
+
+            found = None
             for section in binary.get_exec_sections():
                 opcodes, vaddr = section['opcodes'], section['vaddr']
-                for cand_vaddr, raw, decodes in search.literal_scan(
-                        opcodes, vaddr, arch_obj.alignment, md.disasm,
-                        pattern_len, accept_candidate=accept_candidate):
+                for cand_vaddr, raw, decodes in candidates(opcodes, vaddr):
                     if pattern.matches_exactly(decodes) is None:
                         continue
-                    ret.append(Gadget(
+                    found = Gadget(
                         filename=binary.filename, arch=arch_obj.arch,
                         mode=arch_obj.mode, vaddr=cand_vaddr, decodes=decodes,
-                        bytes=raw, frame=(False,) * pattern_len))
+                        bytes=raw, frame=(False,) * pattern_len)
+                    break
+                if found is not None:
+                    break
+            if found is not None:
+                ret.append(found)
         return ret
 
     def _scan_sections(self, binary, badchars, badchar_bytes):

@@ -350,7 +350,7 @@ class OperationDef:
     chain of gadget-patterns and operation references).
     '''
     def __init__(self, name, operands=0, dst_roles=None, src_roles=None,
-                 available=True, unavailable_reason=None, no_terminator=False):
+                 available=True, unavailable_reason=None):
         self.name = name
         self.operands = operands
         self.dst_roles = list(dst_roles or [])
@@ -360,14 +360,12 @@ class OperationDef:
         # A YAML `<arch>: {available: false}` marks it unavailable (see parser).
         self.available = available
         self.unavailable_reason = unavailable_reason
-        # Set for a `noret(...)` chain step (RopChain._parse_noret_line): this
-        # definition's single realization needs no ret/branch terminator, so
-        # it is never required to sit inside a terminator-anchored Gadget.
+        # Set for a `raw(...)` chain step (RopChain._parse_raw_line):
         # `literal_gadgets`, filled in by RopChain.search once binaries are
-        # available, holds the candidates found by GadFinder.find_literal_gadgets
+        # available, holds the candidates found by GadFinder.find_raw_gadgets
         # (a direct forward scan, independent of the normal backward gadget
         # scan) -- scoped to this one step only (see GadFinder._match_primitives).
-        self.no_terminator = no_terminator
+        # A raw gadget carries no ret/branch terminator requirement.
         self.literal_gadgets: list = None
 
     def add(self, realization):
@@ -538,7 +536,7 @@ class Set:
     def matches_exactly(self, decodes):
         ''' Whether `decodes` is exactly this pattern, position for position --
             no anchoring/frame skipping, just an exact-length equality check.
-            Used by GadFinder.find_literal_gadgets (the `noret(...)` chain-step
+            Used by GadFinder.find_raw_gadgets (the `raw(...)` chain-step
             scan) to test a candidate window with no gadget/frame concept
             involved. Returns the (bindings, indices) `_match_run` would, or
             None when the lengths differ or the pattern does not match. '''

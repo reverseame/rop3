@@ -26,6 +26,8 @@ from rop3.archs.riscv_arch import RISCV_Architecture
 
 from conftest import make_gadget, build_minimal_elf, EM_X86_64, ET_DYN
 
+EM_AARCH64 = 183
+
 
 def _op(op, dst=None, src=None):
     ''' A requested chain step. Operand slots are the positional op1/op2
@@ -644,93 +646,72 @@ def test_parse_raw_gadget_malformed_raises(x64, line, reason):
     assert reason in str(exc.value)
 
 
-# --- Explicit no-terminator (noret) gadget definitions ---------------------
+# --- raw gadgets with no terminator requirement ----------------------------
 
-def test_parse_noret_gadget_single_instruction(x64, tmp_path):
-    ''' A noret gadget line parses exactly like raw(), but its OperationDef
-        is marked no_terminator so it never needs a ret/branch terminator. '''
+def test_parse_raw_gadget_bare_syscall(x64, tmp_path):
+    ''' A raw gadget needs no ret/branch terminator: a bare `syscall` parses
+        into a step whose inline OperationDef has no literal_gadgets resolved
+        yet (those are filled in later, only when binaries are available). '''
     ropfile = tmp_path / 'chain.txt'
-    ropfile.write_text('noret([syscall], [], [], [rdi, rax])\n')
+    ropfile.write_text('raw([syscall], [], [], [rdi, rax])\n')
     parsed = RopChain(GadFinder())._parse_ropfile(str(ropfile))
     assert len(parsed) == 1
     step = parsed[0]
     assert step['op'] == 'syscall'
     defn = step['defn']
-    assert defn.no_terminator is True
     assert defn.literal_gadgets is None
     assert defn.dst_roles == [] and defn.src_roles == ['rdi', 'rax']
     insns = [str(i) for i in defn.realizations[0].links[0].items]
     assert insns == ['syscall ']
 
 
-def test_search_noret_gadget_matches_gadget_with_no_terminator(x64):
-    ''' Unlike raw(), a noret gadget matches a candidate gadget that does not
-        end in a ret/branch -- proving the matching layer itself never
-        required a terminator (only the normal backward scan does): neither
-        `syscall` nor `nop` is a valid ROP/JOP terminator, so GadFinder.find()
-        could never have produced this candidate itself. '''
+def test_search_raw_gadget_matches_gadget_with_no_terminator(x64):
+    ''' A raw gadget matches a candidate that does not end in a ret/branch --
+        the matching layer itself never required a terminator (only the normal
+        backward scan does): neither `syscall` nor `nop` is a valid ROP/JOP
+        terminator, so GadFinder.find() could never have produced this
+        candidate itself. '''
     gadgets = [make_gadget(b'\x0f\x05\x90', 0x1000)]   # syscall ; nop -- no ret
     rc = RopChain(GadFinder())
-    chain = [rc._parse_noret_line('noret([syscall], [], [], [])')]
+    chain = [rc._parse_raw_line('raw([syscall], [], [], [])')]
     results = list(rc.search(gadgets, chain, symbolic=False))
     assert results
     assert results[0][0].op == 'syscall'
 
 
-def test_search_noret_gadget_no_match_raises(x64):
+def test_search_raw_gadget_bare_no_match_raises(x64):
     gadgets = [make_gadget(b'\x90\xc3', 0x1000)]   # nop ; ret (no syscall)
     rc = RopChain(GadFinder())
-    chain = [rc._parse_noret_line('noret([syscall], [], [], [])')]
+    chain = [rc._parse_raw_line('raw([syscall], [], [], [])')]
     with pytest.raises(ropchain_mod.RopChainNotFound):
         list(rc.search(gadgets, chain, symbolic=False))
 
 
-def test_noret_position_last_real_step_is_accepted(x64):
-    rc = RopChain(GadFinder())
-    steps = [_op('lc', dst='rdi'), rc._parse_noret_line('noret([syscall], [], [], [])')]
-    RopChain._check_noret_position(steps)   # must not raise
-
-
-def test_noret_position_followed_only_by_free_is_accepted(x64):
-    ''' free(...) directives never correspond to a real gadget, so a
-        noret(...) followed only by free(...) is still "last". '''
-    rc = RopChain(GadFinder())
-    steps = [
-        _op('lc', dst='rdi'),
-        rc._parse_noret_line('noret([syscall], [], [], [])'),
-        _free('rdi'),
-    ]
-    RopChain._check_noret_position(steps)   # must not raise
-
-
-def test_noret_position_before_another_step_raises(x64):
-    rc = RopChain(GadFinder())
-    steps = [rc._parse_noret_line('noret([syscall], [], [], [])'), _op('lc', dst='rdi')]
-    with pytest.raises(ropchain_mod.RopChainNotFound):
-        RopChain._check_noret_position(steps)
-
-
-def test_search_rejects_misplaced_noret_step(x64):
-    ''' The same check is enforced end-to-end from search(), before assembly
-        even starts -- a misplaced noret(...) never silently builds a chain. '''
+def test_raw_gadget_with_no_terminator_allowed_mid_chain(x64):
+    ''' A raw gadget with no terminator is no longer forced to be the last step
+        (the old noret-must-be-last rule is gone): it matches wherever its
+        instructions appear and a following step resolves independently. '''
     gadgets = [
-        make_gadget(b'\x5f\xc3', 0x1000),   # pop rdi ; ret
-        make_gadget(b'\x0f\x05', 0x1010),   # syscall
+        make_gadget(b'\x0f\x05\x90', 0x1000),   # syscall ; nop
+        make_gadget(b'\x5f\xc3', 0x1010),       # pop rdi ; ret
     ]
     rc = RopChain(GadFinder())
-    chain = [rc._parse_noret_line('noret([syscall], [], [], [])'), _op('lc', dst='rdi')]
-    with pytest.raises(ropchain_mod.RopChainNotFound):
-        list(rc.search(gadgets, chain, symbolic=False))
+    chain = [
+        rc._parse_raw_line('raw([syscall], [], [], [])'),
+        rc._parse_raw_line('raw([pop, ret], [rdi], [rdi], [])'),
+    ]
+    results = list(rc.search(gadgets, chain, symbolic=False))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['syscall ; nop', 'pop rdi ; ret']
 
 
-def test_noret_gadget_found_via_literal_scan_not_normal_gadget_scan(tmp_path):
+def test_raw_gadget_found_via_scan_not_normal_gadget_scan(tmp_path):
     '''
     End-to-end: a bare `syscall` with nothing reachable after it (no ret
     anywhere in the section) is structurally invisible to the normal backward
-    gadget scan -- GadFinder.find() never emits it as a candidate at all, so
-    raw(...) could never match it either. noret(...) finds it anyway via its
-    own direct literal scan (GadFinder.find_literal_gadgets), wired in through
-    Rop3.ropchain -> RopChain.search_from_gadgets(..., binaries=...).
+    gadget scan -- GadFinder.find() never emits it as a candidate at all.
+    raw(...) finds it anyway via its own direct scan (GadFinder.find_raw_gadgets),
+    wired in through Rop3.ropchain -> RopChain.search_from_gadgets(..., binaries=...).
     '''
     from rop3 import Rop3
 
@@ -741,22 +722,50 @@ def test_noret_gadget_found_via_literal_scan_not_normal_gadget_scan(tmp_path):
     assert not any('syscall' in g.text_repr for g in r3.gadgets())
 
     ropfile = tmp_path / 'chain.txt'
-    ropfile.write_text('noret([syscall], [], [], [])\n')
+    ropfile.write_text('raw([syscall], [], [], [])\n')
     results = list(r3.ropchain(str(ropfile)))
     assert results
     assert results[0][0].text_repr == 'syscall'
     assert results[0][0].vaddr == 0x1000
 
 
-def test_find_literal_gadgets_tries_unintended_offsets_on_x86(tmp_path):
-    ''' The `noret(...)` scan tries every byte offset on x86 (alignment 1),
-        not just intended instruction boundaries -- so a `syscall` hiding
-        inside another instruction's encoding is still found. '''
+def test_find_raw_gadgets_tries_unintended_offsets_on_x86(tmp_path):
+    ''' On x86 (alignment 1) the raw scan tries every byte offset, not just
+        intended instruction boundaries -- so a `syscall` hiding inside another
+        instruction's encoding is still found. '''
     text = b'\xb8\x0f\x05\x00\x00\xc3'   # mov eax, 0x50f ; ret (syscall @ +1)
     path = tmp_path / 'a.elf'
     path.write_bytes(build_minimal_elf(64, EM_X86_64, text, 0x1000, ET_DYN))
 
     finder = GadFinder()
-    defn = RopChain(finder)._parse_noret_line('noret([syscall], [], [], [])')['defn']
-    found = finder.find_literal_gadgets([str(path)], defn)
+    defn = RopChain(finder)._parse_raw_line('raw([syscall], [], [], [])')['defn']
+    found = finder.find_raw_gadgets([str(path)], defn)
     assert any(g.vaddr == 0x1001 and g.text_repr == 'syscall' for g in found)
+
+
+def test_find_raw_gadgets_on_aligned_arch(tmp_path):
+    ''' A multi-instruction raw gadget resolves end-to-end on a fixed-width ISA
+        (AArch64, alignment 4) at its aligned boundary -- via the Keystone
+        byte-regex fast path when available, else the aligned Capstone scan. '''
+    text = b'\xe0\x03\x01\xaa\xc0\x03\x5f\xd6'   # mov x0, x1 ; ret
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_AARCH64, text, 0x1000, ET_DYN))
+
+    finder = GadFinder()
+    defn = RopChain(finder)._parse_raw_line('raw([mov, ret], [(x0, x1), ()], [x0], [])')['defn']
+    found = finder.find_raw_gadgets([str(path)], defn)
+    assert any(g.vaddr == 0x1000 and g.text_repr == 'mov x0, x1 ; ret' for g in found)
+
+
+def test_find_raw_gadgets_returns_only_first_appearance(tmp_path):
+    ''' The scan returns only the first appearance of the pattern per binary --
+        a raw gadget's copies are interchangeable, so one candidate is enough
+        (and stopping at the first is what keeps the scan fast). '''
+    text = b'\x0f\x05\x90\x0f\x05'   # syscall ; nop ; syscall (two copies)
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, text, 0x1000, ET_DYN))
+
+    finder = GadFinder()
+    defn = RopChain(finder)._parse_raw_line('raw([syscall], [], [], [])')['defn']
+    found = finder.find_raw_gadgets([str(path)], defn)
+    assert [g.vaddr for g in found] == [0x1000]   # the lower-addressed copy only

@@ -44,17 +44,12 @@ REGEX_OP = re.compile(
 COMMENT = re.compile(r'^(?:\s*;.*)?$')
 
 '''
-Matches an explicit inline gadget:
+Matches an explicit inline gadget: a verbatim instruction sequence, matched as
+written with no ret/branch terminator requirement (include a terminator among
+the mnemonics if you want one):
     raw([mnemonic, ...], [operands], [dst regs], [src regs])
 '''
 REGEX_RAW = re.compile(r'^\s*raw\s*\(')
-
-'''
-Matches an explicit inline instruction sequence with no ret/branch terminator
-requirement, only ever legal as the chain's last real step:
-    noret([mnemonic, ...], [operands], [dst regs], [src regs])
-'''
-REGEX_NORET = re.compile(r'^\s*noret\s*\(')
 
 # Base for the fresh internal names --legacy-ropchain's free(NAME) rename pass
 # hands out to a post-free reuse of a name. Distinct from
@@ -118,19 +113,17 @@ class RopChain:
         not required to assemble a chain.
 
         `binaries`/`base`/`badchars`/`badchar_bytes`/`arch` are only consulted
-        when `ropchain` contains a `noret(...)` step: they drive
-        GadFinder.find_literal_gadgets, the direct scan that step's candidates
-        come from (see `_resolve_noret_gadgets`). Without `binaries`, a
-        `noret(...)` step degrades to matching only against `gadgets` as given
-        -- exactly like `raw(...)` -- which is what lets a caller with no file
-        access (e.g. a hand-built `gadgets` list in a unit test) still exercise
-        it.
+        when `ropchain` contains a `raw(...)` step: they drive
+        GadFinder.find_raw_gadgets, the direct scan that step's candidates come
+        from (see `_resolve_raw_gadgets`). Without `binaries`, a `raw(...)` step
+        degrades to matching only against `gadgets` as given -- which is what
+        lets a caller with no file access (e.g. a hand-built `gadgets` list in a
+        unit test) still exercise it.
         '''
         self._check_free_usage(ropchain)
-        self._check_noret_position(ropchain)
         if legacy:
             ropchain = self._rewrite_legacy_frees(ropchain)
-        self._resolve_noret_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch)
+        self._resolve_raw_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch)
         realizations = self.gadfinder.classify_ropchain(gadgets, ropchain)
         found = False
         for bundle, free_events in realizations:
@@ -409,13 +402,6 @@ class RopChain:
                     debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
                 continue
 
-            if REGEX_NORET.match(line):
-                try:
-                    ret.append(self._parse_noret_line(line))
-                except RawGadgetError as exc:
-                    debug.error(f'{ropfile}: Line {i}: {line}: {exc}')
-                continue
-
             match = REGEX_OP.search(line)
             if match:
                 op_name = match.group('OP')
@@ -513,38 +499,23 @@ class RopChain:
                     ever_seen.add(v)
                     pending_free.discard(v)
 
-    @staticmethod
-    def _check_noret_position(steps: list[dict]) -> None:
-        ''' A `noret(...)` step (defn.no_terminator) may only be the chain's
-            last *real* (non-free) step: it does not hand control to anything
-            after it, so placed anywhere else it would silently produce a
-            chain that does not actually work. Unlike `_check_free_usage`,
-            this is a hard error -- nothing else validates that a gadget's
-            terminator lands on the next step, so this is the only place a
-            misplaced noret(...) would ever be caught. '''
-        real_steps = [s for s in steps if s.get('free') is None]
-        last_index = len(real_steps) - 1
-        for i, step in enumerate(real_steps):
-            defn = step.get('defn')
-            if defn is not None and getattr(defn, 'no_terminator', False) and i != last_index:
-                raise RopChainNotFound(
-                    f'{step["data"]}: a noret(...) step must be the last step '
-                    'of the chain (it does not transfer control onward)')
-
-    def _resolve_noret_gadgets(self, steps: list[dict], binaries, base,
-                               badchars, badchar_bytes, arch) -> None:
-        ''' For every `noret(...)` step, fill in defn.literal_gadgets via
-            GadFinder.find_literal_gadgets when `binaries` is available. A
-            step whose literal_gadgets is already resolved (e.g. `search` was
-            called more than once with the same parsed steps) is not rescanned. '''
+    def _resolve_raw_gadgets(self, steps: list[dict], binaries, base,
+                             badchars, badchar_bytes, arch) -> None:
+        ''' For every `raw(...)` step (the only producer of an inline `defn`),
+            fill in defn.literal_gadgets via GadFinder.find_raw_gadgets when
+            `binaries` is available -- the direct scan that finds the verbatim
+            instruction sequence in the target regardless of whether it ends on
+            a control-flow terminator. A step whose literal_gadgets is already
+            resolved (e.g. `search` was called more than once with the same
+            parsed steps) is not rescanned. '''
         if not binaries:
             return
         for step in steps:
             defn = step.get('defn')
-            if defn is None or not getattr(defn, 'no_terminator', False):
+            if defn is None:
                 continue
             if defn.literal_gadgets is None:
-                defn.literal_gadgets = self.gadfinder.find_literal_gadgets(
+                defn.literal_gadgets = self.gadfinder.find_raw_gadgets(
                     binaries, defn, base=base, badchars=badchars,
                     badchar_bytes=badchar_bytes, arch=arch)
 
@@ -593,11 +564,11 @@ class RopChain:
             out.append(rewrite(step))
         return out
 
-    def _parse_explicit_gadget_fields(self, line: str, what: str) -> tuple:
+    def _parse_explicit_gadget_fields(self, line: str) -> tuple:
         '''
-        Shared field parsing for `raw(...)` and `noret(...)`:
+        Field parsing for `raw(...)`:
 
-            <keyword>([mnemonic, ...], [operands], [dst], [src])
+            raw([mnemonic, ...], [operands], [dst], [src])
 
         The four bracketed fields are the instruction mnemonics, their operands,
         and the concrete registers written (dst) / read (src) for the
@@ -609,18 +580,17 @@ class RopChain:
         instructions, wrap each instruction's operands in `(...)`
         (`raw([pop, pop, ret], [(rdi), (rsi)], [rdi, rsi], [])`).
 
-        Returns (instructions, name, dst, src); `what` names the construct in
-        error messages (`'raw gadget'` / `'noret gadget'`).
+        Returns (instructions, name, dst, src).
         '''
         body = self._raw_body(line)
         fields = self._split_top_level(body)
         if len(fields) != 4:
-            raise RawGadgetError(f'a {what} needs exactly four bracketed '
+            raise RawGadgetError('a raw gadget needs exactly four bracketed '
                                  'fields: [mnemonics], [operands], [dst], [src]')
 
         mnemonics = self._raw_list(fields[0], 'mnemonics')
         if not mnemonics:
-            raise RawGadgetError(f'a {what} needs at least one mnemonic')
+            raise RawGadgetError('a raw gadget needs at least one mnemonic')
         per_instr_ops = self._raw_operands(fields[1], len(mnemonics))
         dst = self._raw_list(fields[2], 'dst')
         src = self._raw_list(fields[3], 'src')
@@ -644,35 +614,18 @@ class RopChain:
         classifier/assembler consume it unchanged; the only difference is that
         its definition is built here instead of resolved from the operation
         catalog. The gadget is matched exactly as written, hence architecture
-        specific (no multi-architecture realizations), and it is matched *inside*
-        whatever the normal backward gadget scan already found -- so, unlike
-        `noret(...)`, it still needs a real ret/branch-terminated gadget
-        somewhere in the binary to match against.
+        specific (no multi-architecture realizations).
+
+        A raw gadget carries no ret/branch terminator requirement: its
+        candidates come from GadFinder.find_raw_gadgets, a direct scan
+        independent of the normal backward gadget-finder machinery (see
+        RopChain.search / _resolve_raw_gadgets), so a bare non-returning tail
+        such as `syscall`/`svc 0`/`ecall` is expressible. If you want a
+        terminator, include it among the mnemonics (`pop rdi ; ret`).
         '''
-        instructions, name, dst, src = self._parse_explicit_gadget_fields(line, 'raw gadget')
+        instructions, name, dst, src = self._parse_explicit_gadget_fields(line)
 
         defn = OperationDef(name, operands=0, dst_roles=dst, src_roles=src)
-        defn.add_realization([{'gadget': instructions}])
-
-        return {'data': line.strip(), 'op': name, 'operands': [], 'defn': defn}
-
-    def _parse_noret_line(self, line: str) -> dict:
-        '''
-        Parse a no-terminator explicit-gadget line, same syntax as `raw(...)`:
-
-            noret([mnemonic, ...], [operands], [dst], [src])
-
-        Unlike `raw(...)`, this pattern is never required to sit inside a
-        ret/branch-terminated Gadget -- it also gets matched against candidates
-        from GadFinder.find_literal_gadgets, a direct scan independent of the
-        normal backward gadget-finder machinery (see RopChain.search /
-        _resolve_noret_gadgets). Only ever legal as the chain's last real
-        (non-free) step -- see RopChain._check_noret_position.
-        '''
-        instructions, name, dst, src = self._parse_explicit_gadget_fields(line, 'noret gadget')
-
-        defn = OperationDef(name, operands=0, dst_roles=dst, src_roles=src,
-                            no_terminator=True)
         defn.add_realization([{'gadget': instructions}])
 
         return {'data': line.strip(), 'op': name, 'operands': [], 'defn': defn}

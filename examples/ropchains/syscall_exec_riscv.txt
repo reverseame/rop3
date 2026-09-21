@@ -8,4 +8,4 @@ lc(REG1)
 lc(REG2)
 st(REG1, REG2)
 ld(a2, REG1)    ; a2 <- 0
-noret([addi, ecall], [(a7, zero, 0xdd), ()], [], [a0, a1, a2])
+raw([addi, ecall], [(a7, zero, 0xdd), ()], [], [a0, a1, a2])
