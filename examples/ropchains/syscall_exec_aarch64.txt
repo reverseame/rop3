@@ -12,4 +12,4 @@ lc(x2)
 lc(REG1)
 mov(x0, REG1)    ; x0 <- &path
 lc(x1)           ; x1 <- argv
-noret([mov, svc], [(x8, 0xdd), (0)], [], [x0, x1, x2])
+raw([mov, svc], [(x8, 0xdd), (0)], [], [x0, x1, x2])

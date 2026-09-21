@@ -129,8 +129,8 @@ class Rop3:
         ''' Iterator over ROP chains satisfying the operations in `ropfile`.
             `symbolic` enables the optional Triton-based concolic validation
             pass on each assembled chain (off by default). `binaries`/`base`/
-            etc. are passed through so a `noret(...)` step (see
-            RopChain._parse_noret_line) can run its direct literal scan. '''
+            etc. are passed through so a `raw(...)` step (see
+            RopChain._parse_raw_line) can run its direct literal scan. '''
         return RopChain(self._finder).search_from_gadgets(
             self.gadgets(), ropfile, legacy=legacy, symbolic=symbolic,
             binaries=self.binaries, base=self.base, badchars=self.badchars,

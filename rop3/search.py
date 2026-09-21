@@ -268,7 +268,7 @@ def literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
 
     Unlike every other strategy in this module there is no terminator/frame
     concept driving the walk -- every candidate window is tried independently,
-    and the caller (GadFinder.find_literal_gadgets, for a chain's `noret(...)`
+    and the caller (GadFinder.find_raw_gadgets, for a chain's `raw(...)`
     step) applies the actual pattern-equality test; this stays pattern-agnostic
     like the rest of this module.
 
@@ -298,6 +298,125 @@ def literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
             if accept_candidate is None or accept_candidate(vaddr, raw):
                 yield vaddr, raw, decodes
         off += step
+
+
+def aligned_literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
+                         accept_candidate=None):
+    '''
+    Fixed-length instruction-window scan over the *intended* instruction stream
+    -- the single-pass counterpart to `literal_scan`, for aligned/fixed-width
+    ISAs (AArch64, RISC-V). Because every instruction on such an ISA begins on
+    an aligned boundary, the intended stream already contains every position a
+    gadget could start at, so there are no "unintended" mid-instruction windows
+    to miss: one linear disassembly pass finds them all, replacing `literal_scan`'s
+    one `disasm()` call per aligned offset.
+
+    Slides a window of the last `pattern_len` *contiguous* instructions along
+    the stream produced by `_linear_instruction_stream` (which resynchronizes
+    past undecodable bytes); a resync gap breaks contiguity and resets the
+    window. Like `literal_scan` it stays pattern-agnostic -- the caller
+    (`GadFinder.find_raw_gadgets`) applies the actual pattern-equality test.
+
+    Parameters mirror `literal_scan`.
+
+    Yields
+    ------
+    (vaddr, raw, decodes) for every aligned offset where `pattern_len`
+    contiguous instructions decode.
+    '''
+    window = []
+    for insn in _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
+        # A gadget's bytes must be a single contiguous run; a resync gap
+        # (a hole where nothing decoded) breaks it, so restart the window.
+        if window and window[-1].address + window[-1].size != insn.address:
+            window = []
+        window.append(insn)
+        if len(window) < pattern_len:
+            continue
+        del window[:-pattern_len]                   # keep only the last pattern_len
+        start = window[0].address
+        end = window[-1].address + window[-1].size
+        raw = opcodes[start - base_vaddr:end - base_vaddr]
+        if accept_candidate is None or accept_candidate(start, raw):
+            yield start, raw, list(window)
+
+
+def assemble(text, arch_obj):
+    '''
+    Assemble `text` (a raw gadget's instruction sequence, one instruction per
+    line) to the exact bytes to search the binary for, using Keystone --
+    Capstone's sister assembler. This is what makes the `raw(...)` scan fast:
+    the pattern is turned into a byte needle once and located with a byte-regex
+    (`raw_byte_scan`), instead of disassembling the whole binary.
+
+    Returns the assembled bytes, or `None` when the fast path is unavailable --
+    Keystone is not installed or its native library fails to load, the
+    architecture has no Keystone backend (e.g. RISC-V), or the text does not
+    assemble. Every `None` makes `GadFinder.find_raw_gadgets` fall back to the
+    Capstone forward scan (`literal_scan` / `aligned_literal_scan`), so the fast
+    path is strictly an optimization and never the only way a raw gadget is found.
+    '''
+    try:
+        import keystone
+    except Exception:                       # not installed / native lib load failure
+        return None
+    import capstone
+
+    if arch_obj.arch == capstone.CS_ARCH_X86:
+        ks_arch = keystone.KS_ARCH_X86
+        ks_mode = (keystone.KS_MODE_64 if arch_obj.mode & capstone.CS_MODE_64
+                   else keystone.KS_MODE_32)
+        syntax = keystone.KS_OPT_SYNTAX_INTEL       # match Capstone's Intel operand text
+    elif arch_obj.arch == capstone.CS_ARCH_ARM64:
+        ks_arch = keystone.KS_ARCH_ARM64
+        ks_mode = keystone.KS_MODE_LITTLE_ENDIAN
+        syntax = None
+    else:
+        return None                                 # no Keystone backend for this arch
+
+    try:
+        ks = keystone.Ks(ks_arch, ks_mode)
+        if syntax is not None:
+            ks.syntax = syntax
+        encoding, _count = ks.asm(text, 0)
+    except Exception:
+        return None
+    if not encoding:
+        return None
+    return bytes(encoding)
+
+
+def raw_byte_scan(opcodes, base_vaddr, needle, alignment, disasm,
+                  accept_candidate=None):
+    '''
+    Byte-regex scan for a fixed `needle` (the Keystone-assembled bytes of a
+    raw gadget) directly over a section's opcodes -- the fast path that skips
+    per-offset disassembly entirely.
+
+    Overlapping occurrences are enumerated (a zero-width lookahead regex) so
+    that alignment filtering never hides a valid aligned hit behind an earlier
+    unaligned one. On x86 (alignment 1) every offset is accepted, so a needle
+    sitting "unintended" inside another instruction's encoding is still found
+    (as `literal_scan` finds it by trying every offset); on a fixed-width ISA
+    only aligned offsets pass. Hits are yielded lazily in address order, so a
+    caller taking only the first appearance stops the scan at the first hit.
+
+    Yields
+    ------
+    (vaddr, raw, decodes) -- `raw` is the needle; `decodes` is the needle
+    disassembled at `vaddr` (so the caller can pattern-check and build a Gadget).
+    '''
+    if not needle:
+        return
+    probe = re.compile(b'(?=(' + re.escape(needle) + b'))')
+    for match in probe.finditer(opcodes):
+        off = match.start()
+        vaddr = base_vaddr + off
+        if alignment > 1 and vaddr % alignment != 0:
+            continue
+        if accept_candidate is not None and not accept_candidate(vaddr, needle):
+            continue
+        yield vaddr, needle, list(disasm(needle, vaddr))
 
 
 # --------------------------------------------------------------------------

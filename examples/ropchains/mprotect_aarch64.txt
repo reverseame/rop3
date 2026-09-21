@@ -3,4 +3,4 @@
 lc(x0)           ; x0 <- addr     page-aligned base
 lc(x1)           ; x1 <- len      region length
 lc(x2)           ; x2 <- 7        PROT_READ|PROT_WRITE|PROT_EXEC
-noret([mov, svc], [(x8, 0xe2), (0)], [], [x0, x1, x2])
+raw([mov, svc], [(x8, 0xe2), (0)], [], [x0, x1, x2])
