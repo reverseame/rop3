@@ -7,25 +7,25 @@ gcf-ltc:
   x86:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
           writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
           writes: [REG_FLAGS]
         - mnemonic: sbb
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
         - mnemonic: neg
           op1: op1
@@ -44,14 +44,14 @@ gcf-ltc:
   arm:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
           writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
 
   riscv:

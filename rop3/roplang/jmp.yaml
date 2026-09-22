@@ -1,4 +1,4 @@
-# Stack pivot: SP <- op1.
+# Indirect stack pivot: SP <- op1; a ROP jump.
 jmp:
   operands: 1
   dst: []
@@ -11,15 +11,37 @@ jmp:
           op1: REG_BP
           op2: op1
         - mnemonic: leave
+    - steps:
+        - operation: spa
+          op1: op1
 
   arm:
     - steps:
+        # Unlikely to exist
         - operation: mov
           op1: REG_SP
           op2: op1
+    - steps:
+        - operation: mov
+          op1: REG_BP
+          op2: op1
+        - operation: mov
+          op1: REG_SP
+          op2: REG_BP
+    - steps:
+        - operation: spa
+          op1: op1
 
   riscv:
     - steps:
         - operation: mov
           op1: REG_SP
           op2: op1
+    - steps:
+        - mnemonic: addi
+          op1: REG_SP
+          op2: op1
+          op3: ANY
+    - steps:
+        - operation: spa
+          op1: op1

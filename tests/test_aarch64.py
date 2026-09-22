@@ -178,10 +178,11 @@ def test_aarch64_framed_does_not_gate_jop(tmp_path):
 
 # --- ROPLang operation patterns (AArch64) ---------------------------------
 
-def _aarch64_op_matches(op, operands, body):
-    ''' Build a framed gadget `<body> ; ldp x29, x30, [sp], #16 ; ret` (the
-        operation first, the lr-restore in the epilogue) and return whether the
-        given operation matches it via the AArch64 ROPLang patterns. '''
+def _aarch64_op_matches(op, operands, body, frame=LDP_FRAME):
+    ''' Build a framed gadget `<body> ; <frame> ; ret` (the operation first, an
+        lr-restore in the epilogue; `frame` defaults to the `ldp x29, x30`
+        epilogue) and return whether the given operation matches it via the
+        AArch64 ROPLang patterns. '''
     import rop3.operation as operation
     from rop3.arch import arch_singleton
     from rop3.gadget import Gadget
@@ -189,7 +190,7 @@ def _aarch64_op_matches(op, operands, body):
     arch_singleton.initialize(AArch64_Architecture())
     md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     md.detail = True
-    code = body + LDP_FRAME + RET
+    code = body + frame + RET
     decodes = list(md.disasm(code, 0x1000))
     gadget = Gadget(filename='t', arch=capstone.CS_ARCH_ARM64,
                     mode=capstone.CS_MODE_ARM, vaddr=0x1000,
@@ -248,6 +249,65 @@ def test_aarch64_end_to_end_find_op_mov(tmp_path):
     path = _elf(tmp_path, MOV + LDP_FRAME + RET)
     gadgets = Rop3(str(path), depth=24).find_op('mov', operands=['x0', 'x1'])
     assert any('mov x0, x1' in g.text_repr for g in gadgets)
+
+
+# --- Register aliases (fp/lr) and the sp stack-pivot exception -------------
+# capstone's reg_name spells x29/x30 as fp/lr, so a ROPLang operand written
+# `x29` must fold to capstone's `fp` to match. And the classic libc stack pivot
+# `mov sp, x29 ; ldp x29, x30, [sp], #16 ; ret` re-writes sp in the epilogue
+# writeback -- sp is the exit/control register and is never treated as a
+# clobbered result. Both bugs previously made `jmp`'s pivot unfindable.
+
+MOV_SP_FP = bytes.fromhex('bf030091')   # mov sp, x29   (capstone: sp <- fp)
+MOV_FP_X0 = bytes.fromhex('fd0300aa')   # mov x29, x0   (capstone: fp <- x0)
+
+
+def test_aarch64_normalize_reg_folds_full_width_aliases():
+    arch = AArch64_Architecture()
+    # Full-width aliases fold to their canonical name (same 64-bit register).
+    assert arch.normalize_reg('fp') == 'x29'
+    assert arch.normalize_reg('lr') == 'x30'
+    assert arch.normalize_reg('wsp') == 'sp'
+    assert arch.normalize_reg('wzr') == 'xzr'
+    # Canonical names pass through, and the narrower 32-bit views (w0..w30) are
+    # left alone -- they are sub-registers, not aliases.
+    assert arch.normalize_reg('x29') == 'x29'
+    assert arch.normalize_reg('sp') == 'sp'
+    assert arch.normalize_reg('w0') == 'w0'
+
+
+@pytest.mark.parametrize('operands', [['x29', 'x0'], ['fp', 'x0']])
+def test_aarch64_operation_matches_x29_under_either_spelling(operands):
+    # `mov x29, x0` is spelled `mov fp, x0` by capstone's reg_name. An operation
+    # written with either `x29` or `fp` must match it. An lr-only frame
+    # (`ldr x30, [sp]`) keeps x29 live to the ret, isolating alias folding from
+    # the clobber check.
+    assert _aarch64_op_matches('mov', operands, MOV_FP_X0, frame=LDR_LR)
+
+
+@pytest.mark.parametrize('operands', [['sp', 'x29'], ['sp', 'fp']])
+def test_aarch64_pivot_gadget_matches_mov_sp(operands):
+    # The libc pivot `mov sp, x29 ; ldp x29, x30, [sp], #16 ; ret`: the source
+    # x29 is spelled `fp` (alias folding), and the `ldp` writeback re-writes sp,
+    # which the clobber check excuses (sp is never a guarded result).
+    assert _aarch64_op_matches('mov', operands, MOV_SP_FP)
+
+
+def test_aarch64_sp_destination_survives_frame_writeback(tmp_path):
+    # End-to-end: the scan finds the pivot and find_op('mov', [sp, x29]) returns
+    # it (before the fix the ldp sp-writeback got it rejected as clobbered).
+    path = _elf(tmp_path, MOV_SP_FP + LDP_FRAME + RET)
+    gadgets = Rop3(path, depth=24).find_op('mov', operands=['sp', 'x29'])
+    assert any(g.text_repr == 'mov sp, x29 ; ldp x29, x30, [sp], #0x10 ; ret'
+               for g in gadgets)
+
+
+def test_aarch64_non_sp_destination_still_rejects_clobbered(tmp_path):
+    # The sp exception is narrow: a non-sp destination reloaded before the ret is
+    # still contradictory. `mov x29, x0 ; ldp x29, x30, [sp] ; ret` reloads x29,
+    # so mov(x29, x0) must NOT match it.
+    path = _elf(tmp_path, MOV_FP_X0 + LDP_FRAME + RET)
+    assert Rop3(path, depth=24).find_op('mov', operands=['x29', 'x0']) == []
 
 
 # --- ropblock (abstract-gadget) return strategies -------------------------

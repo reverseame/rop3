@@ -7,7 +7,7 @@ gcf-eqc:
   x86:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
@@ -16,11 +16,11 @@ gcf-eqc:
           writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
@@ -29,7 +29,7 @@ gcf-eqc:
           writes: [REG_FLAGS]
         - mnemonic: sbb
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
         - mnemonic: neg
           op1: op1
@@ -50,7 +50,7 @@ gcf-eqc:
   arm:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - mnemonic: sub
           op1: op2
           op2: op3
@@ -61,7 +61,7 @@ gcf-eqc:
           op1: op1
         - mnemonic: adc
           op1: op1
-          op2: REG10
+          op2: TMP_REG
           reads: [REG_FLAGS]
 
   riscv:

@@ -59,9 +59,11 @@ _LEGACY_FREE_SLOT_BASE = 9500000
 
 
 def _is_generic_slot(key) -> bool:
-    ''' Whether `key` is a generic register-slot name (regN/REGn) rather than
-        a concrete register or None. '''
-    return key is not None and isinstance(key, str) and key.lower().startswith('reg')
+    ''' Whether `key` is a generic register-slot name (regN/REGn, or a TMP_REG
+        scratch temporary) rather than a concrete register or None. '''
+    if key is None or not isinstance(key, str):
+        return False
+    return key.lower().startswith('reg') or key.upper().startswith('TMP_REG')
 
 
 class RopChain:
@@ -124,7 +126,7 @@ class RopChain:
         if legacy:
             ropchain = self._rewrite_legacy_frees(ropchain)
         self._resolve_raw_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch)
-        realizations = self.gadfinder.classify_ropchain(gadgets, ropchain)
+        realizations = self.gadfinder.classify_ropchain(gadgets, ropchain, legacy=legacy)
         found = False
         for bundle, free_events in realizations:
             try:

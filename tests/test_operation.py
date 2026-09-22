@@ -90,6 +90,14 @@ def test_filter_gadgets_clobbered_destination(x64):
     assert [x.text_repr for x in make_operation('add', ['rsp', '8']).filter_gadgets([spa])] \
         == ['add rsp, 8 ; ret']
 
+    # sp is *never* a guarded destination: even an intermediate (non-terminator)
+    # write to it is not a clobber, because the stack pointer is the exit/control
+    # register and is expected to keep moving after a pivot. `mov rsp, rax ; pop
+    # rbp ; ret` pivots rsp and the `pop` then adjusts it -- still a valid mov.
+    pivot = make_gadget(b'\x48\x89\xc4\x5d\xc3', 0x1040)         # mov rsp, rax ; pop rbp ; ret
+    assert [x.text_repr for x in make_operation('mov', ['rsp', 'rax']).filter_gadgets([pivot])] \
+        == ['mov rsp, rax ; pop rbp ; ret']
+
 
 def test_operand_parse_imm_supports_hex_and_negative(x64):
     ''' Regression: immediates parsed with int(x, 0). '''

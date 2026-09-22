@@ -194,14 +194,29 @@ class AArch64_Architecture(Architecture):
 
     _LOAD_MNEMONICS = ('ldr', 'ldp', 'ldur')
 
-    @staticmethod
-    def _norm(name):
-        ''' Fold AArch64 register aliases for ropblock matching: lr->x30,
-            fp->x29, the 32-bit views w0..w30->x0..x30, wsp->sp. '''
+    # Full-width register aliases: alternative capstone spellings of the *same*
+    # 64-bit register. capstone's `reg_name` renders x29/x30 as fp/lr (and the
+    # zero/stack pointers as wzr/wsp in their 32-bit form), so a ROPLang operand
+    # written `x29`/`x30`/`sp` would never match without folding these. The
+    # 32-bit views (w0..w30) are deliberately absent: they are *narrower*
+    # registers, governed by the sub-register (allow_reg_aliases) machinery, not
+    # true aliases.
+    _FULLWIDTH_ALIASES = {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp', 'wzr': 'xzr'}
+
+    def normalize_reg(self, name: str | int) -> str:
+        ''' Fold full-width aliases (fp->x29, lr->x30, wsp->sp, wzr->xzr) so
+            operand matching and side-effect tracking are spelling-independent.
+            Narrower 32-bit views (w0..w30) are left untouched. '''
+        return self._FULLWIDTH_ALIASES.get(str(name), str(name))
+
+    @classmethod
+    def _norm(cls, name):
+        ''' Fold AArch64 register aliases for ropblock matching: the full-width
+            aliases (fp->x29, lr->x30, wsp->sp, wzr->xzr) plus the 32-bit views
+            w0..w30->x0..x30. '''
         n = str(name)
-        aliases = {'lr': 'x30', 'fp': 'x29', 'wsp': 'sp', 'wzr': 'xzr'}
-        if n in aliases:
-            return aliases[n]
+        if n in cls._FULLWIDTH_ALIASES:
+            return cls._FULLWIDTH_ALIASES[n]
         if len(n) > 1 and n[0] == 'w' and n[1:].isdigit():
             return 'x' + n[1:]
         return n
