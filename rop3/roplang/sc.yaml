@@ -1,8 +1,8 @@
-# Stack copy: place op1 on the stack. REG10 is an internal scratch register.
+# Stack copy: place op1 on the stack. TMP_REG is an internal scratch register.
 #
 # On x86 a ROP gadget cannot address the stack directly, so the copy is a
 # push/pop round-trip (two realizations: popping back into op1 or into a
-# scratch REG1). AArch64 and RISC-V address the stack directly, so the copy is
+# scratch TMP_REG). AArch64 and RISC-V address the stack directly, so the copy is
 # a single store and there is one realization.
 sc:
   operands: 1
@@ -16,12 +16,12 @@ sc:
             op1: op1
           - mnemonic: pop
             op1: op1
-    # push op1 ; pop REG1   (same gadget)
+    # push op1 ; pop TMP_REG   (same gadget)
     - steps:
         - - mnemonic: push
             op1: op1
           - mnemonic: pop
-            op1: REG10
+            op1: TMP_REG
 
   arm:
     # str op1, [sp]   (direct stack store; no push/pop on AArch64)

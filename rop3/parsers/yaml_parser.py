@@ -77,7 +77,8 @@ class YamlParser:
     def _resolve_roles(self, roles):
         ''' Resolve a dst/src role list, mapping arch-independent register
             aliases (REG_FLAGS, REG_SP, REG_BP) to concrete register names while
-            leaving operand slots (op1, REG10, ...) untouched. '''
+            leaving operand slots (op1, ...) and TMP_REG scratch temporaries
+            untouched. '''
         if not roles:
             return []
         return [self._resolve_alias(r) for r in roles]

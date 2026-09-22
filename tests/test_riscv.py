@@ -406,8 +406,10 @@ def test_riscv_lc_enumerates_every_pop_in_frame():
 
 
 def test_riscv_jmp_is_a_stack_pivot(tmp_path):
-    ''' jmp is a stack pivot (SP <- op1), realized by reusing mov to write sp;
-        a framed `mv sp, a0` gadget realizes jmp(a0). '''
+    ''' jmp is a stack pivot (SP <- op1) with two realizations: the clean move
+        (mv sp, reg) and the frame-pointer `addi sp, s0, off` epilogue pivot.
+        A zero-offset addi renders as `mv`, so the addi realization exists to
+        catch the common non-zero framesize form the plain move cannot. '''
     import struct
     import rop3.parser as parser
     from rop3 import Rop3
@@ -415,18 +417,31 @@ def test_riscv_jmp_is_a_stack_pivot(tmp_path):
     arch_singleton.reset()
     arch_singleton.initialize(RISCV_Architecture())
 
-    # Resolves to a compound reusing mov(REG_SP -> sp, op1).
+    # Realization 0: a compound reusing mov(REG_SP -> sp, op1).
     jmp = parser.Parser().get_op('jmp')
     assert not jmp.realizations[0].is_single_gadget
     ref = jmp.realizations[0].links[0]
     assert ref.name == 'mov' and ref.bindings == {'op1': 'sp', 'op2': 'op1'}
+    # Realization 1: a raw single-gadget `addi sp, op1, <any imm>`.
+    assert jmp.realizations[1].is_single_gadget
+    addi = jmp.realizations[1].links[0].items[0]
+    assert addi.mnemonic == 'addi'
 
-    # end-to-end: ld ra, 8(sp) ; mv sp, a0 ; ret  realizes jmp(a0)
+    # end-to-end: ld ra, 8(sp) ; mv sp, a0 ; ret  realizes jmp(a0) (clean move)
     mv_sp_a0 = struct.pack('<I', (0 << 20) | (10 << 15) | (2 << 7) | 0x13)  # mv sp, a0
     path = _elf_path(tmp_path, LD_RA_SP + mv_sp_a0 + RET)
     chains = Rop3(path, depth=40).find_op('jmp', operands=['a0'])
     texts = [g.text_repr for chain in chains for g in chain]
     assert any('mv sp, a0' in t for t in texts)
+
+    # end-to-end: addi sp, s0, -0x90 ; ld ra, 8(sp) ; ret  realizes jmp(s0) --
+    # the frame-pointer pivot a plain move can't match (non-zero offset). The
+    # sp destination survives despite being re-derived (never a guarded clobber).
+    addi_sp_s0 = _i(0x13, 0, 2, 8, -0x90)                    # addi sp, s0, -0x90
+    path = _elf_path(tmp_path, addi_sp_s0 + LD_RA_SP + RET)
+    chains = Rop3(path, depth=40).find_op('jmp', operands=['s0'])
+    texts = [g.text_repr for chain in chains for g in chain]
+    assert any('addi sp, s0, -0x90' in t for t in texts)
 
 
 def test_riscv_roplang_skips_flag_ops():

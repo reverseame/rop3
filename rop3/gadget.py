@@ -135,7 +135,13 @@ class Gadget:
                     for r in arch.written_registers(insn)}
 
         produced = {reg for i in matched_indices for reg in writes(self.decodes[i])}
-        guarded = set(dst_regs) & produced
+        # The stack pointer is never guarded. It is the control/exit register and
+        # is *expected* to keep moving after the operation -- the ret's own pop,
+        # and, for a stack pivot, the frame-restore writeback that follows the
+        # pivot. Treating a later sp write as a clobber would reject every pivot,
+        # e.g. AArch64 `mov sp, x29 ; ldp x29, x30, [sp], #16 ; ret` (the `ldp`
+        # writeback re-writes sp) or x86 `mov rsp, rax ; pop rbp ; ret`.
+        guarded = (set(dst_regs) & produced) - {arch.normalize_reg(arch.sp)}
         if not guarded:
             return False
 

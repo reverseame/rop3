@@ -1,0 +1,46 @@
+# Stack pivot from a popped value: SP <- value in stack.
+# Far more common than jmp gadget
+pivot:
+  operands: 1
+  dst: []
+  src: []
+
+  x86:
+    # reuse mov to set the frame pointer, then a `leave` gadget
+    - steps:
+        - operation: lc
+          op1: REG_BP
+        - mnemonic: leave
+    # - steps:
+    #     - operation: lc
+    #       op1: TMP_REG
+    #     - operation: spa
+    #       op1: TMP_REG
+
+  arm:
+   # Only one move into SP, since wirting into x29 is "free" in framed     
+   # rop: `ldp x29, x30, [sp]
+    - steps:
+        - operation: mov
+          op1: REG_SP
+          op2: x29
+    # - steps:
+    #     - operation: lc
+    #       op1: TMP_REG
+    #     - operation: spa
+    #       op1: TMP_REG
+
+  riscv:
+    # Clean move pivot: SP <- op1  (mv sp, reg / add sp, zero, reg / c.mv).
+    - steps:
+        - operation: lc
+          op1: TMP_REG
+        - mnemonic: addi
+          op1: REG_SP
+          op2: TMP_REG
+          op3: ANY
+    - steps:
+        - operation: lc
+          op1: TMP_REG
+        - operation: spa
+          op1: TMP_REG

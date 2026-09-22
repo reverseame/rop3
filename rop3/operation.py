@@ -29,9 +29,11 @@ import rop3.parser as parser
 
 from .gadget import Gadget
 
-# Abstract operand placeholders: operation operands op1, op2, op3, ... and the
-# scratch helper registers REG1, REG10, ...
-_ABSTRACT_RE = re.compile(r'^(op\d+|REG\d+)$')
+# Abstract operand placeholders: operation operands op1, op2, op3, ..., generic
+# register slots REG1, REG10, ..., and TMP_REG scratch temporaries (TMP_REG,
+# TMP_REG1, ...) that an operation drops once it ends (see GadFinder.classify_
+# ropchain / RopChain._assemble_sequential).
+_ABSTRACT_RE = re.compile(r'^(op\d+|REG\d+|TMP_REG\d*)$')
 
 
 def is_abstract_name(name) -> bool:
@@ -699,8 +701,8 @@ class Operand:
             if self.abstract:
                 if not self._alias_ok(arch, base):
                     return (False, None)
-                return (True, (self.reg, base))
-            return (base == self.reg, None)
+                return (True, (self.reg, arch.normalize_reg(base)))
+            return (arch.normalize_reg(base) == arch.normalize_reg(self.reg), None)
 
         if self.is_imm():
             if operand.type != arch.op_imm:
@@ -714,10 +716,13 @@ class Operand:
         if self.abstract:
             if not self._alias_ok(arch, reg):
                 return (False, None)
-            return (True, (self.reg, reg))
-        # Concrete registers must match exactly: writing a sub-register (ah/eax)
-        # is not the same as writing the full register (rax).
-        return (reg == self.reg, None)
+            return (True, (self.reg, arch.normalize_reg(reg)))
+        # Concrete registers must match up to full-width aliasing: capstone may
+        # spell a register differently than the pattern (AArch64 fp==x29,
+        # lr==x30), but writing a sub-register (ah/eax, w0) is still not the same
+        # as the full register (rax, x0) -- normalize_reg folds aliases, not
+        # sub-registers.
+        return (arch.normalize_reg(reg) == arch.normalize_reg(self.reg), None)
 
     @staticmethod
     def _alias_ok(arch, reg) -> bool:

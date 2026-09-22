@@ -1,4 +1,4 @@
-# Load stack delta (compound). REG10 is an internal scratch register.
+# Load stack delta (compound). TMP_REG is an internal scratch register.
 lsd:
   operands: 1
   dst: [op1]
@@ -7,29 +7,29 @@ lsd:
   x86:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - operation: neg
           op1: op1
         - operation: and
           op1: op1
-          op2: REG10
+          op2: TMP_REG
 
   arm:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - operation: neg
           op1: op1
         - operation: and
           op1: op1
-          op2: REG10
+          op2: TMP_REG
 
   riscv:
     - steps:
         - operation: lc
-          op1: REG10
+          op1: TMP_REG
         - operation: neg
           op1: op1
         - operation: and
           op1: op1
-          op2: REG10
+          op2: TMP_REG

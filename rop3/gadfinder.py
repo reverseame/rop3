@@ -16,6 +16,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
+import re
 import bisect
 import capstone
 from itertools import product, count
@@ -56,6 +57,22 @@ CANARY_BYTES = (0x00, 0x0a, 0x0d, 0xff)
 # unbound operands (see GadFinder.bind_step). Kept far above any REGn a ROPLang
 # definition uses so the two never collide.
 _FRESH_SLOT_BASE = 9000000
+
+# Base for the fresh generic slots the legacy engine renames a TMP_REG scratch
+# temporary to, per operation instance (see GadFinder.classify_ropchain). Kept
+# distinct from _FRESH_SLOT_BASE (9000000) and ropchain._LEGACY_FREE_SLOT_BASE
+# (9500000) so the fresh-name spaces never collide within one run.
+_TEMP_SLOT_BASE = 9900000
+
+# A TMP_REG scratch temporary (TMP_REG, TMP_REG1, ...): an operation-local
+# register the operation drops once it ends. Self-identifying by prefix, so it
+# is never confused with a user-named REGn slot or an unbound-operand fill.
+_TEMP_SLOT_RE = re.compile(r'^TMP_REG\d*$')
+
+
+def _is_temp_slot(name) -> bool:
+    ''' Whether `name` is a TMP_REG scratch temporary. '''
+    return isinstance(name, str) and bool(_TEMP_SLOT_RE.match(name))
 
 class GadFinder:
     '''
@@ -179,7 +196,7 @@ class GadFinder:
 
     # --- ROP-chain classification -----------------------------------------
 
-    def classify_ropchain(self, gadgets, steps):
+    def classify_ropchain(self, gadgets, steps, legacy=False):
         '''
         Resolve a parsed ROP-chain request into the gadgets that realize it.
 
@@ -193,21 +210,36 @@ class GadFinder:
         every 2-operand primitive of a realization is matched against
         `gadgets`.
 
+        A TMP_REG scratch temporary is an operation-local register dropped once
+        the operation ends. Under the default engine it is dropped via the
+        `free` mechanism: an auto-free event is emitted at the operation's
+        boundary (right after its last primitive), exactly like an explicit
+        free(NAME). The legacy Tree engine ignores free_events, so `legacy`
+        instead renames each operation instance's TMP_REG to a fresh unique
+        generic slot -- the same parse-time-rename approximation
+        RopChain._rewrite_legacy_frees uses for explicit free -- so Tree treats
+        each operation's temporary independently.
+
         Returns a list of (realization, free_events) pairs: `realization` is
         a list of (primitive_step, gadgets) pairs -- the per-step classified
         gadgets the assembler consumes; `free_events` is a list of
         (boundary_index, name) pairs, `boundary_index` the count of real
-        primitives already emitted, within this realization, when a
-        free(name) step was reached (position is combo-dependent, since
-        compound-operation alternatives have different primitive counts).
-        Realizations in which some primitive matches no gadget are dropped.
+        primitives already emitted, within this realization, when a free(name)
+        step was reached or an operation with a TMP_REG scratch ended (position
+        is combo-dependent, since compound-operation alternatives have different
+        primitive counts). Realizations in which some primitive matches no
+        gadget are dropped.
         '''
-        fresh = count()   # source of fresh generic slots for unbound operands
+        fresh = count()        # fresh generic slots for unbound operands
+        temp_fresh = count()   # fresh generic slots for legacy TMP_REG renames
+        # Per step, a list of alternatives; a real step's alternative is a
+        # (chain, temp_names) pair, temp_names the TMP_REG scratch it drops at
+        # its boundary (empty under legacy, which renames them away instead).
         per_step_alternatives = []
         free_names = []   # parallel to per_step_alternatives; None for a real step
         for step in steps:
             if step.get('free') is not None:
-                per_step_alternatives.append([[]])   # one alternative: no primitives
+                per_step_alternatives.append([([], ())])   # no primitives, no temps
                 free_names.append(step['free'])
                 continue
             defn = self._step_defn(step)
@@ -217,22 +249,55 @@ class GadFinder:
                 from rop3.ropchain import RopChainNotFound
                 raise RopChainNotFound(
                     f'{step.get("data", step["op"])}: no realization for operation')
-            per_step_alternatives.append(alternatives)
+            per_step_alternatives.append(
+                [self._prepare_temp_slots(chain, legacy, temp_fresh)
+                 for chain in alternatives])
             free_names.append(None)
 
         realizations = []
         for combo in product(*per_step_alternatives):
             primitives = []
             free_events = []
-            for name, chain in zip(free_names, combo):
-                if name is not None:
+            for name, (chain, temp_names) in zip(free_names, combo):
+                if name is not None:               # explicit free(NAME) step
                     free_events.append((len(primitives), name))
-                else:
-                    primitives.extend(chain)
+                    continue
+                primitives.extend(chain)
+                for temp in temp_names:            # auto-drop this op's scratch
+                    free_events.append((len(primitives), temp))
             bundle = self._match_primitives(gadgets, primitives)
             if bundle is not None:
                 realizations.append((bundle, free_events))
         return realizations
+
+    def _prepare_temp_slots(self, chain, legacy, temp_fresh):
+        ''' Turn an expanded primitive chain into a (chain, temp_names) pair.
+
+            The default engine keeps the literal TMP_REG names and returns them
+            as `temp_names` so classify_ropchain can emit an auto-free at the
+            operation's boundary. The legacy engine (which cannot free
+            positionally) instead renames each distinct TMP_REG in this chain to
+            a fresh unique generic slot drawn from `temp_fresh`, so Tree treats
+            the operation's temporary independently, and returns no temp_names
+            (there is nothing to free). '''
+        temps = []
+        for prim in chain:
+            for val in (prim.get('op1'), prim.get('op2')):
+                if _is_temp_slot(val) and val not in temps:
+                    temps.append(val)
+        if not temps:
+            return (chain, ())
+        if not legacy:
+            return (chain, tuple(temps))
+        rename = {t: f'REG{_TEMP_SLOT_BASE + next(temp_fresh)}' for t in temps}
+        renamed = []
+        for prim in chain:
+            prim = dict(prim)
+            for key in ('op1', 'op2'):
+                if prim.get(key) in rename:
+                    prim[key] = rename[prim[key]]
+            renamed.append(prim)
+        return (renamed, ())
 
     def _match_primitives(self, gadgets, primitives):
         ''' Match each primitive step against `gadgets`, returning a list of
@@ -264,14 +329,15 @@ class GadFinder:
 
     def _resolve_operand(self, val):
         ''' Map a primitive operand to a match value: REG_SP/REG_BP -> the arch
-            pointer register, a generic REGn slot -> None (matches any register),
-            anything else -> itself. '''
+            pointer register, a generic REGn slot or a TMP_REG scratch temporary
+            -> None (matches any register), anything else -> itself. '''
         if val is None:
             return None
         aliased = self.resolve_reg_alias(val)   # REG_SP/REG_BP -> sp/bp
         if aliased != val:
             return aliased
-        if isinstance(val, str) and val.lower().startswith('reg'):
+        if isinstance(val, str) and (val.lower().startswith('reg')
+                                     or val.upper().startswith('TMP_REG')):
             return None
         return val
 

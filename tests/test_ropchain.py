@@ -370,6 +370,85 @@ def test_parse_free_line_malformed_raises(line):
         RopChain(GadFinder())._parse_free_line(line, [] if line == 'free()' else ['REG1', 'REG2'])
 
 
+# --- TMP_REG auto-freed scratch --------------------------------------------
+
+def test_tmp_reg_recognized_as_slot(x64):
+    ''' TMP_REG is an abstract operand (matches any register), a generic slot
+        the assembler binds, and resolves to None ("any register") for
+        matching -- the three predicates the auto-free mechanism relies on. '''
+    from rop3.operation import is_abstract_name
+    from rop3.ropchain import _is_generic_slot
+    from rop3.gadfinder import _is_temp_slot
+    for name in ('TMP_REG', 'TMP_REG1'):
+        assert is_abstract_name(name)
+        assert _is_generic_slot(name)
+        assert _is_temp_slot(name)
+        assert GadFinder()._resolve_operand(name) is None
+    # a user-named REGn slot is generic but not a TMP_REG temporary
+    assert _is_generic_slot('REG1') and not _is_temp_slot('REG1')
+
+
+# Gadgets realizing two lsd(op1) steps (lsd -> pop TMP_REG ; neg op1 ; and op1,
+# TMP_REG) where each step's only `and` forces a *different* scratch register:
+# lsd(rax) needs TMP_REG=rcx, lsd(rbx) needs TMP_REG=rdx. A single shared
+# TMP_REG identity (rcx and rdx at once) is impossible, so the chain assembles
+# only because each operation's TMP_REG is dropped once it ends.
+_TWO_LSD_GADGETS = [
+    (b'\x59\xc3', 0x1000),           # pop rcx ; ret
+    (b'\x5a\xc3', 0x1010),           # pop rdx ; ret
+    (b'\x48\xf7\xd8\xc3', 0x1020),   # neg rax ; ret
+    (b'\x48\xf7\xdb\xc3', 0x1030),   # neg rbx ; ret
+    (b'\x48\x21\xc8\xc3', 0x1040),   # and rax, rcx ; ret
+    (b'\x48\x21\xd3\xc3', 0x1050),   # and rbx, rdx ; ret
+]
+
+
+@pytest.mark.parametrize('legacy', [False, True], ids=['default', 'legacy'])
+def test_tmp_reg_auto_freed_between_operations(x64, legacy):
+    ''' Two lsd steps whose scratch registers must differ assemble in both
+        engines: the default engine drops TMP_REG via an auto-free event at the
+        operation boundary, the legacy engine via a per-operation rename. '''
+    gadgets = [make_gadget(b, addr) for b, addr in _TWO_LSD_GADGETS]
+    chain = [_op('lsd', dst='rax'), _op('lsd', dst='rbx')]
+    results = list(RopChain(GadFinder()).search(gadgets, chain, legacy=legacy))
+    assert results
+    reprs = [g.text_repr for g in results[0]]
+    # first operation's scratch is rcx, the second's is rdx -- decoupled
+    assert 'and rax, rcx ; ret' in reprs
+    assert 'and rbx, rdx ; ret' in reprs
+
+
+def test_classify_emits_autofree_event_for_tmp_reg(x64):
+    ''' The default engine turns an operation's TMP_REG into a free event at
+        the boundary right after its last primitive (lsd -> 3 primitives, so
+        boundary 3), so _assemble_sequential releases it for the next step. '''
+    gadgets = [make_gadget(b, addr) for b, addr in _TWO_LSD_GADGETS]
+    realizations = GadFinder().classify_ropchain(
+        gadgets, [_op('lsd', dst='rax')], legacy=False)
+    assert realizations
+    _, free_events = realizations[0]
+    assert (3, 'TMP_REG') in free_events
+
+
+def test_classify_legacy_renames_tmp_reg_uniquely(x64):
+    ''' The legacy engine cannot free positionally, so it renames each
+        operation instance's TMP_REG to a fresh unique generic slot and emits
+        no free event -- two lsd steps get two distinct scratch identities. '''
+    from rop3.gadfinder import _is_temp_slot
+    gadgets = [make_gadget(b, addr) for b, addr in _TWO_LSD_GADGETS]
+    realizations = GadFinder().classify_ropchain(
+        gadgets, [_op('lsd', dst='rax'), _op('lsd', dst='rbx')], legacy=True)
+    assert realizations
+    bundle, free_events = realizations[0]
+    assert free_events == []                      # nothing freed positionally
+    slots = {step.get('op1') for step, _ in bundle if step.get('op1')}
+    slots |= {step.get('op2') for step, _ in bundle if step.get('op2')}
+    # no literal TMP_REG survives; the two operations' scratch slots are distinct
+    assert not any(_is_temp_slot(s) for s in slots)
+    renamed = {s for s in slots if isinstance(s, str) and s.startswith('REG99')}
+    assert len(renamed) == 2
+
+
 # Full expansion of every compound (compose:) operation, per architecture, as
 # the complete set of primitive-step chains realize() must produce. Whenever a
 # roplang/*.yaml file is modified (a realization added, removed, reordered, or
@@ -388,14 +467,17 @@ _COMPOUND_ARCHES = {
         'operands': {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'},
         'chains': {
             'gcf-eqc': {
-                ('lc(REG10)', 'sub(rbx, rcx)', 'neg(rbx)', 'adc(rax, REG10)'),
-                ('lc(REG10)', 'sub(rbx, rcx)', 'neg(rbx)', 'sbb(rax, REG10)', 'neg(rax)'),
+                ('lc(TMP_REG)', 'sub(rbx, rcx)', 'neg(rbx)', 'adc(rax, TMP_REG)'),
+                ('lc(TMP_REG)', 'sub(rbx, rcx)', 'neg(rbx)', 'sbb(rax, TMP_REG)', 'neg(rax)'),
                 ('lc(rax)', 'sub(rbx, rcx)', 'neg(rbx)', 'rcl(rax)'),
             },
             'gcf-ltc': {
-                ('lc(REG10)', 'sub(rbx, rcx)', 'adc(rax, REG10)'),
-                ('lc(REG10)', 'sub(rbx, rcx)', 'sbb(rax, REG10)', 'neg(rax)'),
+                ('lc(TMP_REG)', 'sub(rbx, rcx)', 'adc(rax, TMP_REG)'),
+                ('lc(TMP_REG)', 'sub(rbx, rcx)', 'sbb(rax, TMP_REG)', 'neg(rax)'),
                 ('lc(rax)', 'sub(rbx, rcx)', 'rcl(rax)'),
+            },
+            'jmp': {
+                ('mov(rbp, rax)', 'leave()'),
             },
         },
     },
@@ -404,10 +486,18 @@ _COMPOUND_ARCHES = {
         'operands': {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'},
         'chains': {
             'gcf-eqc': {
-                ('lc(REG10)', 'sub(x1, x2)', 'neg(x1)', 'lc(x0)', 'adc(x0, REG10)'),
+                ('lc(TMP_REG)', 'sub(x1, x2)', 'neg(x1)', 'lc(x0)', 'adc(x0, TMP_REG)'),
             },
             'gcf-ltc': {
-                ('lc(REG10)', 'sub(x1, x2)', 'adc(x0, REG10)'),
+                ('lc(TMP_REG)', 'sub(x1, x2)', 'adc(x0, TMP_REG)'),
+            },
+            # Single-step pivot SP <- x29, matched by the `mov sp, x29 ; ldp
+            # x29, x30, [sp] ; ret` epilogue-pivot gadget. x29 (the pivot source)
+            # is loaded "free" from the stack by the framed epilogue, so no
+            # explicit mov into it is needed; op1 is unused. capstone spells x29
+            # as `fp`; matching folds the alias.
+            'jmp': {
+                ('mov(sp, x29)',),
             },
         },
     },
@@ -417,6 +507,13 @@ _COMPOUND_ARCHES = {
         'chains': {
             'gcf-eqc': set(),   # unavailable: RISC-V has no carry/condition flags
             'gcf-ltc': set(),
+            # Two pivots: the clean move (mv sp, reg) and the frame-pointer
+            # `addi sp, s0, off` epilogue pivot (op1 = s0/fp, wildcard offset)
+            # that no plain move can express.
+            'jmp': {
+                ('mov(sp, a0)',),
+                ('addi(a0)',),
+            },
         },
     },
 }
@@ -471,16 +568,16 @@ def test_search_compound_op_gcf_eqc(x64):
     End-to-end search of a compound operation. gcf-eqc(op1, op2, op3), first
     realization, expands (nested) to:
 
-        lc(REG1)       -> pop REG1                (REG1 is a scratch register)
-        eqc(op2, op3)  -> sub(op2, op3) ; neg(op2)
-        adc op1, REG1  -> adc op1, REG1
+        lc(TMP_REG)       -> pop TMP_REG          (TMP_REG is scratch)
+        eqc(op2, op3)     -> sub(op2, op3) ; neg(op2)
+        adc op1, TMP_REG  -> adc op1, TMP_REG
 
     so gcf-eqc(rax, rbx, rcx) must assemble
 
-        pop <REG1> ; sub rbx, rcx ; neg rbx ; adc rax, <REG1>
+        pop <TMP_REG> ; sub rbx, rcx ; neg rbx ; adc rax, <TMP_REG>
 
-    with REG1 unified between the pop and the adc. The `pop rsi` decoy is
-    rejected because no `adc rax, rsi` exists, forcing REG1 = rdx.
+    with TMP_REG unified between the pop and the adc. The `pop rsi` decoy is
+    rejected because no `adc rax, rsi` exists, forcing TMP_REG = rdx.
     '''
     gadgets = [
         make_gadget(b'\x5a\xc3', 0x10),           # pop rdx ; ret
