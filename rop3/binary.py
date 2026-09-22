@@ -21,15 +21,16 @@ import rop3.debug as debug
 import rop3.binaries.elf as elf
 import rop3.binaries.pe as pe
 import rop3.binaries.macho as macho
+import rop3.binaries.raw as raw_mod
 
 class Binary:
     '''
     Interface to access binary file details
     '''
-    def __init__(self, filename, base, arch=None):
+    def __init__(self, filename, base, arch=None, raw=False):
         self.filename = os.path.realpath(filename)
         self.raw_data = self._read_binary()
-        self._binary = self._load_binary(base, arch)
+        self._binary = self._load_binary(base, arch, raw)
 
     def _read_binary(self):
         try:
@@ -38,7 +39,13 @@ class Binary:
         except (IOError, FileNotFoundError):
             debug.error(f'{self.filename}: Unable to read file')
 
-    def _load_binary(self, base, arch=None):
+    def _load_binary(self, base, arch=None, raw=False):
+        # Raw code dump: no magic bytes to sniff, so it must be requested
+        # explicitly (--raw) and the architecture given by hand (--arch).
+        if raw:
+            self.format = 'Raw'
+            return raw_mod.Raw(self.raw_data, base, arch)
+
         # MS-DOS Stub (PE)
         if self.raw_data[:2] == b'\x4d\x5a':    # MZ
             self.format = 'PE'

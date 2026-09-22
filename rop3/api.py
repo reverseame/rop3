@@ -42,13 +42,14 @@ class Rop3:
                  reg_aliases=False, keep_contradictory=False, framed=True,
                  ropblock=False, base=None,
                  badchars=None, badchar_bytes=None, arch=None, symbols=False,
-                 cache=False, cache_dir=None, jobs=1):
+                 raw=False, cache=False, cache_dir=None, jobs=1):
         self.binaries = [binaries] if isinstance(binaries, str) else list(binaries)
         self.base = base
         self.badchars = badchars
         self.badchar_bytes = badchar_bytes
         self.arch = arch
         self.symbols = symbols
+        self.raw = raw
 
         flags = 0
         if all:
@@ -91,6 +92,7 @@ class Rop3:
         self.badchar_bytes = args.badchar_bytes
         self.arch = args.arch
         self.symbols = args.symbols
+        self.raw = args.raw
         self._finder = GadFinder(args.depth, args.flags,
                                  cache=args.cache, cache_dir=args.cache_dir,
                                  jobs=args.jobs)
@@ -107,7 +109,7 @@ class Rop3:
             self._gadgets = self._finder.find(
                 self.binaries, base=self.base, badchars=self.badchars,
                 badchar_bytes=self.badchar_bytes, arch=self.arch,
-                symbols=self.symbols)
+                symbols=self.symbols, raw=self.raw)
         return self._gadgets
 
     def describe(self):
@@ -117,7 +119,7 @@ class Rop3:
         bases = self.base if isinstance(self.base, list) \
             else [self.base] * len(self.binaries)
         ropblock, framed = self._finder.ropblock, self._finder.framed
-        return [Binary(fn, b, self.arch).describe(ropblock=ropblock, framed=framed)
+        return [Binary(fn, b, self.arch, self.raw).describe(ropblock=ropblock, framed=framed)
                 for fn, b in zip(self.binaries, bases)]
 
     def find_op(self, op, operands=None):
@@ -134,4 +136,4 @@ class Rop3:
         return RopChain(self._finder).search_from_gadgets(
             self.gadgets(), ropfile, legacy=legacy, symbolic=symbolic,
             binaries=self.binaries, base=self.base, badchars=self.badchars,
-            badchar_bytes=self.badchar_bytes, arch=self.arch)
+            badchar_bytes=self.badchar_bytes, arch=self.arch, raw=self.raw)

@@ -86,7 +86,7 @@ class GadFinder:
         self._jobs = max(1, int(jobs)) if jobs else 1
 
     def find(self, filenames: list[str], base=None, badchars=None,
-             badchar_bytes=None, arch=None, symbols=False) -> list[Gadget]:
+             badchar_bytes=None, arch=None, symbols=False, raw=False) -> list[Gadget]:
         ''' base is normalized to one entry per binary by the argument parser '''
         bases = base if isinstance(base, list) else [base] * len(filenames)
         avoid = self._avoid_bytes(badchars)
@@ -94,7 +94,7 @@ class GadFinder:
         if not self._keep_duplicates():
             seen: dict = {}
             for filename, file_base in zip(filenames, bases):
-                binary = self._open_binary(filename, file_base, arch)
+                binary = self._open_binary(filename, file_base, arch, raw)
                 symtab = self._symbol_table(binary) if symbols else None
                 before = len(seen)
                 total = 0
@@ -122,7 +122,7 @@ class GadFinder:
         else:
             gadgets = []
             for filename, file_base in zip(filenames, bases):
-                binary = self._open_binary(filename, file_base, arch)
+                binary = self._open_binary(filename, file_base, arch, raw)
                 symtab = self._symbol_table(binary) if symbols else None
                 gadgets.extend(self._search_gadgets(binary, badchars, badchar_bytes, symtab))
             return self._sort_gadgets(gadgets)
@@ -142,8 +142,8 @@ class GadFinder:
     def _sort_gadgets(self, gadgets: list[Gadget]) -> list[Gadget]:
         return sorted(gadgets, key=lambda g: (os.path.basename(g.filename), g.vaddr))
 
-    def _open_binary(self, filename, base, arch=None):
-        binary = rop3.binary.Binary(filename, base, arch)
+    def _open_binary(self, filename, base, arch=None, raw=False):
+        binary = rop3.binary.Binary(filename, base, arch, raw)
         binary_arch = binary.get_arch()
         if arch_singleton.is_initialized() and not arch_singleton.matches(binary_arch):
             debug.error(f'{filename}: mixing architectures (x86/x64) in a single run is not supported')
@@ -476,7 +476,7 @@ class GadFinder:
 
     def find_raw_gadgets(self, filenames: list[str], defn: OperationDef,
                          base=None, badchars=None, badchar_bytes=None,
-                         arch=None) -> list[Gadget]:
+                         arch=None, raw=False) -> list[Gadget]:
         '''
         Direct scan for `defn`'s verbatim instruction pattern (a `raw(...)`
         chain step's single realization) -- used because the normal backward
@@ -521,7 +521,7 @@ class GadFinder:
 
         ret: list[Gadget] = []
         for filename, file_base in zip(filenames, bases):
-            binary = self._open_binary(filename, file_base, arch)
+            binary = self._open_binary(filename, file_base, arch, raw)
             arch_obj = arch_singleton.arch
             md = capstone.Cs(arch_obj.arch, arch_obj.mode)
             md.detail = True
