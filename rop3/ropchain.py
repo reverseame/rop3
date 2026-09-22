@@ -77,24 +77,25 @@ class RopChain:
 
     def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None,
                           badchar_bytes=None, arch=None, symbols=False,
-                          symbolic=False, legacy=False) -> Iterator[list[Gadget]]:
+                          symbolic=False, legacy=False, raw=False) -> Iterator[list[Gadget]]:
         gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars,
-                                      badchar_bytes=badchar_bytes, arch=arch, symbols=symbols)
+                                      badchar_bytes=badchar_bytes, arch=arch, symbols=symbols,
+                                      raw=raw)
         return self.search_from_gadgets(gadgets, ropfile, symbolic=symbolic, legacy=legacy,
                                         binaries=binaries, base=base, badchars=badchars,
-                                        badchar_bytes=badchar_bytes, arch=arch)
+                                        badchar_bytes=badchar_bytes, arch=arch, raw=raw)
 
     def search_from_gadgets(self, gadgets, ropfile, symbolic=False, legacy=False,
                             binaries=None, base=None, badchars=None,
-                            badchar_bytes=None, arch=None) -> Iterator[list[Gadget]]:
+                            badchar_bytes=None, arch=None, raw=False) -> Iterator[list[Gadget]]:
         ropchain = self._parse_ropfile(ropfile)
         return self.search(gadgets, ropchain, symbolic=symbolic, legacy=legacy,
                            binaries=binaries, base=base, badchars=badchars,
-                           badchar_bytes=badchar_bytes, arch=arch)
+                           badchar_bytes=badchar_bytes, arch=arch, raw=raw)
 
     def search(self, gadgets, ropchain, prune_equivalent=True,
                symbolic=False, legacy=False, binaries=None, base=None,
-               badchars=None, badchar_bytes=None, arch=None) -> Iterator[list[Gadget]]:
+               badchars=None, badchar_bytes=None, arch=None, raw=False) -> Iterator[list[Gadget]]:
         '''
         `ropchain` is the parsed request: a list of steps ({op, operands}), or
         a `free(NAME)` directive step ({op: 'free', free: NAME}) releasing a
@@ -125,7 +126,7 @@ class RopChain:
         self._check_free_usage(ropchain)
         if legacy:
             ropchain = self._rewrite_legacy_frees(ropchain)
-        self._resolve_raw_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch)
+        self._resolve_raw_gadgets(ropchain, binaries, base, badchars, badchar_bytes, arch, raw)
         realizations = self.gadfinder.classify_ropchain(gadgets, ropchain, legacy=legacy)
         found = False
         for bundle, free_events in realizations:
@@ -502,7 +503,7 @@ class RopChain:
                     pending_free.discard(v)
 
     def _resolve_raw_gadgets(self, steps: list[dict], binaries, base,
-                             badchars, badchar_bytes, arch) -> None:
+                             badchars, badchar_bytes, arch, raw=False) -> None:
         ''' For every `raw(...)` step (the only producer of an inline `defn`),
             fill in defn.literal_gadgets via GadFinder.find_raw_gadgets when
             `binaries` is available -- the direct scan that finds the verbatim
@@ -519,7 +520,7 @@ class RopChain:
             if defn.literal_gadgets is None:
                 defn.literal_gadgets = self.gadfinder.find_raw_gadgets(
                     binaries, defn, base=base, badchars=badchars,
-                    badchar_bytes=badchar_bytes, arch=arch)
+                    badchar_bytes=badchar_bytes, arch=arch, raw=raw)
 
     def _rewrite_legacy_frees(self, steps: list[dict]) -> list[dict]:
         '''

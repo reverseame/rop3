@@ -61,7 +61,7 @@ class _FakeBinary:
 
 def _run_find(flags, buf, base_vaddr, symbols_table=None, **kwargs):
     f = gadfinder.GadFinder(flags=flags)
-    f._open_binary = lambda fn, b, arch=None: _FakeBinary(base_vaddr, bytes(buf), symbols=symbols_table)
+    f._open_binary = lambda fn, b, arch=None, raw=False: _FakeBinary(base_vaddr, bytes(buf), symbols=symbols_table)
     return f.find(['fake'], **kwargs)
 
 
@@ -169,7 +169,7 @@ def test_ropblock_disables_parallel(x86):
     buf = b'\x58\xff\xe0\x5b\xc3'          # pop eax ; jmp eax ; pop ebx ; ret
     serial = {g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ROPBLOCK, buf, base)}
     f = gadfinder.GadFinder(flags=gadfinder.ROP | gadfinder.ROPBLOCK, jobs=4)
-    f._open_binary = lambda fn, b, arch=None: _FakeBinary(base, bytes(buf))
+    f._open_binary = lambda fn, b, arch=None, raw=False: _FakeBinary(base, bytes(buf))
     parallel = {g.text_repr for g in f.find(['fake'])}
     assert serial == parallel
     assert 'pop eax ; jmp eax' in serial
