@@ -275,6 +275,19 @@ class X86_Architecture(Architecture):
         canon = entry[0]
         return REG_BY_WIDTH.get(canon, {}).get(self._canonical_width, canon)
 
+    def concrete_reg_equal(self, a: str | int, b: str | int) -> bool:
+        ''' Equal iff both name the same canonical register at the same width.
+            al/ax/eax/rax share the canonical `rax` but differ in width, so a
+            sub-register never matches the full register (unlike normalize_reg,
+            which folds them up to the canonical width for abstract
+            assignment). '''
+        return self._reg_key(a) == self._reg_key(b)
+
+    @staticmethod
+    def _reg_key(name: str | int):
+        entry = REG_ALIASES.get(str(name))
+        return entry if entry else str(name)
+
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """
         Only accept 4 byte registers

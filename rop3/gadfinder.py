@@ -526,9 +526,9 @@ class GadFinder:
             md = capstone.Cs(arch_obj.arch, arch_obj.mode)
             md.detail = True
 
-            def accept_candidate(vaddr, raw):
+            def accept_candidate(vaddr, cand_bytes):
                 return (self._is_valid_address(vaddr, badchars, arch_obj.address_size)
-                        and self._is_valid_bytes(raw, badchar_bytes))
+                        and self._is_valid_bytes(cand_bytes, badchar_bytes))
 
             needle = search.assemble(asm_text, arch_obj)
 
@@ -545,13 +545,13 @@ class GadFinder:
             found = None
             for section in binary.get_exec_sections():
                 opcodes, vaddr = section['opcodes'], section['vaddr']
-                for cand_vaddr, raw, decodes in candidates(opcodes, vaddr):
+                for cand_vaddr, cand_bytes, decodes in candidates(opcodes, vaddr):
                     if pattern.matches_exactly(decodes) is None:
                         continue
                     found = Gadget(
                         filename=binary.filename, arch=arch_obj.arch,
                         mode=arch_obj.mode, vaddr=cand_vaddr, decodes=decodes,
-                        bytes=raw, frame=(False,) * pattern_len)
+                        bytes=cand_bytes, frame=(False,) * pattern_len)
                     break
                 if found is not None:
                     break
