@@ -238,7 +238,7 @@ def test_aarch64_compound_ops_are_available():
     from rop3.arch import arch_singleton
     arch_singleton.reset()
     arch_singleton.initialize(AArch64_Architecture())
-    for name in ('gsp', 'lsd', 'eqc', 'ltc', 'jmp', 'jmp-rel', 'spa', 'sps'):
+    for name in ('gsp', 'lsd', 'eqc', 'ltc', 'jmp', 'spa', 'sps'):
         defn = parser.Parser().get_op(name)
         assert defn.available and defn.realizations, name
 

@@ -476,8 +476,11 @@ _COMPOUND_ARCHES = {
                 ('lc(TMP_REG)', 'sub(rbx, rcx)', 'sbb(rax, TMP_REG)', 'neg(rax)'),
                 ('lc(rax)', 'sub(rbx, rcx)', 'rcl(rax)'),
             },
+            # Frame-pointer pivot (mov rbp, op1 ; leave) and the direct
+            # stack-adjust pivot from spa (add rsp, op1).
             'jmp': {
                 ('mov(rbp, rax)', 'leave()'),
+                ('add(rsp, rax)',),
             },
         },
     },
@@ -491,13 +494,13 @@ _COMPOUND_ARCHES = {
             'gcf-ltc': {
                 ('lc(TMP_REG)', 'sub(x1, x2)', 'adc(x0, TMP_REG)'),
             },
-            # Single-step pivot SP <- x29, matched by the `mov sp, x29 ; ldp
-            # x29, x30, [sp] ; ret` epilogue-pivot gadget. x29 (the pivot source)
-            # is loaded "free" from the stack by the framed epilogue, so no
-            # explicit mov into it is needed; op1 is unused. capstone spells x29
-            # as `fp`; matching folds the alias.
+            # Direct pivot (mov sp, op1), the two-step frame-pointer pivot
+            # (mov x29, op1 ; mov sp, x29), and the stack-adjust pivot from spa
+            # (add sp, op1). capstone spells x29 as `fp`; matching folds the alias.
             'jmp': {
-                ('mov(sp, x29)',),
+                ('mov(sp, x0)',),
+                ('mov(x29, x0)', 'mov(sp, x29)'),
+                ('add(sp, x0)',),
             },
         },
     },
@@ -507,12 +510,14 @@ _COMPOUND_ARCHES = {
         'chains': {
             'gcf-eqc': set(),   # unavailable: RISC-V has no carry/condition flags
             'gcf-ltc': set(),
-            # Two pivots: the clean move (mv sp, reg) and the frame-pointer
+            # Three pivots: the clean move (mv sp, reg), the frame-pointer
             # `addi sp, s0, off` epilogue pivot (op1 = s0/fp, wildcard offset)
-            # that no plain move can express.
+            # that no plain move can express, and the stack-adjust pivot from
+            # spa (add sp, op1).
             'jmp': {
                 ('mov(sp, a0)',),
                 ('addi(a0)',),
+                ('add(sp, a0)',),
             },
         },
     },
