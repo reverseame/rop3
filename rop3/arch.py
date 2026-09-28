@@ -313,6 +313,16 @@ class Architecture(ABC):
         """
         return str(name)
 
+    def concrete_reg_equal(self, a: str | int, b: str | int) -> bool:
+        """
+        Whether two register names denote the same register as concrete
+        operands. Unlike normalize_reg -- which folds sub-registers up to the
+        canonical width so an abstract operand can be assigned its full
+        register -- this must distinguish widths, so a sub-register (al/eax,
+        w0) is never equal to the full register (rax, x0).
+        """
+        return self.normalize_reg(a) == self.normalize_reg(b)
+
     @abstractmethod
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """

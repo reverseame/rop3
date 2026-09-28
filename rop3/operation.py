@@ -702,7 +702,7 @@ class Operand:
                 if not self._alias_ok(arch, base):
                     return (False, None)
                 return (True, (self.reg, arch.normalize_reg(base)))
-            return (arch.normalize_reg(base) == arch.normalize_reg(self.reg), None)
+            return (arch.concrete_reg_equal(base, self.reg), None)
 
         if self.is_imm():
             if operand.type != arch.op_imm:
@@ -717,12 +717,7 @@ class Operand:
             if not self._alias_ok(arch, reg):
                 return (False, None)
             return (True, (self.reg, arch.normalize_reg(reg)))
-        # Concrete registers must match up to full-width aliasing: capstone may
-        # spell a register differently than the pattern (AArch64 fp==x29,
-        # lr==x30), but writing a sub-register (ah/eax, w0) is still not the same
-        # as the full register (rax, x0) -- normalize_reg folds aliases, not
-        # sub-registers.
-        return (arch.normalize_reg(reg) == arch.normalize_reg(self.reg), None)
+        return (arch.concrete_reg_equal(reg, self.reg), None)
 
     @staticmethod
     def _alias_ok(arch, reg) -> bool:
