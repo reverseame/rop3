@@ -132,7 +132,8 @@ class Architecture(ABC):
             return False
         # Multibranch conditional (je/jne, beq/bne).
         if not allow_undeterministic and any(
-                ins.mnemonic in self.conditional_branch_mnemonics for ins in intermediates):
+                self.base_mnemonic(ins.mnemonic) in self.conditional_branch_mnemonics
+                for ins in intermediates):
             return False
         return True
 
@@ -160,7 +161,8 @@ class Architecture(ABC):
             return False
         # Multibranch conditional (je/jne, beq/bne).
         if not allow_undeterministic and any(
-                ins.mnemonic in self.conditional_branch_mnemonics for ins in intermediates):
+                self.base_mnemonic(ins.mnemonic) in self.conditional_branch_mnemonics
+                for ins in intermediates):
             return False
         return True
 
@@ -198,27 +200,33 @@ class Architecture(ABC):
     def splits_gadget(self, insn) -> bool:
         """
         Whether `insn` may not appear *inside* a gadget -- an intermediate
-        control-flow transfer that would end it early: an unconditional branch or
-        return, or a conditional branch. The gadget's own terminator is exempt
-        (the abstract-gadget search checks only the instructions before it).
+        unconditional control-flow transfer or return that would end it early.
+        The gadget's own terminator is exempt (the abstract-gadget search checks
+        only the instructions before it). Intermediate *conditional* branches are
+        not rejected here; they are handled, gated on --allow-undeterministic, by
+        GadFinder._ropblock_body_ok (mirroring the ordinary scans, which admit a
+        conditional intermediate when undeterministic gadgets are allowed).
         """
-        return (self.base_mnemonic(insn.mnemonic) in self.unconditional_branch_mnemonics
-                or insn.mnemonic in self.conditional_branch_mnemonics)
+        return self.base_mnemonic(insn.mnemonic) in self.unconditional_branch_mnemonics
 
     def _ropblock_scan(self, opcodes, base_vaddr, depth, disasm,
-                       accept_candidate=None):
+                       accept_candidate=None, accept_decodes=None):
         ''' Abstract-gadget backward search (search.backwards_framed_search)
             wired with this architecture's own ropblock predicates; yields
-            ``(vaddr, raw, decodes, frame)``. '''
+            ``(vaddr, raw, decodes, frame)``. `accept_decodes` is the finder's
+            supplementary body filter (complex-memory / segment-override /
+            conditional-branch rejection) that the search's own terminator logic
+            does not cover. '''
         yield from backwards_framed_search(
             opcodes, base_vaddr, depth, self.alignment, disasm,
             self.is_pc_reg_write, self.ropblock_branch_reg,
             self.is_stack_load, self.clobbers_reg, self.restores_return_address,
-            splits=self.splits_gadget, accept_candidate=accept_candidate)
+            splits=self.splits_gadget, accept_candidate=accept_candidate,
+            accept_decodes=accept_decodes)
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True, ropblock=False):
+             framed=True, ropblock=False, accept_decodes=None):
         '''
         Yield this architecture's gadgets within one executable section as
         ``(vaddr, raw, decodes, frame)`` tuples (`frame` is the per-instruction
@@ -237,7 +245,8 @@ class Architecture(ABC):
         '''
         if ropblock:
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
-                                           accept_candidate=accept_candidate)
+                                           accept_candidate=accept_candidate,
+                                           accept_decodes=accept_decodes)
             return
         yield from galileo_scan(
             opcodes, base_vaddr, terminations, depth, self.alignment, disasm,

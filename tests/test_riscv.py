@@ -42,6 +42,10 @@ LD_A5_SP = bytes.fromhex('83378100')
 JR_A5 = bytes.fromhex('67800700')
 # c.jr a5  -- compressed indirect jump through a5 (0x8782)
 C_JR_A5 = bytes.fromhex('8287')
+# addi a0, a0, 8  -- in-place transform of a0 (reads AND writes a0) (0x00850513)
+ADDI_A0_A0_8 = bytes.fromhex('13058500')
+# addi a5, a5, 8  -- in-place transform of a5 (reads AND writes a5) (0x00878793)
+ADDI_A5_A5_8 = bytes.fromhex('93878700')
 # jalr a5  == jalr ra, 0(a5)  -- indirect CALL (links ra); not a return
 JALR_A5 = bytes.fromhex('e7800700')
 # c.jalr ra  -- compressed indirect CALL; not a return (0x9082)
@@ -500,6 +504,49 @@ def test_gadfinder_compressed_2byte_ra_restore(tmp_path):
 # non-trivial terminators are `ret` (jalr x0, 0(ra)), the pure indirect jumps
 # `jr`/`c.jr`, and the compressed return `c.jr ra`; the linking `jalr`/`c.jalr`
 # are calls and are not return strategies.
+
+def test_riscv_intermediate_ret_splits_jop_gadget():
+    '''
+    Regression: `ret` (jalr x0, 0(ra)) must be treated as an unconditional
+    transfer so an *intermediate* one splits a JOP/ropblock gadget -- `ret ;
+    jr a5` stops executing at the internal `ret`, so it is not a valid `jr a5`
+    gadget. x86 and AArch64 already list their return among the unconditional
+    branches; RISC-V omitted it.
+    '''
+    arch = RISCV_Architecture()
+    assert 'ret' in arch.unconditional_branch_mnemonics
+    decodes = _disasm(RET + JR_A5)                      # ret ; jr a5
+    assert [d.mnemonic for d in decodes] == ['ret', 'jr']
+    assert not arch.is_valid_jop_gadget(decodes)        # internal ret ends it early
+    # a plain `jr a5` on its own is still a valid JOP terminator
+    assert arch.is_valid_jop_gadget(_disasm(JR_A5))
+
+
+def test_riscv_clobbers_reg_read_guard():
+    '''
+    Regression: an in-place transform that also *reads* the register (e.g.
+    `addi a0, a0, 8`) is not a clobber -- the stack-derived value is preserved,
+    exactly as x86 (`add rax, 8`) and AArch64 handle it. A write that does not
+    read the register (`mv a0, a1`) still clobbers it. Without the read-guard a
+    ropblock gadget that transforms its stack-loaded branch target was wrongly
+    dropped on RISC-V only.
+    '''
+    arch = RISCV_Architecture()
+    addi = _disasm(ADDI_A0_A0_8)[0]                     # addi a0, a0, 8
+    mv = _disasm(MV_A0_A1)[0]                           # mv a0, a1 (addi a0, a1, 0)
+    assert not arch.clobbers_reg(addi, 'a0')            # reads+writes a0: preserved
+    assert arch.clobbers_reg(mv, 'a0')                  # writes a0 from a1: clobber
+    assert not arch.clobbers_reg(mv, 'a1')              # a1 only read
+
+
+def test_riscv_ropblock_transformed_branch_target_is_kept(tmp_path):
+    ''' End-to-end: `ld a5, 8(sp) ; addi a5, a5, 8 ; jr a5` frames a ropblock
+        gadget -- the addi transforms the stack-loaded target in place (not a
+        clobber), so the data flow prologue -> terminator survives. '''
+    path = _elf_path(tmp_path, LD_A5_SP + ADDI_A5_A5_8 + JR_A5)
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert 'ld a5, 8(sp) ; addi a5, a5, 8 ; jr a5' in reprs
+
 
 def test_riscv_ropblock_terminators_and_branch_regs():
     arch = RISCV_Architecture(compressed=True)

@@ -81,11 +81,17 @@ def match_gadgets(defn: OperationDef, operands: list | None,
     if not gadgets:
         return ret
 
+    # The values the operation's destination roles bind to (an unbound dst role
+    # keeps its opN name), used to refuse the reg->imm substitution on a
+    # destination operand (see Operand.is_equal / _mark_dst_operands).
+    dst_values = {bindings.get(r, r) for r in defn.dst_roles}
+
     for real in defn.realizations:
         # Realizations must be single gadgets (no references)
         if not real.is_single_gadget:
             continue
         set_ = real.links[0].bound(bindings)
+        _mark_dst_operands(set_, dst_values)
         for gadget in gadgets:
             for binds, indices in set_.all_matches(gadget.decodes, gadget.frame):
                 if reject_clobbered and gadget.result_clobbered(
@@ -148,6 +154,17 @@ def _destination_registers(defn: OperationDef, bindings: dict, binds: dict) -> s
         given match bindings. Handed to Gadget.result_clobbered to reject
         gadgets that overwrite the result before returning. '''
     return {r for r in (_as_register(bindings, n, binds) for n in defn.dst_roles) if r}
+
+
+def _mark_dst_operands(set_, dst_values: set) -> None:
+    ''' Flag each operand of the (already bound) pattern that sits in a
+        destination role, so Operand.is_equal refuses the reg->imm substitution
+        for it. An operand's current name (`reg`) equals the bound value of a
+        dst role when it is one -- bound() renames an abstract operand to its
+        bound value, and dst_values is computed with the same binding. '''
+    for item in set_.items:
+        for operand in item.operands:
+            operand.is_dst_role = operand.reg in dst_values
 
 
 def _annotate(defn: OperationDef, bindings: dict, gadget: Gadget, binds: dict) -> Gadget:
@@ -529,9 +546,17 @@ class Set:
             # An operation anchors on a body instruction only, and either at the
             # gadget's start (no junk before it) or once inside a junk-free frame.
             if not frame[anchor] and (anchor == 0 or (entered_frame and no_pre_frame_junk)):
-                matched = self._match_run(decodes, anchor)
-                if matched is not None:
-                    yield (matched[1], matched[2])
+                # The matched run spans [anchor, anchor + k). It may cover the
+                # gadget's own terminator (the last instruction -- a raw verbatim
+                # pattern legitimately ends on it), but never a *prologue*: a
+                # framing instruction before the end. So `push op2 ; pop op1`
+                # must not realize mov(rbx, rax) by swallowing the JOP prologue
+                # `pop rbx` in `push rax ; pop rbx ; jmp rbx`.
+                last = n - 1
+                if not any(frame[i] and i != last for i in range(anchor + 1, anchor + k)):
+                    matched = self._match_run(decodes, anchor)
+                    if matched is not None:
+                        yield (matched[1], matched[2])
             if frame[anchor]:
                 entered_frame = True
 
@@ -612,6 +637,11 @@ class Operand:
         self.wildcard = False
         self.reg = None
         self.imm = None
+        # Whether this operand sits in a destination role of its operation
+        # (set by operation._mark_dst_operands after binding). A destination may
+        # never bind to an immediate, so the reg->imm substitution is refused for
+        # it. Default False (e.g. verbatim raw gadgets, which never substitute).
+        self.is_dst_role = False
         self._parse(operand)
 
     def __str__(self) -> str:
@@ -690,8 +720,12 @@ class Operand:
             return (True, None)
 
         # A generic register operand may match an immediate (reg -> imm subst),
-        # but never a memory operand (a load address is not an immediate).
-        if self.abstract and self.is_reg() and operand.type == arch.op_imm:
+        # but never a memory operand (a load address is not an immediate) and
+        # never a destination operand (you cannot write a result into an
+        # immediate -- and binding a dst to an immediate would empty the
+        # contradictory-gadget guard's destination set).
+        if self.abstract and self.is_reg() and not self.is_dst_role \
+                and operand.type == arch.op_imm:
             return (True, (self.reg, operand.value.imm))
 
         if self.is_mem():

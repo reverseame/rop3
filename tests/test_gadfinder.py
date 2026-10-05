@@ -162,6 +162,53 @@ def test_ropblock_flag_finds_register_return_with_frame(x86):
     assert not any(g.text_repr == 'pop eax ; jmp eax' for g in plain)
 
 
+def test_find_op_resolves_sp_alias_and_generic_operands(x64):
+    '''
+    Regression: `--op`/`--operands` must apply the same operand normalization a
+    .ropchain file does -- the REG_SP/REG_BP aliases and the generic-slot ->
+    "any register" mapping -- instead of treating `REG_SP`/`reg1` as literal
+    (unmatchable) register names.
+    '''
+    from conftest import make_gadget
+    gadgets = [
+        make_gadget(b'\x48\x89\xe0\xc3', 0x1000),   # mov rax, rsp ; ret
+        make_gadget(b'\x58\xc3', 0x1010),           # pop rax ; ret
+    ]
+    finder = gadfinder.GadFinder()
+    # REG_SP resolves to the stack pointer, so mov(rax, REG_SP) matches mov rax, rsp
+    sp_match = finder.find_op_from_gadgets(gadgets, 'mov', ['rax', 'REG_SP'])
+    assert [g.text_repr for g in sp_match] == ['mov rax, rsp ; ret']
+    # a lowercase generic slot resolves to "any register", matching the pop
+    generic = finder.find_op_from_gadgets(gadgets, 'lc', ['reg1'])
+    assert [g.text_repr for g in generic] == ['pop rax ; ret']
+
+
+def test_ropblock_applies_complex_mem_filter(x86):
+    '''
+    Regression: --ropblock must apply the same first-instruction complex-memory
+    filter the ordinary scans do (default on), instead of silently emitting
+    gadgets the plain scan suppresses. `mov eax, [ebx+ecx*4] ; pop edx ; jmp edx`
+    starts with a complex (base+index*scale) load, so it is filtered; the clean
+    sub-gadget `pop edx ; jmp edx` still comes through. With --allow-complex-mem
+    the full gadget appears.
+    '''
+    base = 0x400000
+    buf = b'\x8b\x04\x8b\x5a\xff\xe2'      # mov eax, [ebx+ecx*4] ; pop edx ; jmp edx
+    complex_repr = 'mov eax, dword ptr [ebx + ecx*4] ; pop edx ; jmp edx'
+
+    def run(flags):
+        f = gadfinder.GadFinder(depth=8, flags=flags)
+        f._open_binary = lambda fn, b, arch=None, raw=False: _FakeBinary(base, bytes(buf))
+        return {g.text_repr for g in f.find(['fake'])}
+
+    reprs = run(gadfinder.ROP | gadfinder.ROPBLOCK)
+    assert 'pop edx ; jmp edx' in reprs
+    assert complex_repr not in reprs
+
+    allowed = run(gadfinder.ROP | gadfinder.ROPBLOCK | gadfinder.ALLOW_COMPLEX_MEM)
+    assert complex_repr in allowed
+
+
 def test_ropblock_disables_parallel(x86):
     ''' The abstract-gadget backward search is not chunkable, so it runs
         single-threaded even with --jobs > 1 (produces the same gadgets). '''

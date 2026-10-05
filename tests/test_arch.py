@@ -129,6 +129,24 @@ def test_is_valid_rop_gadget_ret_imm_gating():
     assert arch.is_valid_rop_gadget(plain)
 
 
+def test_prefixed_conditional_branch_is_undeterministic():
+    '''
+    Regression: a prefixed conditional branch (MPX `bnd jne`, which capstone
+    renders with the `bnd` prefix) must be recognized as a conditional branch
+    via base_mnemonic, so an intermediate one makes a gadget non-deterministic
+    and it is rejected unless --allow-undeterministic. Before the fix the raw
+    `bnd jne` mnemonic was not in CONDITIONAL_BRANCH_MNEMONICS and slipped
+    through.
+    '''
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); md.detail = True
+    arch = X64_Architecture()
+    decodes = list(md.disasm(b'\xf2\x0f\x85\x00\x00\x00\x00\xc3', 0))  # bnd jne ; ret
+    assert decodes[0].mnemonic == 'bnd jne'
+    assert arch.base_mnemonic(decodes[0].mnemonic) == 'jne'
+    assert not arch.is_valid_rop_gadget(decodes)                       # non-deterministic
+    assert arch.is_valid_rop_gadget(decodes, allow_undeterministic=True)
+
+
 def test_first_insn_has_segment_override_x86():
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32); md.detail = True
     arch = X86_Architecture()

@@ -461,7 +461,8 @@ def backward_instructions(opcodes, base_vaddr, alignment, disasm, start=None):
 
 def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
                             is_terminator, branch_reg, is_prologue, clobbers,
-                            is_frame=None, splits=None, accept_candidate=None):
+                            is_frame=None, splits=None, accept_candidate=None,
+                            accept_decodes=None):
     '''
     Backward framed ("ropblock") gadget search.
 
@@ -501,6 +502,11 @@ def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
       splits(insn)            -> bool, optional -- an instruction that may not
           appear *inside* a gadget (an intermediate branch/return); a candidate
           whose body contains one is rejected. Default: no such check.
+      accept_decodes(decodes) -> bool, optional -- a supplementary whole-gadget
+          filter the caller applies (complex-memory / segment-override /
+          conditional-branch rejection) that this search's terminator/frame
+          logic does not itself cover; a candidate it rejects is dropped.
+          Default: no such check.
 
     Yields
     ------
@@ -540,6 +546,8 @@ def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
                                                 is_prologue, clobbers)
             if prologue is None:
                 continue                        # not framed
+            if accept_decodes is not None and not accept_decodes(decodes):
+                continue                        # supplementary body filter
             frame = _frame_mask(decodes, prologue, is_frame)
             yield base_vaddr + q, raw, decodes, frame
 
