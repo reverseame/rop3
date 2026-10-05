@@ -269,11 +269,26 @@ def test_aarch64_normalize_reg_folds_full_width_aliases():
     assert arch.normalize_reg('lr') == 'x30'
     assert arch.normalize_reg('wsp') == 'sp'
     assert arch.normalize_reg('wzr') == 'xzr'
-    # Canonical names pass through, and the narrower 32-bit views (w0..w30) are
-    # left alone -- they are sub-registers, not aliases.
+    # Canonical names pass through, and the 32-bit views (w0..w30) fold to their
+    # x-register -- like x86's al/eax -> rax -- so a `w9` write is tracked as
+    # clobbering `x9` (whose upper bits it zero-extends).
     assert arch.normalize_reg('x29') == 'x29'
     assert arch.normalize_reg('sp') == 'sp'
-    assert arch.normalize_reg('w0') == 'w0'
+    assert arch.normalize_reg('w0') == 'x0'
+    assert arch.normalize_reg('w30') == 'x30'
+
+
+def test_aarch64_concrete_reg_equal_is_width_aware():
+    ''' normalize_reg folds w-views up to their x-register for abstract
+        assignment and side-effect tracking, but concrete operand matching stays
+        width-aware: a 32-bit `w9` is not the full `x9` (as al != rax on x86),
+        while the full-width aliases still compare equal. '''
+    arch = AArch64_Architecture()
+    assert not arch.concrete_reg_equal('w9', 'x9')
+    assert arch.concrete_reg_equal('w9', 'w9')
+    assert arch.concrete_reg_equal('x9', 'x9')
+    assert arch.concrete_reg_equal('fp', 'x29')
+    assert arch.concrete_reg_equal('lr', 'x30')
 
 
 @pytest.mark.parametrize('operands', [['x29', 'x0'], ['fp', 'x0']])

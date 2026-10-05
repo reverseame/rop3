@@ -183,7 +183,9 @@ class GadFinder:
                 'data': f'{op}({", ".join(operands)})'}
 
         # Operations realized as multi-step chains (containing operation refs or
-        # more than one gadget) expand into ROP chains.
+        # more than one gadget) expand into ROP chains. The chain path resolves
+        # operand tokens itself (via _resolve_operand in _match_primitives), so
+        # pass them through raw there.
         has_chain = any(not real.is_single_gadget for real in resolved.realizations)
         if has_chain:
             try:
@@ -191,7 +193,13 @@ class GadFinder:
             except RopChainNotFound:
                 return []
 
-        return self.match_operation(gadgets, resolved, operands,
+        # Primitive branch: apply the same operand normalization the chain path
+        # does -- the REG_SP/REG_BP aliases and the generic-slot/TMP_REG ->
+        # "any register" mapping -- so `--op`/`--operands` behaves like a
+        # single-step .ropchain file instead of treating `REG_SP`/`reg1` as
+        # unmatchable concrete register names.
+        resolved_operands = [self._resolve_operand(o) for o in operands]
+        return self.match_operation(gadgets, resolved, resolved_operands,
                                     reject_clobbered=not self._keep_contradictory())
 
     # --- ROP-chain classification -----------------------------------------
@@ -497,12 +505,17 @@ class GadFinder:
         **first appearance** per binary is returned -- a raw gadget's copies are
         interchangeable (same instructions, same side effects), so one is enough.
 
-        Fallback -- when the fast path is unavailable (Keystone missing or its
-        native library won't load, no Keystone backend for the arch such as
-        RISC-V, or the text does not assemble), `search.assemble` returns None
-        and this drops to the Capstone forward scan: `search.literal_scan`
-        (x86, every byte offset) or `search.aligned_literal_scan` (fixed-width,
-        one linear pass). Same first-appearance semantics.
+        Fallback -- the Capstone forward scan: `search.literal_scan` (x86, every
+        byte offset) or `search.aligned_literal_scan` (fixed-width, one linear
+        pass), same first-appearance semantics. It runs when the fast path is
+        unavailable (Keystone missing or its native library won't load, no
+        Keystone backend for the arch such as RISC-V, or the text does not
+        assemble -- `search.assemble` returns None) *and* when the assembled
+        needle simply does not appear: the binary may encode the same
+        instruction differently (e.g. `add rax, rbx` as 48 03 c3 rather than
+        Keystone's 48 01 d8), which only the disassembly-based scan can match.
+        So the fast path is strictly an optimization and never turns a real hit
+        into a miss.
 
         Returns synthetic Gadgets with `frame = (False,) * pattern_len` --
         deliberately not a mask that marks the last position as framing, since
@@ -532,29 +545,40 @@ class GadFinder:
 
             needle = search.assemble(asm_text, arch_obj)
 
-            def candidates(opcodes, vaddr):
-                if needle is not None:
-                    return search.raw_byte_scan(
-                        opcodes, vaddr, needle, arch_obj.alignment, md.disasm,
-                        accept_candidate=accept_candidate)
+            def fast_candidates(opcodes, vaddr):
+                return search.raw_byte_scan(
+                    opcodes, vaddr, needle, arch_obj.alignment, md.disasm,
+                    accept_candidate=accept_candidate)
+
+            def slow_candidates(opcodes, vaddr):
                 scan = (search.literal_scan if arch_obj.alignment == 1
                         else search.aligned_literal_scan)
                 return scan(opcodes, vaddr, arch_obj.alignment, md.disasm,
                             pattern_len, accept_candidate=accept_candidate)
 
-            found = None
-            for section in binary.get_exec_sections():
-                opcodes, vaddr = section['opcodes'], section['vaddr']
-                for cand_vaddr, cand_bytes, decodes in candidates(opcodes, vaddr):
-                    if pattern.matches_exactly(decodes) is None:
-                        continue
-                    found = Gadget(
-                        filename=binary.filename, arch=arch_obj.arch,
-                        mode=arch_obj.mode, vaddr=cand_vaddr, decodes=decodes,
-                        bytes=cand_bytes, frame=(False,) * pattern_len)
-                    break
-                if found is not None:
-                    break
+            def first_match(candidates):
+                ''' First section offset whose window decodes to the pattern. '''
+                for section in binary.get_exec_sections():
+                    opcodes, vaddr = section['opcodes'], section['vaddr']
+                    for cand_vaddr, cand_bytes, decodes in candidates(opcodes, vaddr):
+                        if pattern.matches_exactly(decodes) is None:
+                            continue
+                        return Gadget(
+                            filename=binary.filename, arch=arch_obj.arch,
+                            mode=arch_obj.mode, vaddr=cand_vaddr, decodes=decodes,
+                            bytes=cand_bytes, frame=(False,) * pattern_len)
+                return None
+
+            # Fast path first; fall back to the Capstone scan not only when
+            # Keystone could not assemble (needle is None) but also when the
+            # assembled needle is simply absent -- the binary may hold an
+            # equivalent-but-different encoding of the same instruction
+            # (e.g. `add rax, rbx` as 48 03 c3 vs Keystone's 48 01 d8), which
+            # only the disassembly-based scan can match. So the fast path never
+            # turns a real hit into a miss.
+            found = first_match(fast_candidates) if needle is not None else None
+            if found is None:
+                found = first_match(slow_candidates)
             if found is not None:
                 ret.append(found)
         return ret
@@ -582,7 +606,27 @@ class GadFinder:
             yield from arch_obj.scan(
                 opcodes, vaddr, self.depth, md.disasm, self._is_valid_gadget,
                 terminations=terminations, accept_candidate=accept_candidate,
-                framed=self.framed, ropblock=self.ropblock)
+                framed=self.framed, ropblock=self.ropblock,
+                accept_decodes=self._ropblock_body_ok if self.ropblock else None)
+
+    def _ropblock_body_ok(self, decodes) -> bool:
+        ''' The supplementary gadget filters the ordinary scans apply via
+            is_valid_rop/jop_gadget but the abstract-gadget (ropblock) search's
+            own terminator/frame logic does not: the first-instruction
+            complex-memory and segment-override filters (unless explicitly
+            allowed), and the intermediate conditional-branch rejection (unless
+            --allow-undeterministic). Keeps --ropblock consistent with the plain
+            scan for the same options. '''
+        arch = arch_singleton.arch
+        if not self._allow_complex_mem() and arch.first_insn_has_complex_mem(decodes):
+            return False
+        if not self._allow_segment_override() and arch.first_insn_has_segment_override(decodes):
+            return False
+        if not self._allow_undeterministic() and any(
+                arch.base_mnemonic(ins.mnemonic) in arch.conditional_branch_mnemonics
+                for ins in decodes[:-1]):
+            return False
+        return True
 
     def _reconstruct(self, binary, records, symbol_table):
         ''' Rebuild Gadget objects from cached (vaddr, hex-bytes, frame) records.

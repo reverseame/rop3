@@ -31,8 +31,12 @@ REGS: frozenset[str] = frozenset({
 })
 
 # Unconditional transfers. `ret`/`jr`/`jalr` are indirect (register targets);
-# `j`/`jal` are direct. Compressed variants share the same printed mnemonics.
+# `j`/`jal` are direct. `ret` (capstone's spelling of `jalr x0, 0(ra)`) is
+# listed so an *intermediate* return splits a JOP/ropblock gadget, mirroring
+# x86 and AArch64 (which include their own return here). Compressed variants
+# share the same printed mnemonics.
 UNCONDITIONAL_BRANCH_MNEMONICS: tuple[str, ...] = (
+    'ret',
     'j', 'jal', 'jalr', 'jr',
     'c.j', 'c.jal', 'c.jalr', 'c.jr',
 )
@@ -106,7 +110,7 @@ class RISCV_Architecture(Architecture):
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True, ropblock=False):
+             framed=True, ropblock=False, accept_decodes=None):
         # `ret` jumps through ra, so a useful ROP gadget must first restore ra
         # from the stack: the aligned sweep gated on that frame load (the
         # default). `--no-frame` drops the requirement (plain aligned sweep).
@@ -114,7 +118,8 @@ class RISCV_Architecture(Architecture):
         # Yields (vaddr, raw, decodes, frame).
         if ropblock:
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
-                                           accept_candidate=accept_candidate)
+                                           accept_candidate=accept_candidate,
+                                           accept_decodes=accept_decodes)
             return
         yield from aligned_scan(
             opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
@@ -288,8 +293,21 @@ class RISCV_Architecture(Architecture):
         return False
 
     def clobbers_reg(self, insn, reg) -> bool:
-        for rid in self.written_registers(insn):
-            name = insn.reg_name(rid)
-            if name and name == reg:
-                return True
-        return False
+        # A write that also reads `reg` is an in-place transform (e.g. `addi a0,
+        # a0, 8`), not a clobber -- the stack-derived value is preserved, exactly
+        # as x86 (`add rax, 8`) and AArch64 handle it. capstone exposes no
+        # reg-access for RISC-V, so sources are read off the encoding
+        # (_reads_reg): rd is operand 0, the rest are sources.
+        if not any(insn.reg_name(rid) == reg for rid in self.written_registers(insn)):
+            return False
+        return not self._reads_reg(insn, reg)
+
+    def _reads_reg(self, insn, reg) -> bool:
+        ''' Whether `insn` reads register `reg`. rd is the first operand and is
+            written (not read) for the ordinary forms; every other register
+            operand is a source, and for the non-writing forms (stores, branches,
+            register jumps) the first operand is a source too. '''
+        reg_ops = [op for op in insn.operands if op.type == self.op_reg]
+        if self.base_mnemonic(insn.mnemonic) not in NON_WRITING_MNEMONICS:
+            reg_ops = reg_ops[1:]
+        return any(insn.reg_name(op.reg) == reg for op in reg_ops)

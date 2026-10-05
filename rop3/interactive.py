@@ -92,6 +92,11 @@ class Rop3Shell(cmd.Cmd):
                 utils.print_ropchain(first)
         except rop3.ropchain.RopChainNotFound as exc:
             print(f'No ROP chain found: {exc}')
+        except parser.ParserException as exc:
+            # An unknown/misspelled operation name surfaces here (not wrapped in
+            # RopChainNotFound) once the generator is primed; report it like
+            # do_op rather than letting it abort the REPL.
+            print(str(exc))
 
     def do_quit(self, arg):
         'quit: exit the interactive mode'

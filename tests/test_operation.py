@@ -99,6 +99,49 @@ def test_filter_gadgets_clobbered_destination(x64):
         == ['mov rsp, rax ; pop rbp ; ret']
 
 
+def test_multi_insn_op_does_not_swallow_a_framing_prologue(x64):
+    '''
+    Regression: a multi-instruction operation may cover the gadget's terminator
+    (a raw verbatim pattern does), but never a *prologue*. Under --ropblock the
+    JOP gadget `push rax ; pop rbx ; jmp rbx` frames `pop rbx` (the branch
+    register's stack load); `push op2 ; pop op1` must NOT realize mov(rbx, rax)
+    by consuming that prologue -- the gadget would transfer control to rbx, not
+    continue.
+    '''
+    import capstone
+    from rop3.gadget import Gadget
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    md.detail = True
+    code = b'\x50\x5b\xff\xe3'                  # push rax ; pop rbx ; jmp rbx
+    decodes = list(md.disasm(code, 0x1000))
+    # ropblock frame: pop rbx is the prologue (branch-reg stack load), jmp rbx
+    # the terminator; push rax is the operation body.
+    g = Gadget(filename='t', arch=capstone.CS_ARCH_X86, mode=capstone.CS_MODE_64,
+               vaddr=0x1000, decodes=decodes, bytes=code, frame=(False, True, True))
+    assert make_operation('mov', ['rbx', 'rax']).filter_gadgets([g]) == []
+
+
+def test_abstract_dst_operand_does_not_bind_immediate(x64):
+    '''
+    Regression: the reg->imm substitution is refused for a destination operand
+    (you cannot write a result into an immediate), so a dst placeholder never
+    binds an immediate and the contradictory-gadget guard's destination set is
+    never silently emptied. A source placeholder still substitutes.
+    '''
+    import capstone
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    md.detail = True
+    decode = list(md.disasm(b'\x48\x83\xc0\x05', 0))[0]   # add rax, 5
+    imm_operand = decode.operands[1]                      # the immediate 5
+
+    dst = operation.Operand('op1')
+    dst.is_dst_role = True
+    assert dst.is_equal(decode, imm_operand) == (False, None)
+
+    src = operation.Operand('op2')                        # is_dst_role defaults False
+    assert src.is_equal(decode, imm_operand) == (True, ('op2', 5))
+
+
 def test_operand_parse_imm_supports_hex_and_negative(x64):
     ''' Regression: immediates parsed with int(x, 0). '''
     op = operation.Operand('rax')

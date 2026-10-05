@@ -77,7 +77,7 @@ class AArch64_Architecture(Architecture):
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
-             framed=True, ropblock=False):
+             framed=True, ropblock=False, accept_decodes=None):
         # Fixed-width, naturally aligned ISA: the aligned linear sweep finds the
         # same gadgets as Galileo, faster, with no unintended gadgets. When
         # framed, keep only gadgets that restore the return address (lr/x30)
@@ -85,7 +85,8 @@ class AArch64_Architecture(Architecture):
         # (Galileo-only) are unused here. Yields (vaddr, raw, decodes, frame).
         if ropblock:
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
-                                           accept_candidate=accept_candidate)
+                                           accept_candidate=accept_candidate,
+                                           accept_decodes=accept_decodes)
             return
         yield from aligned_scan(
             opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
@@ -204,22 +205,41 @@ class AArch64_Architecture(Architecture):
     _FULLWIDTH_ALIASES = {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp', 'wzr': 'xzr'}
 
     def normalize_reg(self, name: str | int) -> str:
-        ''' Fold full-width aliases (fp->x29, lr->x30, wsp->sp, wzr->xzr) so
-            operand matching and side-effect tracking are spelling-independent.
-            Narrower 32-bit views (w0..w30) are left untouched. '''
-        return self._FULLWIDTH_ALIASES.get(str(name), str(name))
+        ''' Fold a register name to its canonical 64-bit register, like x86's
+            normalize_reg: the full-width aliases (fp->x29, lr->x30, wsp->sp,
+            wzr->xzr) and the 32-bit views (w0..w30->x0..x30). This makes operand
+            assignment and side-effect/clobber tracking spelling- and
+            width-independent, so a `w9` write is seen to clobber `x9` (whose
+            upper bits it zero-extends). Width is *not* collapsed for concrete
+            operand equality -- see concrete_reg_equal. '''
+        return self._norm(name)
 
     @classmethod
     def _norm(cls, name):
-        ''' Fold AArch64 register aliases for ropblock matching: the full-width
-            aliases (fp->x29, lr->x30, wsp->sp, wzr->xzr) plus the 32-bit views
-            w0..w30->x0..x30. '''
+        ''' Fold AArch64 register aliases: the full-width aliases (fp->x29,
+            lr->x30, wsp->sp, wzr->xzr) plus the 32-bit views w0..w30->x0..x30. '''
         n = str(name)
         if n in cls._FULLWIDTH_ALIASES:
             return cls._FULLWIDTH_ALIASES[n]
         if len(n) > 1 and n[0] == 'w' and n[1:].isdigit():
             return 'x' + n[1:]
         return n
+
+    @staticmethod
+    def _is_w_view(name) -> bool:
+        ''' Whether `name` is a 32-bit view (w0..w30, wsp, wzr). '''
+        n = str(name)
+        return n in ('wsp', 'wzr') or (len(n) > 1 and n[0] == 'w' and n[1:].isdigit())
+
+    def concrete_reg_equal(self, a: str | int, b: str | int) -> bool:
+        ''' Equal iff both name the same canonical register at the same width.
+            normalize_reg folds a 32-bit view up to its x-register for abstract
+            assignment and side-effect tracking, but a concrete `w9` is not the
+            full `x9` (mirroring x86's al/eax != rax), so matching stays
+            width-aware. '''
+        if self._is_w_view(a) != self._is_w_view(b):
+            return False
+        return self.normalize_reg(a) == self.normalize_reg(b)
 
     def is_pc_reg_write(self, insn) -> bool:
         # `ret` (branches through x30) and `br Xn`; `blr` is a call and excluded.

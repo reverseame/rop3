@@ -259,11 +259,18 @@ class RopChain:
                     if any(clobbered.get(reg, 0) > 0 for reg in gad.src):
                         continue
 
-                    newly_bound = {}
-                    for k, v in ((op1_key, gad.slot_op1), (op2_key, gad.slot_op2)):
-                        if _is_generic_slot(k) and k not in live:
-                            live[k] = v
-                            newly_bound[k] = v
+                    proposed = self._slot_bindings(op1_key, op2_key, gad, live)
+                    if proposed is None:
+                        # This gadget cannot consistently bind the step's generic
+                        # slots: it binds one to a non-register (immediate match),
+                        # binds the SAME slot name to two different registers
+                        # (e.g. xor(REG1, REG1) matched by `xor rax, rbx`), or
+                        # would collapse two DISTINCT live slots onto one physical
+                        # register (which the clobber tracker cannot model).
+                        continue
+                    newly_bound = proposed
+                    for k, v in newly_bound.items():
+                        live[k] = v
 
                     for reg in gad.side_regs:
                         clobbered[reg] += 1
@@ -290,6 +297,46 @@ class RopChain:
         yield from backtrack(0, {}, Counter(), [])
         if not found_any:
             raise RopChainNotFound('no suitable ropchain combination found in DFS')
+
+    @staticmethod
+    def _slot_bindings(op1_key, op2_key, gad, live) -> dict | None:
+        '''
+        The generic slots this gadget would newly bind for a step, or None if it
+        cannot bind them consistently. A slot already in `live` was resolved
+        upstream (candidates() already filtered the gadget on it), so it is left
+        alone here.
+
+        Rejects (returning None):
+          * a slot that resolves to a non-register -- slot value None, i.e. the
+            operand matched an immediate; a generic register slot must be a
+            concrete register (issue: reg->imm leaking a None binding);
+          * the same slot name required to be two different registers at once
+            (e.g. both operands are REG1 but the gadget's are rax and rbx);
+          * two distinct slots collapsing onto one physical register, whether
+            that register is already held by another live slot or is proposed
+            for two slots here -- the clobber tracker models one value per
+            register, so sharing silently destroys one slot's value.
+        '''
+        proposed: dict = {}
+        for k, v in ((op1_key, gad.slot_op1), (op2_key, gad.slot_op2)):
+            if not _is_generic_slot(k) or k in live:
+                continue
+            if v is None:
+                return None                         # slot bound to a non-register
+            if k in proposed:
+                if proposed[k] != v:
+                    return None                     # same slot, two registers
+                continue
+            proposed[k] = v
+        if not proposed:
+            return proposed
+        occupied = {r for name, r in live.items() if _is_generic_slot(name)}
+        seen: set = set()
+        for v in proposed.values():
+            if v in occupied or v in seen:
+                return None                         # distinct slots, one register
+            seen.add(v)
+        return proposed
 
     def _build_per_comb_gadgets(
         self,

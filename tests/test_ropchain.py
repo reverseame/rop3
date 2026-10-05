@@ -80,6 +80,79 @@ def test_search_generic_registers(x64):
     assert all(len(r) == 1 for r in results)
 
 
+def test_same_generic_slot_in_both_operands_requires_equal_registers(x64):
+    '''
+    Regression: a step using one generic slot for BOTH operands (the
+    zero-a-register idiom `xor(REG1, REG1)`) must only match a gadget whose two
+    operand registers are equal. `xor rax, rbx` realizes xor(rax, rbx), not
+    xor(X, X), so with only it available no chain exists; a self-xor assembles.
+    '''
+    cross = make_gadget(b'\x48\x31\xd8\xc3', 0x1000)   # xor rax, rbx ; ret
+    self_ = make_gadget(b'\x48\x31\xc0\xc3', 0x1010)   # xor rax, rax ; ret
+    chain = [_op('xor', dst='REG1', src='REG1')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search([cross], chain))
+    results = list(RopChain(GadFinder()).search([cross, self_], chain))
+    assert results
+    assert results[0][0].text_repr == 'xor rax, rax ; ret'
+
+
+def test_distinct_generic_slots_do_not_collapse_onto_one_register(x64):
+    '''
+    Regression: two independent generic slots must not bind to the same physical
+    register -- the clobber tracker models one value per register, so collapsing
+    REG1 and REG2 onto rax would let the second `pop rax` silently destroy the
+    first slot's value. With only one pop-able register the chain is impossible;
+    with two distinct ones it assembles, REG1 != REG2.
+    '''
+    chain = [
+        _op('lc', dst='REG1'), _op('lc', dst='REG2'),
+        _op('mov', dst='rdi', src='REG1'), _op('mov', dst='rsi', src='REG2'),
+    ]
+    one_reg = [
+        make_gadget(b'\x58\xc3', 0x1000),           # pop rax ; ret
+        make_gadget(b'\x48\x89\xc7\xc3', 0x1010),   # mov rdi, rax ; ret
+        make_gadget(b'\x48\x89\xc6\xc3', 0x1020),   # mov rsi, rax ; ret
+    ]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(one_reg, chain))
+
+    two_regs = one_reg + [
+        make_gadget(b'\x5b\xc3', 0x1030),           # pop rbx ; ret
+        make_gadget(b'\x48\x89\xde\xc3', 0x1040),   # mov rsi, rbx ; ret
+    ]
+    results = list(RopChain(GadFinder()).search(two_regs, chain))
+    assert results
+    slots = {g.slot_op1 for g in results[0] if g.op == 'lc'}
+    assert slots == {'rax', 'rbx'}                  # the two slots stayed distinct
+
+
+def test_generic_slot_never_binds_an_immediate_match(x64):
+    '''
+    Regression: when a generic slot's operand resolves to an immediate (reg->imm
+    substitution on a source), the gadget does not provide a register for that
+    slot, so it must not be used to bind it. `add(rax, REG1)` matched by
+    `add rax, 5` leaves REG1 with no register, so a later `mov(rdi, REG1)` cannot
+    link to it and (with only the immediate add) no chain exists; a register add
+    assembles and binds REG1 properly.
+    '''
+    chain = [_op('add', dst='rax', src='REG1'), _op('mov', dst='rdi', src='REG1')]
+    imm_only = [
+        make_gadget(b'\x48\x83\xc0\x05\xc3', 0x1000),   # add rax, 5 ; ret
+        make_gadget(b'\x48\x89\xc7\xc3', 0x1010),       # mov rdi, rax ; ret
+    ]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(imm_only, chain))
+
+    with_reg = imm_only + [
+        make_gadget(b'\x48\x01\xd8\xc3', 0x1020),       # add rax, rbx ; ret
+        make_gadget(b'\x48\x89\xdf\xc3', 0x1030),       # mov rdi, rbx ; ret
+    ]
+    results = list(RopChain(GadFinder()).search(with_reg, chain))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['add rax, rbx ; ret', 'mov rdi, rbx ; ret']
+
+
 def test_explicit_dst_clears_clobbered_register(x64):
     '''
     Regression (#34): a register written by a later step must no longer be
@@ -466,6 +539,14 @@ _COMPOUND_ARCHES = {
         'arch': lambda: X64_Architecture(),
         'operands': {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'},
         'chains': {
+            'eqc': {('sub(rax, rbx)', 'neg(rax)')},
+            'ltc': {('sub(rax, rbx)',)},
+            'lsd': {('lc(TMP_REG)', 'neg(rax)', 'and(rax, TMP_REG)')},
+            'gsp': {('mov(rax, rsp)',)},
+            'spa': {('add(rsp, rax)',)},
+            'sps': {('sub(rsp, rax)',)},
+            # Frame-pointer pivot: load rbp off the stack, then a `leave` gadget.
+            'pivot': {('lc(rbp)', 'leave()')},
             'gcf-eqc': {
                 ('lc(TMP_REG)', 'sub(rbx, rcx)', 'neg(rbx)', 'adc(rax, TMP_REG)'),
                 ('lc(TMP_REG)', 'sub(rbx, rcx)', 'neg(rbx)', 'sbb(rax, TMP_REG)', 'neg(rax)'),
@@ -488,6 +569,15 @@ _COMPOUND_ARCHES = {
         'arch': lambda: AArch64_Architecture(),
         'operands': {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'},
         'chains': {
+            'eqc': {('sub(x0, x1)', 'neg(x0)')},
+            'ltc': {('sub(x0, x1)',)},
+            'lsd': {('lc(TMP_REG)', 'neg(x0)', 'and(x0, TMP_REG)')},
+            'gsp': {('mov(x0, sp)',)},
+            'spa': {('add(sp, x0)',)},
+            'sps': {('sub(sp, x0)',)},
+            # Single frame-pointer move pivot (writing x29 is "free" in framed
+            # ROP, so no two-step form is emitted here).
+            'pivot': {('mov(sp, x29)',)},
             'gcf-eqc': {
                 ('lc(TMP_REG)', 'sub(x1, x2)', 'neg(x1)', 'lc(x0)', 'adc(x0, TMP_REG)'),
             },
@@ -508,6 +598,20 @@ _COMPOUND_ARCHES = {
         'arch': lambda: RISCV_Architecture(),
         'operands': {'op1': 'a0', 'op2': 'a1', 'op3': 'a2'},
         'chains': {
+            # RISC-V has no carry/condition flags, so the flag-based comparisons
+            # are unavailable (empty set <=> unavailable).
+            'eqc': set(),
+            'ltc': set(),
+            'lsd': {('lc(TMP_REG)', 'neg(a0)', 'and(a0, TMP_REG)')},
+            'gsp': {('mov(a0, sp)',)},
+            'spa': {('add(sp, a0)',)},
+            'sps': {('sub(sp, a0)',)},
+            # The clean move pivot via spa (lc + add sp) and the frame-pointer
+            # `addi sp, s0, off` epilogue pivot (reached through addi).
+            'pivot': {
+                ('lc(TMP_REG)', 'add(sp, TMP_REG)'),
+                ('lc(TMP_REG)', 'addi(TMP_REG)'),
+            },
             'gcf-eqc': set(),   # unavailable: RISC-V has no carry/condition flags
             'gcf-ltc': set(),
             # Three pivots: the clean move (mv sp, reg), the frame-pointer
@@ -857,6 +961,25 @@ def test_find_raw_gadgets_on_aligned_arch(tmp_path):
     defn = RopChain(finder)._parse_raw_line('raw([mov, ret], [(x0, x1), ()], [x0], [])')['defn']
     found = finder.find_raw_gadgets([str(path)], defn)
     assert any(g.vaddr == 0x1000 and g.text_repr == 'mov x0, x1 ; ret' for g in found)
+
+
+def test_find_raw_gadgets_falls_back_when_needle_encoding_differs(tmp_path):
+    '''
+    Regression: the Keystone fast path must fall back to the Capstone scan not
+    only when assembly is unavailable but also when the assembled needle is
+    simply absent -- the binary may hold an equivalent-but-different encoding.
+    `add rax, rbx` is emitted here as 48 03 c3 (the `03 /r` form); Keystone
+    assembles the `01 /r` form 48 01 d8, so the byte-scan misses and only the
+    disassembly-based fallback finds it. Before the fix this was a false negative.
+    '''
+    text = b'\x48\x03\xc3'   # add rax, rbx  (03 /r, not Keystone's 48 01 d8)
+    path = tmp_path / 'a.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, text, 0x1000, ET_DYN))
+
+    finder = GadFinder()
+    defn = RopChain(finder)._parse_raw_line('raw([add], [(rax, rbx)], [rax], [rbx])')['defn']
+    found = finder.find_raw_gadgets([str(path)], defn)
+    assert [(g.vaddr, g.text_repr) for g in found] == [(0x1000, 'add rax, rbx')]
 
 
 def test_find_raw_gadgets_returns_only_first_appearance(tmp_path):
