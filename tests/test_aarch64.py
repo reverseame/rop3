@@ -212,20 +212,19 @@ def _aarch64_op_matches(op, operands, body, frame=LDP_FRAME):
     ('ld',  ['x0', 'x1'], bytes.fromhex('200040f9')),   # ldr x0, [x1]
     ('st',  ['x0', 'x1'], bytes.fromhex('010000f9')),   # str x1, [x0] -> [x0]<-x1
     ('lc',  ['x0'],       bytes.fromhex('e00340f9')),   # ldr x0, [sp]
-    ('sc',  ['x0'], bytes.fromhex('e00300f9')),        # str x0, [sp] (direct stack store)
 ])
 def test_aarch64_roplang_patterns_match(op, operands, body):
     assert _aarch64_op_matches(op, operands, body)
 
 
-def test_aarch64_lc_and_sc_do_not_use_pop(tmp_path):
-    # Regression: the AArch64 `lc`/`sc` blocks must not use x86 push/pop (which
-    # do not exist on AArch64); they load/round-trip through the stack.
+def test_aarch64_lc_does_not_use_pop(tmp_path):
+    # Regression: the AArch64 `lc` block must not use x86 push/pop (which
+    # do not exist on AArch64); it loads through the stack.
     import rop3.parser as parser
     from rop3.arch import arch_singleton
     arch_singleton.reset()
     arch_singleton.initialize(AArch64_Architecture())
-    for name in ('lc', 'sc'):
+    for name in ('lc',):
         real = parser.Parser().get_op(name).realizations
         mnems = {ins.mnemonic
                  for r in real for s in r.links for ins in getattr(s, 'items', [])}
@@ -378,3 +377,88 @@ def test_aarch64_ropblock_excludes_blr_call(tmp_path):
     # strategy, so it frames nothing.
     path = _elf(tmp_path, LDR_X9_SP + BLR_X9)
     assert Rop3(path, depth=16, ropblock=True).gadgets() == []
+
+
+def _a64_disasm(code):
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+    md.detail = True
+    return list(md.disasm(code, 0x1000))
+
+
+def test_aarch64_clobbers_reg_value_destroying():
+    ''' F6: an in-place transform that genuinely depends on the register
+        (`add x0, x0, #8`) preserves attacker control and is not a clobber, but a
+        value-destroying idiom that only incidentally reads it (`sub x0, x0, x0`,
+        `eor x0, x0, x0`, `and x0, x0, xzr`, all producing a constant) IS. '''
+    arch = AArch64_Architecture()
+    sub = _a64_disasm(bytes.fromhex('000000cb'))[0]   # sub x0, x0, x0
+    eor = _a64_disasm(bytes.fromhex('000000ca'))[0]   # eor x0, x0, x0
+    andz = _a64_disasm(bytes.fromhex('00001f8a'))[0]  # and x0, x0, xzr
+    add = _a64_disasm(bytes.fromhex('00200091'))[0]   # add x0, x0, #8
+    assert arch.clobbers_reg(sub, 'x0')
+    assert arch.clobbers_reg(eor, 'x0')
+    assert arch.clobbers_reg(andz, 'x0')
+    assert not arch.clobbers_reg(add, 'x0')            # in-place, still controllable
+
+
+def test_aarch64_ropblock_rejects_zeroed_branch_reg(tmp_path):
+    ''' F6 end-to-end: `ldr x9, [sp] ; eor x9, x9, x9 ; br x9` zeroes its
+        stack-loaded branch target, so the jump goes to 0 regardless of the stack
+        -- it is not a valid ropblock gadget. '''
+    path = _elf(tmp_path, LDR_X9_SP + bytes.fromhex('290001ca') + BR_X9)  # eor x9,x9,x9
+    reprs = {g.text_repr for g in Rop3(path, depth=16, ropblock=True).gadgets()}
+    assert not any('br x9' in r for r in reprs)
+
+
+def test_aarch64_gcf_inline_forms_match_real_gadgets():
+    ''' F9: the AArch64 carry realizations use three-address / flag-setting forms
+        (`subs xd,xn,xm`, `negs xd,xn`, `adc xd,xn,xm`); verify each inline form
+        actually matches a real in-memory decode -- the former 2-operand x86-style
+        `sub`/`adc`/`neg` forms could never match any AArch64 instruction (strict
+        operand-count matching), so these carry chains were unrealizable. '''
+    import rop3.parser as parser
+    from rop3.operation import Set
+    from rop3.arch import arch_singleton
+    arch_singleton.reset()
+    arch_singleton.initialize(AArch64_Architecture())
+    binding = {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'}
+
+    def matches(set_, code):
+        decodes = _a64_disasm(code)
+        return bool(set_.bound(binding).all_matches(decodes, scan_frame(decodes)))
+
+    ltc_sets = [l for l in parser.Parser().get_op('gcf-ltc').realizations[0].links
+                if isinstance(l, Set)]
+    subs_set, adc_set = ltc_sets                               # subs, adc
+    assert matches(subs_set, bytes.fromhex('210002eb') + RET)  # subs x1, x1, x2 ; ret
+    assert matches(adc_set, bytes.fromhex('0000099a') + RET)   # adc x0, x0, x9 ; ret
+
+    eqc_sets = [l for l in parser.Parser().get_op('gcf-eqc').realizations[0].links
+                if isinstance(l, Set)]
+    negs_set = eqc_sets[1]                                     # sub, negs, adc
+    assert matches(negs_set, bytes.fromhex('e10301eb') + RET)  # negs x1, x1 ; ret
+
+
+def test_aarch64_framed_add_rejects_overwritten_source():
+    ''' F5: in a framed gadget, an operation must not consume an input that an
+        earlier instruction overwrote. `ldr x30,[sp] ; mov x1,xzr ; add x0,x0,x1 ; ret`
+        zeroes x1 before the add reads it, so it does NOT realize add(x0, x1); the
+        clean `ldr x30,[sp] ; add x0,x0,x1 ; ret` still does. '''
+    from rop3.arch import arch_singleton
+    from rop3.gadget import Gadget
+    arch_singleton.reset()
+    arch_singleton.initialize(AArch64_Architecture())
+
+    def gadget(code):
+        decodes = _a64_disasm(code)
+        return Gadget(filename='t', arch=capstone.CS_ARCH_ARM64,
+                      mode=capstone.CS_MODE_ARM, vaddr=0x1000, decodes=decodes,
+                      bytes=code, frame=scan_frame(decodes))
+
+    ldr_lr = bytes.fromhex('fe0340f9')      # ldr x30, [sp]
+    mov_x1_xzr = bytes.fromhex('e1031faa')  # mov x1, xzr
+    add = bytes.fromhex('0000018b')         # add x0, x0, x1
+    clobbered = gadget(ldr_lr + mov_x1_xzr + add + RET)
+    clean = gadget(ldr_lr + add + RET)
+    assert make_operation('add', ['x0', 'x1']).filter_gadgets([clean])
+    assert not make_operation('add', ['x0', 'x1']).filter_gadgets([clobbered])

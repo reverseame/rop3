@@ -254,6 +254,15 @@ class RISCV_Architecture(Architecture):
                 return True
         return False
 
+    # TODO: RISC-V also needs an explicit `read_registers` override. The
+    # base Architecture.read_registers relies on capstone's regs_access(), which
+    # raises CsError for RISC-V, so it returns an incomplete/empty read set here
+    # (e.g. `addi a5, a5, 8` and `ld a5, 8(sp)` report no reads). `clobbers_reg`
+    # already sidesteps this via the encoding-based `_reads_reg`, but tuple
+    # output and gadget read-sets are still wrong. A proper override would mirror
+    # `written_registers`/`_reads_reg`: rd is operand 0 (a source only for the
+    # non-writing forms); memory bases and the remaining register operands are
+    # sources, including the compressed and implicit-link (`jalr`) forms.
     def written_registers(self, insn) -> set:
         # capstone implements neither regs_access() nor per-operand access
         # flags for RISC-V, so derive the destination from the encoding: rd is
@@ -298,9 +307,33 @@ class RISCV_Architecture(Architecture):
         # as x86 (`add rax, 8`) and AArch64 handle it. capstone exposes no
         # reg-access for RISC-V, so sources are read off the encoding
         # (_reads_reg): rd is operand 0, the rest are sources.
+        # Exception: a value-destroying idiom (`sub/xor rd, rd, rd`,
+        # `and rd, rd, zero`, `andi rd, rd, 0`) reads `reg` only incidentally --
+        # its result is independent of reg's prior value -- so it IS a clobber.
         if not any(insn.reg_name(rid) == reg for rid in self.written_registers(insn)):
             return False
+        if self._destroys_reg_value(insn, reg):
+            return True
         return not self._reads_reg(insn, reg)
+
+    def _destroys_reg_value(self, insn, reg) -> bool:
+        ''' Whether `insn` writes `reg` with a value independent of its prior
+            contents although it nominally reads it: `sub/xor rd, rs1, rs2` with
+            every register operand == reg (-> 0), or an AND against the zero
+            register / a zero immediate. '''
+        m = self.base_mnemonic(insn.mnemonic)
+        regs = [o for o in insn.operands if o.type == self.op_reg]
+        names = [insn.reg_name(o.reg) for o in regs]
+        if m in ('sub', 'xor') and len(names) == 3 and all(n == reg for n in names):
+            return True
+        if m == 'and' and len(names) >= 2 and names[0] == reg \
+                and any(n in ('zero', 'x0') for n in names[1:]):
+            return True
+        if m == 'andi' and names and names[0] == reg:
+            imms = [o for o in insn.operands if o.type == self.op_imm]
+            if imms and imms[0].imm == 0:
+                return True
+        return False
 
     def _reads_reg(self, insn, reg) -> bool:
         ''' Whether `insn` reads register `reg`. rd is the first operand and is

@@ -221,6 +221,39 @@ def build_minimal_elf(elfclass: int, machine: int, text_bytes: bytes,
     return header + payload + b''.join(section_headers)
 
 
+def build_sectionless_elf(machine: int, text_bytes: bytes, vaddr: int,
+                          e_flags: int = 0) -> bytes:
+    '''
+    Produce a valid ELF64 with ONE executable PT_LOAD segment and NO section
+    table (e_shnum == 0) -- a stripped/minimal image that still carries loadable
+    code. Exercises get_exec_sections' PT_LOAD fallback (F18): section-based
+    extraction yields nothing, so the executable segment must be used instead.
+    ET_EXEC with image base == vaddr keeps the relocation delta at 0.
+    '''
+    ehsize = 64
+    phentsize = 56
+    phoff = ehsize
+    text_off = phoff + phentsize
+
+    PT_LOAD = 1
+    PF_X, PF_R = 0x1, 0x4
+    phdr = struct.pack('<IIQQQQQQ', PT_LOAD, PF_X | PF_R, text_off, vaddr, vaddr,
+                       len(text_bytes), len(text_bytes), 1)
+
+    e_ident = b'\x7fELF' + bytes([2, 1, 1, 0]) + b'\x00' * 8   # ELF64, LE
+    header = e_ident + struct.pack(
+        '<HHIQQQIHHHHHH',
+        ET_EXEC, machine, 1,           # type, machine, version
+        vaddr,                         # entry
+        phoff,                         # phoff
+        0,                             # shoff -- no section table
+        e_flags,
+        ehsize, phentsize, 1,          # ehsize, phentsize, phnum
+        0, 0, 0,                       # shentsize, shnum, shstrndx
+    )
+    return header + phdr + text_bytes
+
+
 # --- Minimal in-memory Mach-O (thin + fat) builder ------------------------
 
 MH_MAGIC_64 = 0xFEEDFACF

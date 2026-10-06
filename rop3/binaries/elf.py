@@ -27,6 +27,9 @@ from rop3.archs.riscv_arch import RISCV_Architecture
 from rop3.archs.aarch64_arch import AArch64_Architecture
 
 SHF_EXECINSTR = 0x4
+# Executable segment bit in a program header's p_flags (used for the
+# sectionless fallback in get_exec_sections).
+PF_X = 0x1
 # RISC-V ELF e_flags: bit 0 marks the presence of the C (compressed) extension,
 # which relaxes instruction alignment from 4 to 2 bytes (RISC-V psABI).
 EF_RISCV_RVC = 0x1
@@ -87,6 +90,23 @@ class ELF:
                     'vaddr': sec.header.sh_addr + self._base_delta,
                     'opcodes': sec.data()
                 })
+        if ret:
+            return ret
+
+        # A stripped or minimal image may carry no section table (or no
+        # SHF_EXECINSTR section) yet still hold executable code in its PT_LOAD
+        # segments -- section headers are not needed to load and run code. Emit
+        # one synthetic section per executable segment so such images are not
+        # silently empty. Only reached when no executable section exists, so
+        # these ranges never overlap the section-based ones.
+        for i, seg in enumerate(self._elf.iter_segments()):
+            if seg['p_type'] != 'PT_LOAD' or not (seg['p_flags'] & PF_X):
+                continue
+            ret.append({
+                'name': f'seg{i}',
+                'vaddr': seg['p_vaddr'] + self._base_delta,
+                'opcodes': seg.data(),
+            })
         return ret
 
     def get_info(self):

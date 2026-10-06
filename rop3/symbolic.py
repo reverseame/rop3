@@ -23,7 +23,7 @@ from .gadget import Gadget
 
 try:
     from triton import (
-            TritonContext, ARCH, Instruction, MemoryAccess,
+            TritonContext, ARCH, Instruction, MemoryAccess, EXCEPTION,
         )
     TRITON_AVAILABLE = True
 except ImportError:
@@ -315,13 +315,20 @@ class SymbolicAnalyzer:
         for gad in ropchain:
             slot = None
             sp_pivot = False
-            for insn in gad.decodes:
+            decodes = gad.decodes
+            for pos, insn in enumerate(decodes):
                 if arch.is_stack_pivot(insn):
                     sp_pivot = True
 
                 tinst = Instruction(insn.address, bytes(insn.bytes))
-                ctx.processing(tinst)
+                status = ctx.processing(tinst)
                 self._collect_accesses(ctx, tinst, gad.vaddr, base, accesses)
+
+                # Triton could not process the instruction (unsupported or invalid
+                # encoding): the concrete state past it is meaningless, so stop
+                # emulating this gadget instead of trusting the later decodes. (F8)
+                if status != EXCEPTION.NO_FAULT:
+                    break
 
                 if lr_name is not None and arch.restores_return_address(insn):
                     lr_slot = self._lr_load_address(arch, insn, tinst, lr_name, ptr)
@@ -334,6 +341,17 @@ class SymbolicAnalyzer:
                         slot = min(loads) if loads else None    # x86: ret pops [rsp]
                     lr_slot = None
                     break   # terminator ends the gadget
+
+                # Follow the concrete control flow. Decodes are in program order, so
+                # after a straight-line instruction the PC equals the next decode's
+                # address; if it does not, the gadget took an internal branch (e.g.
+                # `jne` with the tested flag set) and the remaining decodes are not
+                # executed. Stop here rather than blindly running them -- otherwise
+                # an unreachable terminator would be credited with reaching the next
+                # gadget. (F8)
+                if pos + 1 < len(decodes) and \
+                        ctx.getConcreteRegisterValue(pc_reg) != decodes[pos + 1].address:
+                    break
 
             records.append({
                 'slot': slot,

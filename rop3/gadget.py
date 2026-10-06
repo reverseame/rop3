@@ -149,6 +149,38 @@ class Gadget:
         clobbered = {reg for insn in self.decodes[last + 1:-1] for reg in writes(insn)}
         return bool(guarded & clobbered)
 
+    def input_clobbered(self, matched_indices, src_regs) -> bool:
+        ''' Whether an instruction *before* the matched run overwrites one of the
+            operation's source (input) registers, so the value the operation
+            consumes is not the one a previous chain step prepared. The mirror of
+            result_clobbered: it scans the prefix ahead of the match instead of
+            the tail after it.
+
+            This only bites for an in-frame (Phase 2) match -- a match anchored
+            past framing junk -- because an x86-style whole-body match anchors at
+            instruction 0 (empty prefix). It is what stops
+            `ldr x30, [sp] ; mov x1, xzr ; add x0, x0, x1 ; ret` from realizing
+            `add(x0, x1)`: the `mov x1, xzr` zeroes the prepared x1 before the add
+            reads it. The backward scan still emits the junk-free window as its
+            own (shorter) gadget, so no real realization is lost. The stack
+            pointer is never guarded -- framing moves it by design. '''
+        if not src_regs:
+            return False
+
+        arch = arch_singleton.arch
+
+        def writes(insn):
+            return {arch.normalize_reg(insn.reg_name(r))
+                    for r in arch.written_registers(insn)}
+
+        guarded = set(src_regs) - {arch.normalize_reg(arch.sp)}
+        if not guarded:
+            return False
+
+        first = min(matched_indices)
+        clobbered = {reg for insn in self.decodes[:first] for reg in writes(insn)}
+        return bool(guarded & clobbered)
+
     def subsumes(self, rhs) -> bool:
         if (self.dst or set()) != (rhs.dst or set()):
             return False

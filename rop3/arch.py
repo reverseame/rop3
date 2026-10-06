@@ -443,6 +443,10 @@ class Architecture(ABC):
         written_registers: prefers regs_access() and falls back to the
         (implicit-only) detail array where capstone does not implement it. Used
         for the read set of a gadget's tuple representation.
+
+        TODO: capstone's regs_access() raises CsError for RISC-V, so this
+        returns an incomplete read set there; RISC-V should override this with an
+        encoding-based accessor (see the TODO on RISCV_Architecture.written_registers).
         """
         try:
             reads, _ = insn.regs_access()

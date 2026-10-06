@@ -17,8 +17,10 @@ eqc:
         - operation: sub
           op1: op1
           op2: op2
-        - operation: neg
+        - mnemonic: negs
           op1: op1
+          op2: op1
+          writes: [REG_FLAGS]
 
   riscv:
     available: false

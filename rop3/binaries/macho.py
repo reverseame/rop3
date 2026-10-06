@@ -154,14 +154,24 @@ class MachO:
             strtab = self._file.read(cmd.strsize)
             self._file.seek(slice_off + cmd.symoff)
             entries = self._file.read(cmd.nsyms * entry_size)
-            for i in range(cmd.nsyms):
+            # Trust neither nsyms nor the string table: a truncated/malformed
+            # symtab (one header loading still accepts) must not raise
+            # struct.error or slice out of range when --symbols is requested.
+            # Clamp the entry count to the bytes actually read, and bound every
+            # string index.
+            available = len(entries) // entry_size
+            for i in range(min(cmd.nsyms, available)):
                 n_strx, n_type, n_sect, n_desc, n_value = struct.unpack_from(
                     entry_fmt, entries, i * entry_size)
                 if n_type & N_STAB:          # debug (STABS) entry
                     continue
                 if not n_value:              # undefined / no address
                     continue
+                if n_strx < 0 or n_strx >= len(strtab):
+                    continue                 # string index out of range
                 end = strtab.find(b'\x00', n_strx)
+                if end == -1:                # unterminated: take the remainder
+                    end = len(strtab)
                 name = strtab[n_strx:end].decode('utf-8', 'replace')
                 if name:
                     ret.append((n_value + self._base_delta, name))

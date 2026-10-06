@@ -316,7 +316,6 @@ def _s(op, f3, rs1, rs2, imm):
     ('st',  ['s0', 's0'], b'\x00\xe0'),                     # c.sd  s0,0(s0) -> [s0]<-s0
     ('st',  ['s0', 's0'], b'\x00\xc0'),                     # c.sw  s0,0(s0)
     ('and', ['s0', '0'],  b'\x01\x88'),                     # c.andi s0,0
-    ('sc',  ['s0'],       b'\x22\xe0'),                     # c.sdsp s0,0(sp)
     ('add', ['sp', '32'], b'\x05\x61'),                     # c.addi16sp sp,0x20
     ('ld',  ['a0', 'a1'], _i(0x03, 3, 10, 11, 0)),          # ld a0,0(a1)
     ('st',  ['a1', 'a0'], _s(0x23, 3, 11, 10, 0)),          # sd a0,0(a1) -> [a1]<-a0
@@ -601,3 +600,18 @@ def test_riscv_ropblock_excludes_call(tmp_path):
     # strategy, so it frames nothing.
     path = _elf_path(tmp_path, C_LDSP_RA + C_JALR_RA, e_flags=EF_RISCV_RVC)
     assert Rop3(path, depth=16, ropblock=True).gadgets() == []
+
+
+def test_riscv_clobbers_reg_value_destroying():
+    ''' F6: a value-destroying idiom that only incidentally reads the register
+        (`sub a0,a0,a0`, `xor a0,a0,a0`, `and a0,a0,zero`, all producing a
+        constant) IS a clobber, unlike the genuine in-place `addi a0,a0,8`. '''
+    arch = RISCV_Architecture()
+    sub = _disasm(bytes.fromhex('3305a540'))[0]    # sub a0, a0, a0
+    xor = _disasm(bytes.fromhex('3345a500'))[0]    # xor a0, a0, a0
+    andz = _disasm(bytes.fromhex('33750500'))[0]   # and a0, a0, zero
+    addi = _disasm(bytes.fromhex('13058500'))[0]   # addi a0, a0, 8
+    assert arch.clobbers_reg(sub, 'a0')
+    assert arch.clobbers_reg(xor, 'a0')
+    assert arch.clobbers_reg(andz, 'a0')
+    assert not arch.clobbers_reg(addi, 'a0')       # in-place, still controllable

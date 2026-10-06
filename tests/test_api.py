@@ -81,3 +81,24 @@ def test_shell_quit_returns_true(elf_path):
     shell = Rop3Shell(Rop3(elf_path))
     assert shell.onecmd('quit') is True
     assert shell.onecmd('exit') is True
+
+
+# --- F15: base lists must not silently drop input binaries -----------------
+
+def test_api_single_base_replicated_across_binaries(elf_path):
+    ''' A single (length-1) base is replicated across all binaries instead of
+        being zip-truncated, which silently dropped the trailing binaries. '''
+    r = Rop3([elf_path, elf_path], base=['0x1000'])
+    assert len(r.describe()) == 2
+    assert r.gadgets()
+
+
+def test_api_rejects_mismatched_base_list(elf_path):
+    ''' A base list that is neither length-1 nor one-per-binary is rejected
+        instead of truncating inputs. '''
+    from rop3.binary import BinaryException
+    r = Rop3([elf_path, elf_path], base=['0x1000', '0x2000', '0x3000'])
+    with pytest.raises(BinaryException):
+        r.gadgets()
+    with pytest.raises(BinaryException):
+        r.describe()
