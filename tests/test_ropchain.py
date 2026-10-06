@@ -569,7 +569,7 @@ _COMPOUND_ARCHES = {
         'arch': lambda: AArch64_Architecture(),
         'operands': {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'},
         'chains': {
-            'eqc': {('sub(x0, x1)', 'neg(x0)')},
+            'eqc': {('sub(x0, x1)', 'negs(x0)')},
             'ltc': {('sub(x0, x1)',)},
             'lsd': {('lc(TMP_REG)', 'neg(x0)', 'and(x0, TMP_REG)')},
             'gsp': {('mov(x0, sp)',)},
@@ -579,10 +579,10 @@ _COMPOUND_ARCHES = {
             # ROP, so no two-step form is emitted here).
             'pivot': {('mov(sp, x29)',)},
             'gcf-eqc': {
-                ('lc(TMP_REG)', 'sub(x1, x2)', 'neg(x1)', 'lc(x0)', 'adc(x0, TMP_REG)'),
+                ('lc(TMP_REG)', 'sub(x1, x2)', 'negs(x1)', 'lc(x0)', 'adc(x0, TMP_REG)'),
             },
             'gcf-ltc': {
-                ('lc(TMP_REG)', 'sub(x1, x2)', 'adc(x0, TMP_REG)'),
+                ('lc(TMP_REG)', 'subs(x1, x2)', 'adc(x0, TMP_REG)'),
             },
             # Direct pivot (mov sp, op1), the two-step frame-pointer pivot
             # (mov x29, op1 ; mov sp, x29), and the stack-adjust pivot from spa
@@ -994,3 +994,40 @@ def test_find_raw_gadgets_returns_only_first_appearance(tmp_path):
     defn = RopChain(finder)._parse_raw_line('raw([syscall], [], [], [])')['defn']
     found = finder.find_raw_gadgets([str(path)], defn)
     assert [g.vaddr for g in found] == [0x1000]   # the lower-addressed copy only
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_store_rejected_when_address_register_clobbered(x64, legacy):
+    '''
+    F2: a store's address register is read (the pointer is dereferenced), so a
+    chain that clobbers it before the store must be rejected -- even without a
+    later step that reads the address register (which previously masked the
+    invalid store). `lc(rcx)` uses `pop rcx ; pop rbx ; ret`, clobbering rbx;
+    `st(rbx, rax)` then dereferences the clobbered rbx, so no chain exists.
+    '''
+    gadgets = [
+        make_gadget(b'\x59\x5b\xc3', 0x1000),       # pop rcx ; pop rbx ; ret
+        make_gadget(b'\x48\x89\x03\xc3', 0x1010),   # mov [rbx], rax ; ret
+    ]
+    chain = [_op('lc', dst='rcx'), _op('st', dst='rbx', src='rax')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(gadgets, chain, legacy=legacy))
+
+
+def test_raw_step_rescans_on_changed_base(tmp_path, x64):
+    '''
+    F14: a parsed raw(...) step's candidates are scoped to the scan parameters.
+    Resolving the same parsed step at base 0x1000 and then 0x2000 must rescan and
+    return the new address, not reuse the first base's stale candidate.
+    '''
+    raw_bin = tmp_path / 'dump.bin'
+    raw_bin.write_bytes(b'\x90\xc3')   # nop ; ret
+    path = str(raw_bin)
+    rc = RopChain(GadFinder())
+    steps = [rc._parse_raw_line('raw([nop, ret], [], [], [])')]
+
+    rc._resolve_raw_gadgets(steps, [path], '0x1000', None, None, 'x86_64', raw=True)
+    assert [g.vaddr for g in steps[0]['defn'].literal_gadgets] == [0x1000]
+
+    rc._resolve_raw_gadgets(steps, [path], '0x2000', None, None, 'x86_64', raw=True)
+    assert [g.vaddr for g in steps[0]['defn'].literal_gadgets] == [0x2000]

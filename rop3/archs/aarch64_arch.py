@@ -269,9 +269,32 @@ class AArch64_Architecture(Architecture):
 
     def clobbers_reg(self, insn, reg) -> bool:
         # A write that also reads `reg` is an in-place transform (e.g. PAC
-        # `autiasp`, which authenticates the stacked x30), not a clobber.
+        # `autiasp`, which authenticates the stacked x30, or `add x0, x0, #8`),
+        # not a clobber. Exception: a value-destroying idiom
+        # (`sub/eor/sbc xd, xd, xd`, `and xd, xd, xzr`) reads `reg` only
+        # incidentally -- its result is independent of reg's prior value -- so it
+        # IS a clobber.
         def touches(getter):
             return any(insn.reg_name(rid) and self._norm(insn.reg_name(rid)) == reg
                        for rid in getter(insn))
-        return touches(self.written_registers) and not touches(self.read_registers)
+        if not touches(self.written_registers):
+            return False
+        if self._destroys_reg_value(insn, reg):
+            return True
+        return not touches(self.read_registers)
+
+    def _destroys_reg_value(self, insn, reg) -> bool:
+        ''' Whether `insn` writes `reg` with a value independent of its prior
+            contents although it nominally reads it: `sub/eor/sbc xd, xn, xm`
+            with every register operand == reg (-> 0 / carry-only), or
+            `and xd, xn, xzr` (masks to zero). '''
+        m = self.base_mnemonic(insn.mnemonic)
+        regs = [o for o in insn.operands if o.type == self.op_reg]
+        names = [self._norm(insn.reg_name(o.reg)) for o in regs]
+        if m in ('sub', 'eor', 'sbc') and len(names) == 3 and all(n == reg for n in names):
+            return True
+        if m == 'and' and len(names) >= 2 and names[0] == reg \
+                and any(n in ('xzr', 'wzr') for n in names[1:]):
+            return True
+        return False
 

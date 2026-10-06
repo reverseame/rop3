@@ -245,3 +245,20 @@ def test_deterministic_chain_has_no_pivots(x64):
     assert result.reached is True
     assert result.pivots == []
 
+
+
+@needs_triton
+def test_internal_taken_branch_is_not_reached(x64):
+    '''
+    F8: emulation must follow the concrete control flow. A gadget with an
+    internal conditional branch that is taken does not execute its trailing
+    `ret`, so it must not be credited with reaching the next gadget.
+    `jne 0x100c ; ret` with the initial ZF=0 takes the branch to 0x100c, leaving
+    the `ret` unreachable -- before the fix the analyzer blindly ran the `ret` and
+    reported reached=True.
+    '''
+    g1 = make_gadget(b'\x75\x0a\xc3', 0x1000)     # jne 0x100c ; ret
+    g2 = make_gadget(b'\xc3', 0x2000)             # ret (would-be next)
+    result = SymbolicAnalyzer().analyze_ropchain([g1, g2])
+    assert result.supported is True
+    assert result.reached is False

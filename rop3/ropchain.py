@@ -555,19 +555,28 @@ class RopChain:
             fill in defn.literal_gadgets via GadFinder.find_raw_gadgets when
             `binaries` is available -- the direct scan that finds the verbatim
             instruction sequence in the target regardless of whether it ends on
-            a control-flow terminator. A step whose literal_gadgets is already
-            resolved (e.g. `search` was called more than once with the same
-            parsed steps) is not rescanned. '''
+            a control-flow terminator. A step whose literal_gadgets were already
+            resolved for the *same* scan parameters (e.g. `search` was called
+            more than once with the same parsed steps and the same binaries) is
+            not rescanned; a change in binaries/base/arch/bad-bytes rescans so no
+            stale candidate from a previous invocation leaks through. '''
         if not binaries:
             return
+        # Everything find_raw_gadgets' result depends on, made hashable.
+        key = (tuple(binaries),
+               tuple(base) if isinstance(base, list) else base,
+               arch, bool(raw),
+               tuple(badchars) if badchars else None,
+               tuple(badchar_bytes) if badchar_bytes else None)
         for step in steps:
             defn = step.get('defn')
             if defn is None:
                 continue
-            if defn.literal_gadgets is None:
+            if defn.literal_gadgets is None or defn.literal_gadgets_key != key:
                 defn.literal_gadgets = self.gadfinder.find_raw_gadgets(
                     binaries, defn, base=base, badchars=badchars,
                     badchar_bytes=badchar_bytes, arch=arch, raw=raw)
+                defn.literal_gadgets_key = key
 
     def _rewrite_legacy_frees(self, steps: list[dict]) -> list[dict]:
         '''

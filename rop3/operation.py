@@ -97,6 +97,11 @@ def match_gadgets(defn: OperationDef, operands: list | None,
                 if reject_clobbered and gadget.result_clobbered(
                         indices, _destination_registers(defn, bindings, binds)):
                     continue
+                # An operation's inputs must survive to the matched run: reject a
+                # gadget whose earlier (in-frame) instructions overwrite a source.
+                if gadget.input_clobbered(
+                        indices, _source_registers(defn, bindings, binds)):
+                    continue
                 ret.append(_annotate(defn, bindings, gadget, binds))
 
     return ret
@@ -154,6 +159,14 @@ def _destination_registers(defn: OperationDef, bindings: dict, binds: dict) -> s
         given match bindings. Handed to Gadget.result_clobbered to reject
         gadgets that overwrite the result before returning. '''
     return {r for r in (_as_register(bindings, n, binds) for n in defn.dst_roles) if r}
+
+
+def _source_registers(defn: OperationDef, bindings: dict, binds: dict) -> set:
+    ''' The concrete source register(s) the operation reads, under the given
+        match bindings. Handed to Gadget.input_clobbered to reject a gadget that
+        overwrites one of those inputs before the matched run (e.g. a framed
+        gadget that zeroes a register the operation then adds). '''
+    return {r for r in (_as_register(bindings, n, binds) for n in defn.src_roles) if r}
 
 
 def _mark_dst_operands(set_, dst_values: set) -> None:
@@ -386,6 +399,11 @@ class OperationDef:
         # scan) -- scoped to this one step only (see GadFinder._match_primitives).
         # A raw gadget carries no ret/branch terminator requirement.
         self.literal_gadgets: list = None
+        # The (binaries, base, arch, raw, bad-byte) key the cached
+        # literal_gadgets were resolved for; a different key must rescan so the
+        # same parsed step reused across searches does not return stale
+        # candidates (RopChain._resolve_raw_gadgets, F14).
+        self.literal_gadgets_key = None
 
     def add(self, realization):
         self.realizations.append(realization)

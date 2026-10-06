@@ -2,7 +2,7 @@
 st:
   operands: 2
   dst: [op1]
-  src: [op2]
+  src: [op2, op1]
 
   x86:
     - steps:

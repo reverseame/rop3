@@ -19,6 +19,8 @@ import csv
 import io
 import json
 
+import pytest
+
 import rop3.utils as utils
 
 from conftest import make_gadget, make_operation
@@ -70,6 +72,28 @@ def test_output_ropchains_text_non_exhaustive_takes_first(x64, capsys):
         raise AssertionError('second chain should not be consumed')
     utils.output_ropchains(gen(), 'text', exhaustive=False)
     assert 'pop rax ; ret' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('fmt', ['json', 'csv', 'text', 'tuple'])
+def test_output_ropchains_non_exhaustive_is_lazy_for_every_format(x64, capsys, fmt):
+    ''' F25: without --exhaustive, every format (not just text/tuple) consumes
+        only the first chain; changing the output format must not turn a
+        first-solution query into a full exhaustive search. '''
+    def gen():
+        yield [make_gadget(b'\x58\xc3', 0x1000)]
+        raise AssertionError('second chain should not be consumed')
+    utils.output_ropchains(gen(), fmt, exhaustive=False)   # must not raise
+    out = capsys.readouterr().out
+    if fmt == 'json':
+        assert len(json.loads(out)) == 1                   # exactly the first chain
+
+
+def test_output_ropchains_json_non_exhaustive_single(x64, capsys):
+    ''' F25: json non-exhaustive emits a one-element list (the first chain). '''
+    chains = [[make_gadget(b'\x58\xc3', 0x1000)], [make_gadget(b'\x5b\xc3', 0x1010)]]
+    utils.output_ropchains(iter(chains), 'json', exhaustive=False)
+    data = json.loads(capsys.readouterr().out)
+    assert len(data) == 1
 
 
 # --- Tuple format ---------------------------------------------------------

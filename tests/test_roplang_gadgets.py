@@ -105,7 +105,6 @@ X86_PRIMITIVES = {
     'ld':  (['eax', 'ebx'], b'\x8b\x03'),     # mov eax, [ebx]
     'st':  (['ebx', 'eax'], b'\x89\x03'),     # mov [ebx], eax
     'lc':  (['eax'],        b'\x58'),          # pop eax
-    'sc':  (['eax'],        b'\x50\x58'),     # push eax ; pop eax
 }
 
 X64_PRIMITIVES = {
@@ -121,7 +120,6 @@ X64_PRIMITIVES = {
     'ld':  (['rax', 'rbx'], b'\x48\x8b\x03'),   # mov rax, [rbx]
     'st':  (['rbx', 'rax'], b'\x48\x89\x03'),   # mov [rbx], rax
     'lc':  (['rax'],        b'\x58'),            # pop rax
-    'sc':  (['rax'],        b'\x50\x58'),       # push rax ; pop rax
 }
 
 AARCH64_PRIMITIVES = {
@@ -137,7 +135,6 @@ AARCH64_PRIMITIVES = {
     'ld':  (['x0', 'x1'], bytes.fromhex('200040f9')),   # ldr x0, [x1]
     'st':  (['x0', 'x1'], bytes.fromhex('010000f9')),   # str x1, [x0]
     'lc':  (['x0'],       bytes.fromhex('e00340f9')),   # ldr x0, [sp]
-    'sc':  (['x0'],       bytes.fromhex('e00300f9')),   # str x0, [sp]
 }
 
 RISCV_PRIMITIVES = {
@@ -153,7 +150,6 @@ RISCV_PRIMITIVES = {
     'ld':  (['a0', 'a1'], _i(0x03, 3, 10, 11, 0)),          # ld a0, 0(a1)
     'st':  (['a1', 'a0'], _s(0x23, 3, 11, 10, 0)),          # sd a0, 0(a1)
     'lc':  (['a0'],       _i(0x03, 3, 10, 2, 16)),          # ld a0, 16(sp)
-    'sc':  (['a0'],       _s(0x23, 3, 2, 10, 0)),           # sd a0, 0(sp)
 }
 
 

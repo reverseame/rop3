@@ -257,11 +257,38 @@ class X86_Architecture(Architecture):
     def clobbers_reg(self, insn, reg) -> bool:
         # A genuine clobber overwrites `reg` from elsewhere; an in-place
         # transform that also reads `reg` (e.g. `add rax, rbx`) preserves the
-        # stack-derived value and is not a clobber.
+        # attacker-controlled stack-derived value and is not a clobber.
+        # Exception: a value-destroying idiom (`xor rax, rax`, `sub rax, rax`,
+        # `and rax, 0`) reads `reg` only incidentally -- its result is
+        # independent of reg's prior value -- so it IS a clobber (the branch
+        # target `pop rax ; xor rax, rax ; jmp rax` goes to 0, not the stack).
         def touches(getter):
             return any(insn.reg_name(rid) and self.normalize_reg(insn.reg_name(rid)) == reg
                        for rid in getter(insn))
-        return touches(self.written_registers) and not touches(self.read_registers)
+        if not touches(self.written_registers):
+            return False
+        if self._destroys_reg_value(insn, reg):
+            return True
+        return not touches(self.read_registers)
+
+    def _destroys_reg_value(self, insn, reg) -> bool:
+        ''' Whether `insn` writes `reg` with a value independent of reg's prior
+            contents although it nominally reads it: `xor/sub/sbb reg, reg` (-> 0
+            or a carry-only value) and `and reg, 0`. '''
+        m = self.base_mnemonic(insn.mnemonic)
+        ops = insn.operands
+
+        def is_reg(o):
+            return (o.type == x86_const.X86_OP_REG
+                    and self.normalize_reg(insn.reg_name(o.reg)) == reg)
+
+        if m in ('xor', 'sub', 'sbb') and len(ops) == 2 \
+                and is_reg(ops[0]) and is_reg(ops[1]):
+            return True
+        if m == 'and' and len(ops) == 2 and is_reg(ops[0]) \
+                and ops[1].type == x86_const.X86_OP_IMM and ops[1].imm == 0:
+            return True
+        return False
 
     @property
     def _canonical_width(self) -> int:

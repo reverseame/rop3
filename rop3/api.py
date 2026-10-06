@@ -116,8 +116,7 @@ class Rop3:
         ''' One metadata dict per input binary (format, architecture, pointer
             width, instruction alignment, executable sections). Used for
             verbose reporting; does not scan for gadgets. '''
-        bases = self.base if isinstance(self.base, list) \
-            else [self.base] * len(self.binaries)
+        bases = gadfinder.normalize_bases(self.binaries, self.base)
         ropblock, framed = self._finder.ropblock, self._finder.framed
         return [Binary(fn, b, self.arch, self.raw).describe(ropblock=ropblock, framed=framed)
                 for fn, b in zip(self.binaries, bases)]

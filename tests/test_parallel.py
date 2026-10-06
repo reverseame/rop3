@@ -58,3 +58,18 @@ def test_parallel_with_cache(big_elf, tmp_path):
     cold = Rop3(big_elf, jobs=4, cache=True, cache_dir=cache_dir).gadgets()
     warm = Rop3(big_elf, cache=True, cache_dir=cache_dir).gadgets()
     assert _key(cold) == _key(warm)
+
+
+def test_parallel_matches_serial_overlapping_ret_imm(tmp_path):
+    ''' F11: with ret-immediates enabled, a run of overlapping `c2` bytes exposes
+        many overlapping `ret imm16` terminators. Serial and parallel scans must
+        agree -- before the overlapping-enumeration fix the two produced different
+        gadget sets on such runs. '''
+    text = b'\xc2' * 5000
+    path = tmp_path / 'overlap.elf'
+    path.write_bytes(build_minimal_elf(64, EM_X86_64, text, 0x1000, ET_DYN))
+    path = str(path)
+    serial = Rop3(path, ret_imm=True).gadgets()
+    parallel = Rop3(path, ret_imm=True, jobs=4).gadgets()
+    assert _key(serial) == _key(parallel)
+    assert serial   # the run does yield ret-imm gadgets

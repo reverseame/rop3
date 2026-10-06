@@ -21,7 +21,8 @@ import rop3.binaries.elf as elfmod
 import rop3.binary as binary
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 
-from conftest import build_minimal_elf, EM_386, EM_X86_64, ET_DYN
+from conftest import (build_minimal_elf, build_sectionless_elf,
+                     EM_386, EM_X86_64, ET_DYN)
 
 TEXT = b'\x58\xc3'   # pop rax ; ret
 SYMS = [('funcA', 0x1000), ('funcB', 0x1100)]
@@ -101,3 +102,25 @@ def test_elf_get_symbols_rebased():
 def test_elf_no_symbols_when_stripped():
     data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN)
     assert elfmod.ELF(data, None).get_symbols() == []
+
+
+def test_elf_sectionless_image_falls_back_to_pt_load(tmp_path):
+    ''' F18: an ELF with no section table still yields gadgets from its
+        executable PT_LOAD segment (section-based extraction finds nothing). '''
+    data = build_sectionless_elf(EM_X86_64, b'\x58\xc3', 0x1000)  # pop rax ; ret
+    secs = elfmod.ELF(data, None).get_exec_sections()
+    assert len(secs) == 1
+    assert secs[0]['vaddr'] == 0x1000 and secs[0]['opcodes'] == b'\x58\xc3'
+
+    from rop3 import Rop3
+    path = tmp_path / 'sectionless.elf'
+    path.write_bytes(data)
+    assert any(g.text_repr == 'pop rax ; ret' for g in Rop3(str(path)).gadgets())
+
+
+def test_elf_section_based_extraction_takes_precedence(tmp_path):
+    ''' The PT_LOAD fallback is only used when no executable section exists; a
+        normal ELF still extracts from its sections. '''
+    data = build_minimal_elf(64, EM_X86_64, TEXT, 0x1000, ET_DYN)
+    secs = elfmod.ELF(data, None).get_exec_sections()
+    assert [s['name'] for s in secs] == ['.text']

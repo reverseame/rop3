@@ -544,3 +544,34 @@ def test_backwards_framed_leading_sp_pivot_is_body():
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
                 arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
     assert runs[('add', 'ret')] == (False, True)
+
+
+# --- F11: overlapping multi-byte terminators are all enumerated ------------
+
+def test_galileo_enumerates_overlapping_ret_immediates():
+    ''' F11: `c2 c2 00 00` is a valid `ret imm16` at both offset 0 (ret 0xc2) and
+        offset 1 (ret 0). Plain re.finditer skips the overlap and finds only the
+        first; the overlapping scan finds both. '''
+    arch = X64_Architecture()
+    res = _texts(galileo_scan(b'\xc2\xc2\x00\x00', 0x1000,
+                              arch.get_rop_terminations(include_ret_imm=True), 5, 1,
+                              _x86_md().disasm,
+                              lambda d: arch.is_valid_rop_gadget(d, allow_ret_imm=True)))
+    assert 'ret 0xc2' in res.get(0x1000, set())
+    assert 'ret 0' in res.get(0x1001, set())
+
+
+# --- F12: a candidate must fully disassemble ------------------------------
+
+def test_galileo_rejects_partially_decoded_candidate():
+    ''' F12: scanning `c3 0f c3` must not emit a candidate whose bytes its
+        instructions do not fully account for (capstone stops after the first
+        `ret`, leaving `0f c3` undecoded). Every emitted candidate's decoded sizes
+        sum to its raw length. '''
+    arch = X64_Architecture()
+    emitted = list(galileo_scan(b'\xc3\x0f\xc3', 0x1000, arch.get_rop_terminations(),
+                                5, 1, _x86_md().disasm, arch.is_valid_rop_gadget))
+    for vaddr, raw, decodes, _frame in emitted:
+        assert sum(d.size for d in decodes) == len(raw), (hex(vaddr), raw.hex())
+    # only the two single-byte rets survive (no 3-byte partial candidate)
+    assert sorted(len(raw) for _v, raw, _d, _f in emitted) == [1, 1]

@@ -68,8 +68,17 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
     for termination in terminations:
         term_size = termination['size']
         # Every reference to a gadget termination (a `ret`, a free branch, ...).
-        for match in re.finditer(termination['bytes'], opcodes):
-            ref = match.end()
+        # Enumerate *overlapping* occurrences: a multi-byte terminator can start
+        # inside a previous match (e.g. `c2 c2 00 00` is a valid `ret imm16` at
+        # both offset 0 and offset 1). Plain re.finditer skips overlaps and so
+        # misses gadgets and breaks serial/parallel chunk equivalence; a
+        # zero-width lookahead captures them all, as raw_byte_scan does. The
+        # termination patterns contain no capturing groups, so group(1) is the
+        # whole match; ownership stays keyed on the end offset `ref`, which is
+        # unique per hit (fixed-size terminators). (F11)
+        probe = re.compile(b'(?=(' + termination['bytes'] + b'))')
+        for match in probe.finditer(opcodes):
+            ref = match.start() + term_size
             if accept_match is not None and not accept_match(ref):
                 continue
             # The terminating instruction must itself be aligned.
@@ -98,6 +107,14 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                     decodes.append(insn)
                     frame.append(bool(restores_return_address)
                                  and restores_return_address(insn))
+                # The decode must consume the candidate exactly: capstone stops at
+                # the first undecodable byte, so a candidate with an undecodable
+                # middle/tail would otherwise be accepted with bytes that its
+                # instructions do not account for (inconsistent byte/instruction
+                # records, wrong dedup counts). Require a contiguous decode ending
+                # at the candidate's end. (F12)
+                if sum(insn.size for insn in decodes) != len(raw):
+                    continue
                 if is_valid_gadget(decodes):
                     frame[-1] = True                # the terminator frames the run
                     yield vaddr, raw, decodes, tuple(frame)
@@ -122,6 +139,12 @@ def _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
     '''
     n = len(opcodes)
     step = max(1, alignment)
+    # KNOWN LIMITATION (F16): offsets are aligned to the start of the byte buffer
+    # (off == 0, and the realignment below), not to the absolute `base_vaddr`.
+    # When `base_vaddr` is itself unaligned (e.g. a raw dump loaded at 0x1001 on
+    # a fixed-width ISA), a buffer-aligned offset yields an unaligned vaddr. This
+    # is a deliberately unsupported edge (loading fixed-width code at an unaligned
+    # base is not executable anyway); callers are expected to pass aligned bases.
     off = 0
     while off < n:
         # Decode a bounded chunk plus a small overlap tail, so an instruction
@@ -238,6 +261,13 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
             # Prepending insn_j: it is framing if it restores the return
             # address; once covered, the whole (and every longer) run establishes
             # its return frame.
+            #
+            # KNOWN LIMITATION: `frame_loaded` is a one-way latch -- it does
+            # not track the specific return-target register, so once any return-
+            # address restore is seen, a *later* instruction that overwrites that
+            # loaded target (e.g. `ldr x30, [sp] ; mov x30, x0 ; ret`) still
+            # yields a "framed" gadget. The symbolic analyzer catches an
+            # unreachable transition at chain-validation time; this scan does not.
             is_restore = bool(restores_return_address) and restores_return_address(insn_j)
             if is_restore:
                 frame_loaded = True

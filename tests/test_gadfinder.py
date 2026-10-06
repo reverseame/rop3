@@ -237,3 +237,46 @@ def test_classical_scan_populates_frame_mask(x86):
     g2 = next(x for x in _run_find(gadfinder.ROP, buf2, base)
               if x.text_repr == 'add esp, 8 ; ret')
     assert g2.frame == (False, True)                    # add esp = side effect, ret = frame
+
+
+def test_ropblock_rejects_zeroed_branch_register(x86):
+    '''
+    F6: `pop eax ; xor eax, eax ; jmp eax` zeroes its stack-loaded branch target,
+    so the jump always goes to 0 regardless of the stack value -- it must NOT be
+    accepted as a ropblock gadget (the clobber is value-destroying even though
+    `xor eax, eax` nominally reads eax).
+    '''
+    base = 0x400000
+    zeroing = b'\x58\x31\xc0\xff\xe0'           # pop eax ; xor eax, eax ; jmp eax
+    reprs = {g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ROPBLOCK, zeroing, base)}
+    assert 'pop eax ; xor eax, eax ; jmp eax' not in reprs
+
+    # Control: a clean stack-loaded branch register is still a ropblock gadget.
+    clean = b'\x58\xff\xe0'                     # pop eax ; jmp eax
+    clean_reprs = {g.text_repr for g in _run_find(gadfinder.ROP | gadfinder.ROPBLOCK, clean, base)}
+    assert 'pop eax ; jmp eax' in clean_reprs
+
+
+def test_ropblock_honors_ret_imm_and_retf_flags(x86):
+    '''
+    F23: the abstract-gadget (ropblock) search must apply the same far-return /
+    return-immediate gating the plain scan does. `ret 0x10` (c2 10 00) is excluded
+    by default and included only with --ret-imm; `retf` (cb) only with --retf.
+    '''
+    base = 0x400000
+
+    def reprs(flags, buf):
+        return {g.text_repr for g in _run_find(flags, buf, base)}
+
+    # ret <imm>: a stack-loaded register return that ends in `ret 0x10`.
+    imm_buf = b'\x58\xc2\x10\x00'               # pop eax ; ret 0x10
+    default = reprs(gadfinder.ROP | gadfinder.ROPBLOCK, imm_buf)
+    assert not any('ret 0x10' in r for r in default)
+    with_imm = reprs(gadfinder.ROP | gadfinder.ROPBLOCK | gadfinder.ALLOW_RET_IMM, imm_buf)
+    assert any('ret 0x10' in r for r in with_imm)
+
+    # retf: excluded unless --retf.
+    retf_buf = b'\x58\xcb'                      # pop eax ; retf
+    assert not any('retf' in r for r in reprs(gadfinder.ROP | gadfinder.ROPBLOCK, retf_buf))
+    assert any('retf' in r for r in
+               reprs(gadfinder.ROP | gadfinder.ROPBLOCK | gadfinder.RETF, retf_buf))

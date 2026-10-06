@@ -52,7 +52,7 @@ class ArgumentParser:
         self.argparser.add_argument('--raw', action='store_true', default=False, help='treat the input as a formatless raw code dump (no ELF/PE/Mach-O header); requires --arch to set the architecture and uses --base as the load address (default 0)')
         self.argparser.add_argument('--symbols', action='store_true', default=False, help='annotate gadgets with the nearest symbol (when the binary is not stripped)')
         self.argparser.add_argument('--output', choices=['text', 'json', 'csv'], default='text', help='output format (default: text)')
-        self.argparser.add_argument('--tuple', action='store_true', default=False, help='print each gadget as the tuple <op_name, op1[, op2], written registers, read registers> (overrides --output text)')
+        self.argparser.add_argument('--tuple', action='store_true', default=False, help='print each gadget as the tuple <op_name, op1[, op2], written registers, read registers> (text output only; cannot be combined with --output json/csv)')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--operands', type=str, metavar='<reg>', nargs='+', help='operation operands, positionally (op1 op2 op3 ...); e.g. --op mov --operands rdi rax')
         # LEGACY
@@ -167,8 +167,15 @@ class ArgumentParser:
         if args.raw and not args.arch:
             debug.error('--raw requires --arch (choose from x86, x86_64, aarch64, riscv64, riscv64c)')
 
+        # --tuple is a text-only rendering; it must not silently discard a
+        # structured --output (json/csv).
+        if args.tuple and args.output != 'text':
+            debug.error(f'--tuple cannot be combined with --output {args.output} (it applies to text output only)')
+
         if args.base:
-            if len(args.binary) != len(args.base):
+            # args.binary may be None for a version-only invocation (--version
+            # --base ...); only reconcile lengths when a binary was given.
+            if args.binary and len(args.binary) != len(args.base):
                 if len(args.base) != 1:
                     debug.error(f'Number of binaries ({len(args.binary)}) does not match number of addresses ({len(args.base)}) (--help)')
 

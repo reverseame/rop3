@@ -74,6 +74,27 @@ def _is_temp_slot(name) -> bool:
     ''' Whether `name` is a TMP_REG scratch temporary. '''
     return isinstance(name, str) and bool(_TEMP_SLOT_RE.match(name))
 
+
+def normalize_bases(filenames, base) -> list:
+    ''' One base address per binary. A scalar (or None), or a length-1 list, is
+        replicated across all binaries; any other list must already have exactly
+        one entry per binary. The CLI argument parser pre-expands a single --base,
+        but the public API passes `base` straight through, so without this a short
+        list would be silently truncated by `zip`, dropping input binaries (and a
+        long list would drop bases). Rejecting the mismatch keeps every entry
+        point consistent. '''
+    n = len(filenames)
+    if not isinstance(base, list):
+        return [base] * n
+    if len(base) == 1:
+        return base * n
+    if len(base) != n:
+        raise rop3.binary.BinaryException(
+            f'number of base addresses ({len(base)}) does not match '
+            f'number of binaries ({n})')
+    return list(base)
+
+
 class GadFinder:
     '''
     Class to search gadgets in a binary
@@ -87,8 +108,10 @@ class GadFinder:
 
     def find(self, filenames: list[str], base=None, badchars=None,
              badchar_bytes=None, arch=None, symbols=False, raw=False) -> list[Gadget]:
-        ''' base is normalized to one entry per binary by the argument parser '''
-        bases = base if isinstance(base, list) else [base] * len(filenames)
+        ''' base is normalized to one entry per binary (replicating a single
+            value and rejecting other length mismatches) so no input binary is
+            silently dropped by zip -- the CLI pre-expands, the API may not. '''
+        bases = normalize_bases(filenames, base)
         avoid = self._avoid_bytes(badchars)
 
         if not self._keep_duplicates():
@@ -530,7 +553,7 @@ class GadFinder:
         pattern = defn.realizations[0].links[0]
         pattern_len = len(pattern.items)
         asm_text = '\n'.join(str(item) for item in pattern.items)
-        bases = base if isinstance(base, list) else [base] * len(filenames)
+        bases = normalize_bases(filenames, base)
 
         ret: list[Gadget] = []
         for filename, file_base in zip(filenames, bases):
@@ -614,9 +637,12 @@ class GadFinder:
             is_valid_rop/jop_gadget but the abstract-gadget (ropblock) search's
             own terminator/frame logic does not: the first-instruction
             complex-memory and segment-override filters (unless explicitly
-            allowed), and the intermediate conditional-branch rejection (unless
-            --allow-undeterministic). Keeps --ropblock consistent with the plain
-            scan for the same options. '''
+            allowed), the intermediate conditional-branch rejection (unless
+            --allow-undeterministic), and the far-return / return-immediate
+            gating (--retf / --ret-imm). Keeps --ropblock consistent with the
+            plain scan for the same options. '''
+        if not decodes:
+            return False
         arch = arch_singleton.arch
         if not self._allow_complex_mem() and arch.first_insn_has_complex_mem(decodes):
             return False
@@ -625,6 +651,12 @@ class GadFinder:
         if not self._allow_undeterministic() and any(
                 arch.base_mnemonic(ins.mnemonic) in arch.conditional_branch_mnemonics
                 for ins in decodes[:-1]):
+            return False
+        rop_terms = arch._rop_terminations(include_retf=True)
+        term_mnem = arch.base_mnemonic(decodes[-1].mnemonic)
+        if term_mnem == 'retf' and not self._retf():
+            return False
+        if not self._allow_ret_imm() and arch._has_ret_imm(decodes, rop_terms):
             return False
         return True
 

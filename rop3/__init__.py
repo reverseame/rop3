@@ -53,8 +53,9 @@ def main():
                 from rop3.interactive import Rop3Shell
                 Rop3Shell(rop).cmdloop()
             else:
-                # --tuple renders gadgets as the tuple form; it overrides the
-                # textual --output (json/csv keep their structured formats).
+                # --tuple renders gadgets as the tuple form. It is text-only:
+                # combining it with --output json/csv is rejected in
+                # _check_args, so args.output is 'text' whenever args.tuple is set.
                 out_fmt = 'tuple' if args.tuple else args.output
 
                 if args.ropchain:

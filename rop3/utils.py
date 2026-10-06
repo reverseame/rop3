@@ -21,7 +21,6 @@ import json
 import csv
 import struct
 import __main__
-import capstone
 
 MAJOR = 2
 MINOR = 0
@@ -48,9 +47,6 @@ HEADER = '\
                 A tool of RME-DisCo Research Group from University of Zaragoza\n\
                                     <https://reversea.me/>\
 '
-
-WARNING_COLOR = '\033[93m'
-END_COLOR = '\033[0m'
 
 def show_version():
     print(HEADER)
@@ -101,15 +97,16 @@ def output_gadgets(gadgets, fmt='text'):
 
 def output_ropchains(chains, fmt='text', exhaustive=False):
     ''' Emit ROP chains (each a list of gadgets) in the requested format.
-        For plain text without --exhaustive only the first chain is consumed,
-        preserving the laziness of the search generator. '''
-    if fmt in ('text', 'tuple') and not exhaustive:
+        Without --exhaustive only the first chain is consumed, preserving the
+        laziness of the search generator for every format (not just text/tuple):
+        changing only the output format must not turn a first-solution query
+        into a full exhaustive search. '''
+    if not exhaustive:
         first = next(iter(chains), None)
-        if first is not None:
-            print_ropchain(first, fmt=fmt)
-        return
+        chains = [] if first is None else [first]
+    else:
+        chains = list(chains)
 
-    chains = list(chains)
     if fmt == 'json':
         print(json.dumps([[g.to_dict() for g in chain] for chain in chains], indent=2))
     elif fmt == 'csv':
@@ -122,8 +119,10 @@ def output_ropchains(chains, fmt='text', exhaustive=False):
                 record['chain'] = idx
                 writer.writerow(record)
     else:  # 'text' or 'tuple'
+        # Non-exhaustive prints the single chain without a "Ropchain N" header,
+        # as before; exhaustive numbers each one.
         for idx, chain in enumerate(chains, 1):
-            print_ropchain(chain, idx, fmt=fmt)
+            print_ropchain(chain, idx if exhaustive else None, fmt=fmt)
 
 def binary_info_lines(info):
     ''' Render a Binary.describe() dict as a list of human-readable lines for
@@ -149,9 +148,6 @@ def binary_info_lines(info):
         name = s['name'] or 'section'
         lines.append(f"  {name} @ {hex(s['vaddr'])} ({s['size']} bytes)")
     return lines
-
-def warning_text(text):
-    return f'{WARNING_COLOR}{text}{END_COLOR}'
 
 def pretty_addr(addr, size=8):
     ''' `size` is the pointer width in bytes (4 for 32-bit, 8 for 64-bit). '''

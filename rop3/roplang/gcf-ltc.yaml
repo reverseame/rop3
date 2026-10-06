@@ -45,13 +45,15 @@ gcf-ltc:
     - steps:
         - operation: lc
           op1: TMP_REG
-        - mnemonic: sub
+        - mnemonic: subs
           op1: op2
-          op2: op3
+          op2: op2
+          op3: op3
           writes: [REG_FLAGS]
         - mnemonic: adc
           op1: op1
-          op2: TMP_REG
+          op2: op1
+          op3: TMP_REG
           reads: [REG_FLAGS]
 
   riscv:
