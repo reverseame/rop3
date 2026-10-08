@@ -386,7 +386,7 @@ def _a64_disasm(code):
 
 
 def test_aarch64_clobbers_reg_value_destroying():
-    ''' F6: an in-place transform that genuinely depends on the register
+    ''' An in-place transform that genuinely depends on the register
         (`add x0, x0, #8`) preserves attacker control and is not a clobber, but a
         value-destroying idiom that only incidentally reads it (`sub x0, x0, x0`,
         `eor x0, x0, x0`, `and x0, x0, xzr`, all producing a constant) IS. '''
@@ -402,7 +402,7 @@ def test_aarch64_clobbers_reg_value_destroying():
 
 
 def test_aarch64_ropblock_rejects_zeroed_branch_reg(tmp_path):
-    ''' F6 end-to-end: `ldr x9, [sp] ; eor x9, x9, x9 ; br x9` zeroes its
+    ''' End-to-end: `ldr x9, [sp] ; eor x9, x9, x9 ; br x9` zeroes its
         stack-loaded branch target, so the jump goes to 0 regardless of the stack
         -- it is not a valid ropblock gadget. '''
     path = _elf(tmp_path, LDR_X9_SP + bytes.fromhex('290001ca') + BR_X9)  # eor x9,x9,x9
@@ -411,11 +411,9 @@ def test_aarch64_ropblock_rejects_zeroed_branch_reg(tmp_path):
 
 
 def test_aarch64_gcf_inline_forms_match_real_gadgets():
-    ''' F9: the AArch64 carry realizations use three-address / flag-setting forms
-        (`subs xd,xn,xm`, `negs xd,xn`, `adc xd,xn,xm`); verify each inline form
-        actually matches a real in-memory decode -- the former 2-operand x86-style
-        `sub`/`adc`/`neg` forms could never match any AArch64 instruction (strict
-        operand-count matching), so these carry chains were unrealizable. '''
+    ''' The AArch64 carry realizations use real three-address / flag-setting
+        forms whose carry polarity matches x86 (`subs`, `negs`, `sbc`, `neg`);
+        verify each inline form actually matches a real in-memory decode. '''
     import rop3.parser as parser
     from rop3.operation import Set
     from rop3.arch import arch_singleton
@@ -429,18 +427,19 @@ def test_aarch64_gcf_inline_forms_match_real_gadgets():
 
     ltc_sets = [l for l in parser.Parser().get_op('gcf-ltc').realizations[0].links
                 if isinstance(l, Set)]
-    subs_set, adc_set = ltc_sets                               # subs, adc
+    subs_set, sbc_set, neg_set = ltc_sets                      # subs, sbc, neg
     assert matches(subs_set, bytes.fromhex('210002eb') + RET)  # subs x1, x1, x2 ; ret
-    assert matches(adc_set, bytes.fromhex('0000099a') + RET)   # adc x0, x0, x9 ; ret
+    assert matches(sbc_set, bytes.fromhex('000009da') + RET)   # sbc x0, x0, x9 ; ret
+    assert matches(neg_set, bytes.fromhex('e00300cb') + RET)   # neg x0, x0 ; ret
 
     eqc_sets = [l for l in parser.Parser().get_op('gcf-eqc').realizations[0].links
                 if isinstance(l, Set)]
-    negs_set = eqc_sets[1]                                     # sub, negs, adc
+    negs_set = eqc_sets[1]                                     # sub, negs, sbc, neg
     assert matches(negs_set, bytes.fromhex('e10301eb') + RET)  # negs x1, x1 ; ret
 
 
 def test_aarch64_framed_add_rejects_overwritten_source():
-    ''' F5: in a framed gadget, an operation must not consume an input that an
+    ''' In a framed gadget, an operation must not consume an input that an
         earlier instruction overwrote. `ldr x30,[sp] ; mov x1,xzr ; add x0,x0,x1 ; ret`
         zeroes x1 before the add reads it, so it does NOT realize add(x0, x1); the
         clean `ldr x30,[sp] ; add x0,x0,x1 ; ret` still does. '''

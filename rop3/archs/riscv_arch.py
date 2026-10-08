@@ -320,11 +320,16 @@ class RISCV_Architecture(Architecture):
         ''' Whether `insn` writes `reg` with a value independent of its prior
             contents although it nominally reads it: `sub/xor rd, rs1, rs2` with
             every register operand == reg (-> 0), or an AND against the zero
-            register / a zero immediate. '''
+            register / a zero immediate. The compressed forms (`c.sub`, `c.xor`,
+            `c.andi`) fuse rd with rs1, so they carry one fewer register operand. '''
         m = self.base_mnemonic(insn.mnemonic)
+        if m.startswith('c.'):
+            m = m[2:]
         regs = [o for o in insn.operands if o.type == self.op_reg]
         names = [insn.reg_name(o.reg) for o in regs]
-        if m in ('sub', 'xor') and len(names) == 3 and all(n == reg for n in names):
+        # sub/xor are the only ALU ops where every operand being the same
+        # register yields a constant 0 (add doubles, and/or are the identity).
+        if m in ('sub', 'xor') and len(names) in (2, 3) and all(n == reg for n in names):
             return True
         if m == 'and' and len(names) >= 2 and names[0] == reg \
                 and any(n in ('zero', 'x0') for n in names[1:]):

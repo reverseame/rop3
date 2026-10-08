@@ -137,7 +137,7 @@ def test_get_symbols_returns_list():
 
 
 def test_macho_truncated_symtab_does_not_raise():
-    ''' F19: a truncated nlist array (the file ends before `nsyms` entries) must
+    ''' A truncated nlist array (the file ends before `nsyms` entries) must
         not raise struct.error from get_symbols; the read count is clamped to the
         bytes actually present and the valid symbols (if any) are returned. '''
     data = build_minimal_macho(CPU_TYPE_X86_64, b'\xc3',
@@ -148,7 +148,7 @@ def test_macho_truncated_symtab_does_not_raise():
 
 
 def test_macho_unterminated_symbol_name_keeps_full_name():
-    ''' F19: when a symbol name runs to the end of the string table with no NUL,
+    ''' When a symbol name runs to the end of the string table with no NUL,
         the whole remainder is the name -- not the remainder minus its last byte
         (the old `strtab[n_strx:-1]` bug). '''
     data = build_minimal_macho(CPU_TYPE_X86_64, b'\xc3', symbols=[('_foo', 0x100000100)])

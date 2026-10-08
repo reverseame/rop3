@@ -250,7 +250,7 @@ def test_deterministic_chain_has_no_pivots(x64):
 @needs_triton
 def test_internal_taken_branch_is_not_reached(x64):
     '''
-    F8: emulation must follow the concrete control flow. A gadget with an
+    Emulation must follow the concrete control flow. A gadget with an
     internal conditional branch that is taken does not execute its trailing
     `ret`, so it must not be credited with reaching the next gadget.
     `jne 0x100c ; ret` with the initial ZF=0 takes the branch to 0x100c, leaving
@@ -262,3 +262,19 @@ def test_internal_taken_branch_is_not_reached(x64):
     result = SymbolicAnalyzer().analyze_ropchain([g1, g2])
     assert result.supported is True
     assert result.reached is False
+
+
+@needs_triton
+def test_rep_string_op_still_reaches(x64):
+    '''
+    A `rep` string op is the exception to the internal-branch rule. Triton
+    re-runs it at the same address once per iteration, so the PC stays put
+    between iterations -- that is not an internal branch, and the trailing `ret`
+    must still be followed. `mov ecx, 3 ; rep stosb ; ret` leaves the loop with a
+    non-zero count at the rep, yet control still reaches the next gadget.
+    '''
+    g1 = make_gadget(b'\xb9\x03\x00\x00\x00\xf3\xaa\xc3', 0x1000)  # mov ecx,3 ; rep stosb ; ret
+    g2 = make_gadget(b'\xc3', 0x2000)             # ret (final)
+    result = SymbolicAnalyzer().analyze_ropchain([g1, g2])
+    assert result.supported is True
+    assert result.reached is True

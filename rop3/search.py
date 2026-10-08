@@ -75,7 +75,7 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
         # zero-width lookahead captures them all, as raw_byte_scan does. The
         # termination patterns contain no capturing groups, so group(1) is the
         # whole match; ownership stays keyed on the end offset `ref`, which is
-        # unique per hit (fixed-size terminators). (F11)
+        # unique per hit (fixed-size terminators).
         probe = re.compile(b'(?=(' + termination['bytes'] + b'))')
         for match in probe.finditer(opcodes):
             ref = match.start() + term_size
@@ -112,7 +112,7 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                 # middle/tail would otherwise be accepted with bytes that its
                 # instructions do not account for (inconsistent byte/instruction
                 # records, wrong dedup counts). Require a contiguous decode ending
-                # at the candidate's end. (F12)
+                # at the candidate's end.
                 if sum(insn.size for insn in decodes) != len(raw):
                     continue
                 if is_valid_gadget(decodes):
@@ -139,7 +139,7 @@ def _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
     '''
     n = len(opcodes)
     step = max(1, alignment)
-    # KNOWN LIMITATION (F16): offsets are aligned to the start of the byte buffer
+    # KNOWN LIMITATION: offsets are aligned to the start of the byte buffer
     # (off == 0, and the realignment below), not to the absolute `base_vaddr`.
     # When `base_vaddr` is itself unaligned (e.g. a raw dump loaded at 0x1001 on
     # a fixed-width ISA), a buffer-aligned offset yields an unaligned vaddr. This

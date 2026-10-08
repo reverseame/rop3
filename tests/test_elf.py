@@ -105,7 +105,7 @@ def test_elf_no_symbols_when_stripped():
 
 
 def test_elf_sectionless_image_falls_back_to_pt_load(tmp_path):
-    ''' F18: an ELF with no section table still yields gadgets from its
+    ''' An ELF with no section table still yields gadgets from its
         executable PT_LOAD segment (section-based extraction finds nothing). '''
     data = build_sectionless_elf(EM_X86_64, b'\x58\xc3', 0x1000)  # pop rax ; ret
     secs = elfmod.ELF(data, None).get_exec_sections()

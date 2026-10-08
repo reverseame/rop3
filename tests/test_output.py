@@ -76,7 +76,7 @@ def test_output_ropchains_text_non_exhaustive_takes_first(x64, capsys):
 
 @pytest.mark.parametrize('fmt', ['json', 'csv', 'text', 'tuple'])
 def test_output_ropchains_non_exhaustive_is_lazy_for_every_format(x64, capsys, fmt):
-    ''' F25: without --exhaustive, every format (not just text/tuple) consumes
+    ''' Without --exhaustive, every format (not just text/tuple) consumes
         only the first chain; changing the output format must not turn a
         first-solution query into a full exhaustive search. '''
     def gen():
@@ -89,7 +89,7 @@ def test_output_ropchains_non_exhaustive_is_lazy_for_every_format(x64, capsys, f
 
 
 def test_output_ropchains_json_non_exhaustive_single(x64, capsys):
-    ''' F25: json non-exhaustive emits a one-element list (the first chain). '''
+    ''' JSON non-exhaustive emits a one-element list (the first chain). '''
     chains = [[make_gadget(b'\x58\xc3', 0x1000)], [make_gadget(b'\x5b\xc3', 0x1010)]]
     utils.output_ropchains(iter(chains), 'json', exhaustive=False)
     data = json.loads(capsys.readouterr().out)

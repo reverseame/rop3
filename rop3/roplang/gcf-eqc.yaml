@@ -59,13 +59,14 @@ gcf-eqc:
           op1: op2
           op2: op2
           writes: [REG_FLAGS]
-        - operation: lc
-          op1: op1
-        - mnemonic: adc
+        - mnemonic: sbc
           op1: op1
           op2: op1
           op3: TMP_REG
           reads: [REG_FLAGS]
+        - mnemonic: neg
+          op1: op1
+          op2: op1
 
   riscv:
     available: false
