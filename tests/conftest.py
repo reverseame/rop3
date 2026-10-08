@@ -226,7 +226,7 @@ def build_sectionless_elf(machine: int, text_bytes: bytes, vaddr: int,
     '''
     Produce a valid ELF64 with ONE executable PT_LOAD segment and NO section
     table (e_shnum == 0) -- a stripped/minimal image that still carries loadable
-    code. Exercises get_exec_sections' PT_LOAD fallback (F18): section-based
+    code. Exercises get_exec_sections' PT_LOAD fallback: section-based
     extraction yields nothing, so the executable segment must be used instead.
     ET_EXEC with image base == vaddr keeps the relocation delta at 0.
     '''

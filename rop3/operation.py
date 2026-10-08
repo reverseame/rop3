@@ -402,7 +402,7 @@ class OperationDef:
         # The (binaries, base, arch, raw, bad-byte) key the cached
         # literal_gadgets were resolved for; a different key must rescan so the
         # same parsed step reused across searches does not return stale
-        # candidates (RopChain._resolve_raw_gadgets, F14).
+        # candidates (RopChain._resolve_raw_gadgets).
         self.literal_gadgets_key = None
 
     def add(self, realization):

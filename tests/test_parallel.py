@@ -61,7 +61,7 @@ def test_parallel_with_cache(big_elf, tmp_path):
 
 
 def test_parallel_matches_serial_overlapping_ret_imm(tmp_path):
-    ''' F11: with ret-immediates enabled, a run of overlapping `c2` bytes exposes
+    ''' With ret-immediates enabled, a run of overlapping `c2` bytes exposes
         many overlapping `ret imm16` terminators. Serial and parallel scans must
         agree -- before the overlapping-enumeration fix the two produced different
         gadget sets on such runs. '''

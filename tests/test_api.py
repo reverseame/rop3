@@ -83,7 +83,7 @@ def test_shell_quit_returns_true(elf_path):
     assert shell.onecmd('exit') is True
 
 
-# --- F15: base lists must not silently drop input binaries -----------------
+# --- base lists must not silently drop input binaries -----------------
 
 def test_api_single_base_replicated_across_binaries(elf_path):
     ''' A single (length-1) base is replicated across all binaries instead of

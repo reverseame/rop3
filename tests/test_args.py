@@ -24,7 +24,7 @@ def _parse(argv):
     return ArgumentParser().parse_args(argv)
 
 
-# --- F24: --tuple must not silently override a structured --output ---------
+# --- --tuple must not silently override a structured --output ---------
 
 @pytest.mark.parametrize('fmt', ['json', 'csv'])
 def test_tuple_with_structured_output_is_rejected(fmt):
@@ -42,7 +42,7 @@ def test_tuple_without_output_is_allowed():
     assert args.tuple and args.output == 'text'
 
 
-# --- F29: --version must not dereference a missing --binary ----------------
+# --- --version must not dereference a missing --binary ----------------
 
 def test_version_with_base_and_no_binary_does_not_crash():
     # Before the fix this raised TypeError (len(None)) instead of parsing cleanly.

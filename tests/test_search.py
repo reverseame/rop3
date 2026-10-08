@@ -546,10 +546,10 @@ def test_backwards_framed_leading_sp_pivot_is_body():
     assert runs[('add', 'ret')] == (False, True)
 
 
-# --- F11: overlapping multi-byte terminators are all enumerated ------------
+# --- overlapping multi-byte terminators are all enumerated ------------
 
 def test_galileo_enumerates_overlapping_ret_immediates():
-    ''' F11: `c2 c2 00 00` is a valid `ret imm16` at both offset 0 (ret 0xc2) and
+    ''' `c2 c2 00 00` is a valid `ret imm16` at both offset 0 (ret 0xc2) and
         offset 1 (ret 0). Plain re.finditer skips the overlap and finds only the
         first; the overlapping scan finds both. '''
     arch = X64_Architecture()
@@ -561,10 +561,10 @@ def test_galileo_enumerates_overlapping_ret_immediates():
     assert 'ret 0' in res.get(0x1001, set())
 
 
-# --- F12: a candidate must fully disassemble ------------------------------
+# --- a candidate must fully disassemble ------------------------------
 
 def test_galileo_rejects_partially_decoded_candidate():
-    ''' F12: scanning `c3 0f c3` must not emit a candidate whose bytes its
+    ''' Scanning `c3 0f c3` must not emit a candidate whose bytes its
         instructions do not fully account for (capstone stops after the first
         `ret`, leaving `0f c3` undecoded). Every emitted candidate's decoded sizes
         sum to its raw length. '''

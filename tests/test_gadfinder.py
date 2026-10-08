@@ -241,7 +241,7 @@ def test_classical_scan_populates_frame_mask(x86):
 
 def test_ropblock_rejects_zeroed_branch_register(x86):
     '''
-    F6: `pop eax ; xor eax, eax ; jmp eax` zeroes its stack-loaded branch target,
+    `pop eax ; xor eax, eax ; jmp eax` zeroes its stack-loaded branch target,
     so the jump always goes to 0 regardless of the stack value -- it must NOT be
     accepted as a ropblock gadget (the clobber is value-destroying even though
     `xor eax, eax` nominally reads eax).
@@ -259,7 +259,7 @@ def test_ropblock_rejects_zeroed_branch_register(x86):
 
 def test_ropblock_honors_ret_imm_and_retf_flags(x86):
     '''
-    F23: the abstract-gadget (ropblock) search must apply the same far-return /
+    The abstract-gadget (ropblock) search must apply the same far-return /
     return-immediate gating the plain scan does. `ret 0x10` (c2 10 00) is excluded
     by default and included only with --ret-imm; `retf` (cb) only with --retf.
     '''

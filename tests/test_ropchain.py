@@ -579,10 +579,10 @@ _COMPOUND_ARCHES = {
             # ROP, so no two-step form is emitted here).
             'pivot': {('mov(sp, x29)',)},
             'gcf-eqc': {
-                ('lc(TMP_REG)', 'sub(x1, x2)', 'negs(x1)', 'lc(x0)', 'adc(x0, TMP_REG)'),
+                ('lc(TMP_REG)', 'sub(x1, x2)', 'negs(x1)', 'sbc(x0, TMP_REG)', 'neg(x0)'),
             },
             'gcf-ltc': {
-                ('lc(TMP_REG)', 'subs(x1, x2)', 'adc(x0, TMP_REG)'),
+                ('lc(TMP_REG)', 'subs(x1, x2)', 'sbc(x0, TMP_REG)', 'neg(x0)'),
             },
             # Direct pivot (mov sp, op1), the two-step frame-pointer pivot
             # (mov x29, op1 ; mov sp, x29), and the stack-adjust pivot from spa
@@ -999,7 +999,7 @@ def test_find_raw_gadgets_returns_only_first_appearance(tmp_path):
 @pytest.mark.parametrize('legacy', [False, True])
 def test_store_rejected_when_address_register_clobbered(x64, legacy):
     '''
-    F2: a store's address register is read (the pointer is dereferenced), so a
+    A store's address register is read (the pointer is dereferenced), so a
     chain that clobbers it before the store must be rejected -- even without a
     later step that reads the address register (which previously masked the
     invalid store). `lc(rcx)` uses `pop rcx ; pop rbx ; ret`, clobbering rbx;
@@ -1016,7 +1016,7 @@ def test_store_rejected_when_address_register_clobbered(x64, legacy):
 
 def test_raw_step_rescans_on_changed_base(tmp_path, x64):
     '''
-    F14: a parsed raw(...) step's candidates are scoped to the scan parameters.
+    A parsed raw(...) step's candidates are scoped to the scan parameters.
     Resolving the same parsed step at base 0x1000 and then 0x2000 must rescan and
     return the new address, not reuse the first base's stale candidate.
     '''

@@ -603,15 +603,25 @@ def test_riscv_ropblock_excludes_call(tmp_path):
 
 
 def test_riscv_clobbers_reg_value_destroying():
-    ''' F6: a value-destroying idiom that only incidentally reads the register
+    ''' A value-destroying idiom that only incidentally reads the register
         (`sub a0,a0,a0`, `xor a0,a0,a0`, `and a0,a0,zero`, all producing a
-        constant) IS a clobber, unlike the genuine in-place `addi a0,a0,8`. '''
+        constant) IS a clobber, unlike the genuine in-place `addi a0,a0,8`. The
+        compressed forms fuse rd with rs1 (`c.sub a0,a0`, `c.xor a0,a0`,
+        `c.andi a0,0`) and must be recognized just the same. '''
     arch = RISCV_Architecture()
     sub = _disasm(bytes.fromhex('3305a540'))[0]    # sub a0, a0, a0
     xor = _disasm(bytes.fromhex('3345a500'))[0]    # xor a0, a0, a0
     andz = _disasm(bytes.fromhex('33750500'))[0]   # and a0, a0, zero
     addi = _disasm(bytes.fromhex('13058500'))[0]   # addi a0, a0, 8
+    csub = _disasm(bytes.fromhex('098d'), compressed=True)[0]   # c.sub a0, a0
+    cxor = _disasm(bytes.fromhex('298d'), compressed=True)[0]   # c.xor a0, a0
+    candi = _disasm(bytes.fromhex('0189'), compressed=True)[0]  # c.andi a0, 0
+    cxor_src = _disasm(bytes.fromhex('298e'), compressed=True)[0]  # c.xor a2, a0
     assert arch.clobbers_reg(sub, 'a0')
     assert arch.clobbers_reg(xor, 'a0')
     assert arch.clobbers_reg(andz, 'a0')
+    assert arch.clobbers_reg(csub, 'a0')
+    assert arch.clobbers_reg(cxor, 'a0')
+    assert arch.clobbers_reg(candi, 'a0')
     assert not arch.clobbers_reg(addi, 'a0')       # in-place, still controllable
+    assert not arch.clobbers_reg(cxor_src, 'a0')   # a0 only read, not destroyed

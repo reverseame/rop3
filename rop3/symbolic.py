@@ -326,7 +326,7 @@ class SymbolicAnalyzer:
 
                 # Triton could not process the instruction (unsupported or invalid
                 # encoding): the concrete state past it is meaningless, so stop
-                # emulating this gadget instead of trusting the later decodes. (F8)
+                # emulating this gadget instead of trusting the later decodes.
                 if status != EXCEPTION.NO_FAULT:
                     break
 
@@ -348,8 +348,10 @@ class SymbolicAnalyzer:
                 # `jne` with the tested flag set) and the remaining decodes are not
                 # executed. Stop here rather than blindly running them -- otherwise
                 # an unreachable terminator would be credited with reaching the next
-                # gadget. (F8)
-                if pos + 1 < len(decodes) and \
+                # gadget. A `rep` string op is the exception: Triton re-runs it at the
+                # same PC once per iteration, so a stationary PC there is not a branch.
+                is_rep = insn.mnemonic.split()[0] in ('rep', 'repe', 'repz', 'repne', 'repnz')
+                if pos + 1 < len(decodes) and not is_rep and \
                         ctx.getConcreteRegisterValue(pc_reg) != decodes[pos + 1].address:
                     break
 
