@@ -403,7 +403,7 @@ def test_free_same_step_both_generic_pairing_still_enforced(x64):
 
 
 @pytest.mark.parametrize('bad_free, warning_snippet', [
-    ('rax', 'only a generic register-slot name'),
+    ('0x10', 'only a generic register-slot name'),   # an immediate is not freeable
     ('REG9', 'was never used before this point'),
 ])
 def test_free_invalid_target_warns_and_continues(x64, monkeypatch, bad_free, warning_snippet):
@@ -424,6 +424,71 @@ def test_free_double_free_without_use_warns(x64, monkeypatch):
     results = list(RopChain(GadFinder()).search(gadgets, chain))
     assert results
     assert any('already freed with no intervening use' in w for w in warnings)
+
+
+def test_concrete_register_blocks_generic_slot_alias(x64):
+    '''
+    A generic slot must not silently resolve to a register the chain also names
+    explicitly: a real register used explicitly is a resolved placeholder that
+    occupies its own physical register. In `lc(reg1); lc(rax); add(rax, reg1)`,
+    if reg1 -> rax the second pop destroys reg1's value and the add degrades to
+    add(rax, rax). With rax the only poppable register the chain is therefore
+    impossible; a second poppable register (rbx) lets reg1 -> rbx and it
+    assembles.
+    '''
+    chain = [
+        _op('lc', dst='reg1'),
+        _op('lc', dst='rax'),
+        _op('add', dst='rax', src='reg1'),
+    ]
+    rax_only = [
+        make_gadget(b'\x58\xc3', 0x1000),           # pop rax ; ret
+        make_gadget(b'\x48\x01\xc0\xc3', 0x1010),   # add rax, rax ; ret
+    ]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(rax_only, chain))
+
+    with_rbx = rax_only + [
+        make_gadget(b'\x5b\xc3', 0x1020),           # pop rbx ; ret
+        make_gadget(b'\x48\x01\xd8\xc3', 0x1030),   # add rax, rbx ; ret
+    ]
+    results = list(RopChain(GadFinder()).search(with_rbx, chain))
+    assert results
+    for result in results:
+        assert [g.text_repr for g in result] == [
+            'pop rbx ; ret', 'pop rax ; ret', 'add rax, rbx ; ret',
+        ]
+
+
+def test_free_concrete_register_allows_reuse(x64):
+    '''
+    free(rax) releases the explicit reservation on rax so a later generic slot
+    may resolve to it. With only `pop rax` available, `lc(rax); lc(reg1)` is
+    impossible (reg1 cannot alias the still-reserved rax); inserting free(rax)
+    between the steps lets reg1 -> rax and the chain assembles.
+    '''
+    gadgets = [make_gadget(b'\x58\xc3', 0x1000)]   # pop rax ; ret (only poppable reg)
+
+    without_free = [_op('lc', dst='rax'), _op('lc', dst='reg1')]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(GadFinder()).search(gadgets, without_free))
+
+    with_free = [_op('lc', dst='rax'), _free('rax'), _op('lc', dst='reg1')]
+    results = list(RopChain(GadFinder()).search(gadgets, with_free))
+    assert results
+    assert [g.text_repr for g in results[0]] == ['pop rax ; ret', 'pop rax ; ret']
+
+
+def test_free_concrete_register_is_valid_target(x64, monkeypatch):
+    ''' Freeing a concrete register that was used is a valid directive -- it must
+        not warn the way an unknown/immediate target does. '''
+    warnings = []
+    monkeypatch.setattr(ropchain_mod.debug, 'warning', lambda msg: warnings.append(msg))
+    gadgets = [make_gadget(b'\x58\xc3', 0x1000)]   # pop rax ; ret
+    chain = [_op('lc', dst='rax'), _free('rax'), _op('lc', dst='reg1')]
+    results = list(RopChain(GadFinder()).search(gadgets, chain))
+    assert results
+    assert not any('can be freed' in w or 'never used before' in w for w in warnings)
 
 
 def test_parse_free_line(x64, tmp_path):

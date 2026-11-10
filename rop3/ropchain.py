@@ -23,8 +23,10 @@ from typing import Iterator
 import rop3.debug as debug
 import rop3.utils as utils
 
+from rop3.arch import arch_singleton
+
 from .gadget import Gadget, heuristic_basic_count
-from .operation import OperationDef
+from .operation import OperationDef, is_immediate
 
 from .symbolic import SymbolicAnalyzer
 
@@ -64,6 +66,21 @@ def _is_generic_slot(key) -> bool:
     if key is None or not isinstance(key, str):
         return False
     return key.lower().startswith('reg') or key.upper().startswith('TMP_REG')
+
+
+def _is_concrete_reg(key) -> bool:
+    ''' A register named explicitly in the chain: a str that is neither a
+        generic slot nor an immediate. Such a register is treated as a slot
+        already resolved to itself (see RopChain._slot_bindings). '''
+    return (isinstance(key, str) and key != ''
+            and not _is_generic_slot(key) and not is_immediate(key))
+
+
+def _canonical_slot_key(name):
+    ''' The live-map key for an operand: a generic slot keeps its literal name;
+        a concrete register folds to its normalized form, so eax/rax are one
+        slot and `free(rax)` releases a reservation first made for `eax`. '''
+    return arch_singleton.arch.normalize_reg(name) if _is_concrete_reg(name) else name
 
 
 class RopChain:
@@ -215,7 +232,7 @@ class RopChain:
 
         frees_at: dict[int, list[str]] = {}
         for boundary, name in free_events:
-            frees_at.setdefault(boundary, []).append(name)
+            frees_at.setdefault(boundary, []).append(_canonical_slot_key(name))
 
         cache: dict = {}
 
@@ -301,10 +318,13 @@ class RopChain:
     @staticmethod
     def _slot_bindings(op1_key, op2_key, gad, live) -> dict | None:
         '''
-        The generic slots this gadget would newly bind for a step, or None if it
-        cannot bind them consistently. A slot already in `live` was resolved
-        upstream (candidates() already filtered the gadget on it), so it is left
-        alone here.
+        The slots this gadget would newly bind for a step (keyed by their
+        canonical live-map name), or None if it cannot bind them consistently. A
+        slot already in `live` was resolved upstream (candidates() already
+        filtered the gadget on it), so it is left alone here. A concrete register
+        named explicitly is a slot pre-resolved to itself (value == its own
+        register): binding it the same way keeps a generic slot from aliasing a
+        register the chain uses explicitly, and vice-versa.
 
         Rejects (returning None):
           * a slot that resolves to a non-register -- slot value None, i.e. the
@@ -319,18 +339,21 @@ class RopChain:
         '''
         proposed: dict = {}
         for k, v in ((op1_key, gad.slot_op1), (op2_key, gad.slot_op2)):
-            if not _is_generic_slot(k) or k in live:
+            if not (_is_generic_slot(k) or _is_concrete_reg(k)):
+                continue
+            key = _canonical_slot_key(k)
+            if key in live:
                 continue
             if v is None:
                 return None                         # slot bound to a non-register
-            if k in proposed:
-                if proposed[k] != v:
+            if key in proposed:
+                if proposed[key] != v:
                     return None                     # same slot, two registers
                 continue
-            proposed[k] = v
+            proposed[key] = v
         if not proposed:
             return proposed
-        occupied = {r for name, r in live.items() if _is_generic_slot(name)}
+        occupied = set(live.values())               # every register held live
         seen: set = set()
         for v in proposed.values():
             if v in occupied or v in seen:
@@ -523,31 +546,35 @@ class RopChain:
 
     @staticmethod
     def _check_free_usage(steps: list[dict]) -> None:
-        ''' Diagnostics only, for both engines: freeing a non-generic name, a
-            name never used before this point, or a name already freed with
-            no intervening use are all harmless no-ops in both assemblers, so
-            this warns rather than errors (matching _strip_legacy_commas). '''
+        ''' Diagnostics only, for both engines: freeing a name that is neither a
+            generic slot nor a concrete register, a name never used before this
+            point, or a name already freed with no intervening use are all
+            harmless no-ops in both assemblers, so this warns rather than errors
+            (matching _strip_legacy_commas). A concrete register freed here is
+            re-reservable by a later step (default engine only). '''
         ever_seen: set = set()
         pending_free: set = set()
         for step in steps:
             freed = step.get('free')
             if freed is not None:
-                if not _is_generic_slot(freed):
+                key = _canonical_slot_key(freed)
+                if not _is_generic_slot(freed) and not _is_concrete_reg(freed):
                     debug.warning(f'free({freed}): only a generic register-slot name '
-                                  f'(regN) can be freed; ignoring')
-                elif freed not in ever_seen:
+                                  f'(regN) or a concrete register can be freed; ignoring')
+                elif key not in ever_seen:
                     debug.warning(f'free({freed}): {freed} was never used before this '
                                   f'point in the file; ignoring')
-                elif freed in pending_free:
+                elif key in pending_free:
                     debug.warning(f'free({freed}): {freed} was already freed with no '
                                   f'intervening use since; ignoring the repeated free')
                 else:
-                    pending_free.add(freed)
+                    pending_free.add(key)
                 continue
             for v in RopChain._step_generic_operands(step):
-                if _is_generic_slot(v):
-                    ever_seen.add(v)
-                    pending_free.discard(v)
+                if _is_generic_slot(v) or _is_concrete_reg(v):
+                    key = _canonical_slot_key(v)
+                    ever_seen.add(key)
+                    pending_free.discard(key)
 
     def _resolve_raw_gadgets(self, steps: list[dict], binaries, base,
                              badchars, badchar_bytes, arch, raw=False) -> None:
