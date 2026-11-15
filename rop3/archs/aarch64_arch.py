@@ -18,7 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import capstone.arm64_const as arm64_const
 from rop3.arch import Architecture
-from rop3.search import aligned_scan
+from rop3.search import aligned_scan, framed_linear_search
 
 # ABI register names capstone prints for the 64-bit integer file. xzr (the
 # hardwired zero register) is not a usable destination and is excluded.
@@ -93,6 +93,21 @@ class AArch64_Architecture(Architecture):
             restores_return_address=self.restores_return_address,
             is_return=self.is_return if framed else None,
             accept_candidate=accept_candidate)
+
+    def _ropblock_scan(self, opcodes, base_vaddr, depth, disasm,
+                       accept_candidate=None, accept_decodes=None):
+        ''' Fixed-width, naturally-aligned ISA: run the abstract-gadget search
+            as a single linear pass with a sliding window (framed_linear_search)
+            rather than the per-offset/per-length backward walk. Every 4-byte
+            aligned offset is a canonical instruction start, so this enumerates
+            the same framed runs as backwards_framed_search while decoding the
+            section only once (no unintended-instruction concern on AArch64). '''
+        yield from framed_linear_search(
+            opcodes, base_vaddr, depth, self.alignment, disasm,
+            self.is_pc_reg_write, self.ropblock_branch_reg,
+            self.is_stack_load, self.clobbers_reg, self.restores_return_address,
+            splits=self.splits_gadget, accept_candidate=accept_candidate,
+            accept_decodes=accept_decodes)
 
     @property
     def name(self) -> str:

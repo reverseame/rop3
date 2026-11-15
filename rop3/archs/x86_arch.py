@@ -134,6 +134,27 @@ class X86_Architecture(Architecture):
             {'bytes': b'\xff[\xd0\xd1\xd2\xd3\xd4\xd6\xd7]{1}', 'size': 2}     # call [reg]
         ]
 
+    def get_ropblock_terminations(self):
+        ''' Trailing-byte patterns for every `is_pc_reg_write` terminator, so
+            the abstract-gadget search anchors with a byte-regex rather than a
+            Capstone decode per byte. These mirror is_pc_reg_write exactly:
+            ret/retf (with/without imm16) and register-direct `jmp reg` over the
+            *full* e0-e7 range (incl. `jmp rbp`/`jmp rsp`, which the per-offset
+            decode accepted -- unlike get_jop_terminations, which omits \\xe5).
+            Memory-indirect `jmp [reg]`/`call [reg]` are excluded: is_pc_reg_write
+            rejects them (their operand is memory, not a register). Emitted
+            unconditionally; --retf / --ret-imm gating is applied downstream by
+            GadFinder._ropblock_body_ok. REX/operand-size prefixes (`41 ff e0`,
+            `66 c3`) are absorbed by the backward walk, so no prefixed variants
+            are listed here. '''
+        return [
+            {'bytes': b'\xc3', 'size': 1},                    # ret
+            {'bytes': b'\xc2[\x00-\xff]{2}', 'size': 3},      # ret imm16
+            {'bytes': b'\xcb', 'size': 1},                    # retf
+            {'bytes': b'\xca[\x00-\xff]{2}', 'size': 3},      # retf imm16
+            {'bytes': b'\xff[\xe0-\xe7]{1}', 'size': 2},      # jmp reg
+        ]
+
     @property
     def name(self) -> str:
         return 'x86'

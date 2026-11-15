@@ -28,6 +28,17 @@ from rop3.arch import arch_singleton
 
 _OP_KEY_RE = re.compile(r'^op\d+$')
 
+# Process-level cache of the RAW parsed YAML (glob + file read + yaml.safe_load),
+# keyed by the roplang folder. The catalog is static for the life of a process
+# but get_op/get_ops is called once per operation reference during chain
+# resolution, so the former re-glob + re-read + re-parse of all ~22 files on
+# every call was pure, repeated waste. The cached value is arch-independent raw
+# content; the arch-dependent transform (_parse_op: alias resolution, arch
+# block, availability) still runs fresh per call, so switching architectures in
+# the same process stays correct.
+_RAW_YAML_CACHE: dict = {}
+
+
 class YamlParser:
     def __init__(self):
         self.folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'roplang')
@@ -45,16 +56,22 @@ class YamlParser:
     def get_ops(self):
         ret = []
 
-        files = self._get_op_files()
-
-        for filename in files:
-            content = self._read_yaml(filename)
+        for content in self._raw_contents():
             ''' Merge dicts '''
             if content:
                 for op in content.keys():
                     ret.append(self._parse_op(op, content[op]))
 
         return ret
+
+    def _raw_contents(self):
+        ''' Raw YAML content of every roplang file (arch-independent), read and
+            parsed once per process and cached. See _RAW_YAML_CACHE. '''
+        cached = _RAW_YAML_CACHE.get(self.folder)
+        if cached is None:
+            cached = [self._read_yaml(f) for f in self._get_op_files()]
+            _RAW_YAML_CACHE[self.folder] = cached
+        return cached
 
     def _get_op_files(self):
         return [filename for filename in glob.glob(os.path.join(self.folder, '**', '*.yaml'), recursive=True) if os.path.isfile(filename)]

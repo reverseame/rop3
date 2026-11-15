@@ -34,6 +34,19 @@ class Architecture(ABC):
     def get_jop_terminations(self) -> list[dict]:
         pass
 
+    def get_ropblock_terminations(self) -> list[dict] | None:
+        ''' Byte-regex patterns for the abstract-gadget (ropblock) terminators
+            -- every `is_pc_reg_write` instruction (ret/retf, with and without
+            an immediate, and `jmp reg`). When non-None, backwards_framed_search
+            anchors terminators with a single overlapping byte-regex instead of
+            decoding at every offset (the big win on variable-length ISAs).
+
+            Returned unconditionally (retf / ret-imm are *not* gated here);
+            GadFinder._ropblock_body_ok applies the --retf / --ret-imm filtering
+            downstream, so the scan stays byte-identical to the former per-offset
+            decode. Default None: fixed-width ISAs keep per-offset discovery. '''
+        return None
+
     # --- Mnemonic classification (data supplied by each architecture) -------
 
     @property
@@ -222,7 +235,8 @@ class Architecture(ABC):
             self.is_pc_reg_write, self.ropblock_branch_reg,
             self.is_stack_load, self.clobbers_reg, self.restores_return_address,
             splits=self.splits_gadget, accept_candidate=accept_candidate,
-            accept_decodes=accept_decodes)
+            accept_decodes=accept_decodes,
+            terminations=self.get_ropblock_terminations())
 
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,

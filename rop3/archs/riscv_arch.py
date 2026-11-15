@@ -156,6 +156,21 @@ class RISCV_Architecture(Architecture):
             ret.append({'bytes': b'[\x02\x82][\x80-\x9f]', 'size': 2})
         return ret
 
+    def get_ropblock_terminations(self):
+        ''' Byte-regex anchors for the abstract-gadget (ropblock) terminators so
+            the search finds them with one overlapping scan instead of decoding
+            at every 2-byte offset. is_pc_reg_write accepts ret / jr / c.jr --
+            all `jalr`/`c.jr` encodings -- so the JOP indirect-branch patterns
+            already cover them exactly; over-matching forms (linking calls,
+            offset jumps) are dropped by the is_terminator(last) re-check in
+            backwards_framed_search, as get_jop_terminations documents.
+
+            The per-length backward re-decode in backwards_framed_search is kept
+            (no linear-window shortcut): with the C extension, 2-byte alignment
+            admits non-canonical gadgets that a single intended-stream pass would
+            miss, so -- like x86 -- every start offset must still be tried. '''
+        return self.get_jop_terminations()
+
     # --- Mnemonic classification --------------------------------------------
 
     @property

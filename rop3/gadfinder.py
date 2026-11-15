@@ -105,6 +105,10 @@ class GadFinder:
         self.flags = flags
         self._cache = GadgetCache(cache_dir) if cache else None
         self._jobs = max(1, int(jobs)) if jobs else 1
+        # Memoized arch._rop_terminations(include_retf=True) for the ropblock
+        # body filter (constant per arch; see _ropblock_body_ok).
+        self._rop_terms_cache = None
+        self._rop_terms_arch = None
 
     def find(self, filenames: list[str], base=None, badchars=None,
              badchar_bytes=None, arch=None, symbols=False, raw=False) -> list[Gadget]:
@@ -652,7 +656,14 @@ class GadFinder:
                 arch.base_mnemonic(ins.mnemonic) in arch.conditional_branch_mnemonics
                 for ins in decodes[:-1]):
             return False
-        rop_terms = arch._rop_terminations(include_retf=True)
+        # `_rop_terminations` is a constant for the run; building it per
+        # candidate is pure waste in the hot ropblock body filter. Memoize it
+        # (keyed by the arch instance, which is fixed per process).
+        rop_terms = self._rop_terms_cache
+        if rop_terms is None or self._rop_terms_arch is not arch:
+            rop_terms = arch._rop_terminations(include_retf=True)
+            self._rop_terms_cache = rop_terms
+            self._rop_terms_arch = arch
         term_mnem = arch.base_mnemonic(decodes[-1].mnemonic)
         if term_mnem == 'retf' and not self._retf():
             return False

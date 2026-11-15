@@ -23,6 +23,227 @@ import multiprocessing
 # window this wide is enough to recover the one instruction starting at an offset.
 _MAX_INSN_BYTES = 16
 
+
+# --------------------------------------------------------------------------
+# Emitter + policy: one gadget-search driver for every ISA/mode
+# --------------------------------------------------------------------------
+#
+# Every gadget search in this module is a product of two independent choices:
+#
+#   * the EMITTER -- how candidate instruction-runs ending at a terminator are
+#     enumerated. A variable-length/unaligned ISA (x86, or RISC-V's ropblock
+#     scan where the C extension admits non-canonical gadgets) must try every
+#     aligned start offset and re-decode, since instructions hide inside longer
+#     ones (`_emit_unaligned`). A fixed-width, naturally-aligned ISA (AArch64,
+#     and RISC-V's intended-stream ROP scan) has a single canonical instruction
+#     stream, so one linear disassembly pass with a sliding window reuses the
+#     decoded objects (`_emit_aligned`).
+#
+#   * the POLICY -- what makes a run a gadget and how it is framed. Ordinary ROP
+#     (`_RopPolicy`): the last instruction is a valid terminator and, when the
+#     terminator is a return on a link-register ISA, the run first restores the
+#     return address off the stack; the frame mask marks those restores and the
+#     terminator. Abstract-gadget / ropblock (`_RopblockPolicy`): the terminator
+#     writes the PC from a register (or x86 `ret`) and a stack-load prologue
+#     feeds that register with no intervening clobber; the frame mask marks the
+#     prologue, the terminator, and any position-independent framing instruction.
+#
+# The emitter yields `(vaddr, raw, decodes)` candidate runs; the policy turns
+# each into an accepted gadget with its frame mask, or rejects it. Both emitters
+# and both policies combine freely, so the four historical scan functions
+# (galileo / aligned / backwards-framed / framed-linear) are now thin wrappers
+# that pick one emitter and one policy -- the backward-growth loop, the
+# contiguity guard, the bad-char gate and the terminator framing live in exactly
+# one place each.
+
+
+class _RopPolicy:
+    ''' Ordinary ROP/JOP gadget policy (the Galileo / aligned sweeps).
+
+        `is_valid_gadget(decodes)` is the finder's flag-aware validity test (it
+        already checks the terminator and intermediate branches). `is_return`,
+        when not None, marks a terminator that needs a return-address frame: the
+        run is emitted only once some instruction restores it from the stack
+        (`restores_return_address`). x86 passes `is_return=None` -- `ret` pops the
+        PC straight off the stack, so it self-frames; link-register ISAs
+        (AArch64/RISC-V) pass it when framed, and None when `--no-frame` drops the
+        requirement. `restores_return_address` still builds the frame mask either
+        way. '''
+
+    __slots__ = ('_valid', '_rra', '_is_return')
+
+    def __init__(self, is_valid_gadget, restores_return_address=None, is_return=None):
+        self._valid = is_valid_gadget
+        self._rra = restores_return_address
+        self._is_return = is_return
+
+    def is_terminator(self, insn) -> bool:
+        ''' Whether a single instruction can end a gadget (used by the aligned
+            emitter to pick terminator sites): it is a valid one-instruction
+            gadget. Mirrors aligned_scan's ``is_valid_gadget([terminator])``. '''
+        return self._valid([insn])
+
+    def evaluate(self, decodes):
+        ''' The frame mask for an accepted gadget, or None to reject. '''
+        if not self._valid(decodes):
+            return None
+        rra = self._rra
+        if self._is_return is not None and self._is_return(decodes[-1]):
+            # A return on a link-register ISA: the run must restore the return
+            # address off the stack (any restore in the run covers it -- a later
+            # overwrite of the loaded target is left to the symbolic analyzer,
+            # matching the former inline `frame_loaded` latch).
+            if not (rra and any(rra(d) for d in decodes)):
+                return None
+        last = len(decodes) - 1
+        return tuple(i == last or bool(rra and rra(d))
+                     for i, d in enumerate(decodes))
+
+
+class _RopblockPolicy:
+    ''' Abstract-gadget (ropblock) policy. The terminator writes the PC from a
+        register (or x86 `ret`); a stack-load prologue must feed that register
+        with no intervening clobber. See backwards_framed_search for the predicate
+        contract (is_terminator/branch_reg/is_prologue/clobbers/is_frame/splits/
+        accept_decodes). '''
+
+    __slots__ = ('_is_term', '_branch_reg', '_is_prologue', '_clobbers',
+                 '_is_frame', '_splits', '_accept_decodes')
+
+    def __init__(self, is_terminator, branch_reg, is_prologue, clobbers,
+                 is_frame=None, splits=None, accept_decodes=None):
+        self._is_term = is_terminator
+        self._branch_reg = branch_reg
+        self._is_prologue = is_prologue
+        self._clobbers = clobbers
+        self._is_frame = is_frame
+        self._splits = splits
+        self._accept_decodes = accept_decodes
+
+    def is_terminator(self, insn) -> bool:
+        return self._is_term(insn)
+
+    def evaluate(self, decodes):
+        last = decodes[-1]
+        if not self._is_term(last):
+            return None
+        # No control-flow transfer before the terminator: a branch/return ahead
+        # of it ends the gadget early (including a leading `ret`). The trailing
+        # terminator is exempt; a bare `ret` stays valid. Matches is_valid_*_gadget.
+        if self._splits is not None and any(self._splits(i) for i in decodes[:-1]):
+            return None
+        prologue = _ropblock_prologue_index(decodes, self._branch_reg(last),
+                                            self._is_prologue, self._clobbers)
+        if prologue is None:
+            return None                             # not framed
+        if self._accept_decodes is not None and not self._accept_decodes(decodes):
+            return None                             # supplementary body filter
+        return _frame_mask(decodes, prologue, self._is_frame)
+
+
+def _emit_unaligned(opcodes, base_vaddr, depth, alignment, disasm, policy,
+                    terminations, accept_candidate=None, accept_match=None):
+    '''
+    Unaligned emitter: enumerate candidate runs by anchoring on each terminator
+    and growing the candidate backward one length at a time, re-decoding the raw
+    slice. Surfaces unintended instructions hiding inside longer ones, so it is
+    required on variable-length ISAs (x86) and on RISC-V's ropblock scan.
+
+    Terminator discovery: `terminations` (byte-regex patterns) is scanned with a
+    single C-level overlapping `(?=(...))` match to locate terminator byte
+    offsets (as galileo always did, and as the ropblock scan does to avoid a
+    Capstone decode per byte); the per-length walk re-decodes and the policy
+    re-checks the terminator, so a prefixed form (REX `jmp r8`) is surfaced even
+    though the pattern anchors only on the trailing opcode. `accept_match(ref)`
+    partitions terminator end-offsets across parallel chunks. Yields
+    ``(vaddr, raw, decodes, frame)``.
+    '''
+    def grow(min_len, term_end):
+        # Grow the candidate backward from the terminator, one length at a time.
+        for length in range(min_len, depth + 1):
+            q = term_end - length
+            if q < 0:
+                break
+            vaddr = base_vaddr + q
+            if alignment > 1 and vaddr % alignment != 0:
+                continue
+            raw = opcodes[q:term_end]
+            if accept_candidate is not None and not accept_candidate(vaddr, raw):
+                continue
+            decodes = list(disasm(raw, vaddr))
+            # The run must decode cleanly and consume the slice exactly (capstone
+            # stops at the first undecodable byte, so a short/garbled decode would
+            # otherwise be accepted with bytes its instructions do not account
+            # for). A contiguous decode from `vaddr` ends at term_end iff it
+            # consumed everything -- equivalent to galileo's sum-of-sizes check.
+            if not decodes:
+                continue
+            last = decodes[-1]
+            if last.address + last.size != base_vaddr + term_end:
+                continue
+            frame = policy.evaluate(decodes)
+            if frame is not None:
+                yield vaddr, raw, decodes, frame
+
+    for termination in terminations:
+        term_size = termination['size']
+        # Zero-width lookahead so overlapping terminators are all enumerated
+        # (e.g. `c2 c2 00 00` is `ret imm16` at offsets 0 and 1); plain
+        # finditer skips overlaps and breaks serial/parallel chunk
+        # equivalence. The patterns carry no capturing groups.
+        probe = re.compile(b'(?=(' + termination['bytes'] + b'))')
+        for match in probe.finditer(opcodes):
+            t_off = match.start()
+            ref = t_off + term_size
+            if accept_match is not None and not accept_match(ref):
+                continue
+            # The terminating instruction must itself be aligned.
+            if alignment > 1 and (base_vaddr + t_off) % alignment != 0:
+                continue
+            yield from grow(term_size, ref)
+
+
+def _emit_aligned(opcodes, base_vaddr, depth, alignment, disasm, policy,
+                  accept_candidate=None):
+    '''
+    Aligned emitter: one linear disassembly pass (`_linear_instruction_stream`)
+    feeding a `depth`-bounded sliding window; for every instruction the policy
+    calls a terminator, walk backward over the contiguous run of whole
+    instructions ending at it, yielding each run (reusing the window's decoded
+    objects -- no re-decode). Valid only on a fixed-width, naturally-aligned ISA,
+    where every aligned offset is a canonical instruction start so this
+    enumerates the same runs the unaligned emitter would. Yields
+    ``(vaddr, raw, decodes, frame)``.
+    '''
+    window = []
+    for term in _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
+        window.append(term)
+        term_end = term.address + term.size
+        # Trim out of `depth` reach of the current terminator; a later terminator
+        # only reaches further forward, so these stay dead.
+        while window and term_end - window[0].address > depth:
+            del window[0]
+        if not policy.is_terminator(term):
+            continue
+        n = len(window)
+        idx = n - 1
+        while idx >= 0:
+            insn_j = window[idx]
+            # Stop at a resync gap: a gadget's bytes are a single contiguous run.
+            if idx < n - 1 and insn_j.address + insn_j.size != window[idx + 1].address:
+                break
+            if term_end - insn_j.address > depth:
+                break
+            vaddr = insn_j.address
+            raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
+            if accept_candidate is None or accept_candidate(vaddr, raw):
+                decodes = window[idx:n]
+                frame = policy.evaluate(decodes)
+                if frame is not None:
+                    yield vaddr, raw, decodes, frame
+            idx -= 1
+
+
 def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                  is_valid_gadget, accept_match=None, accept_candidate=None,
                  restores_return_address=None):
@@ -65,59 +286,11 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
     ------
     (vaddr, raw, decodes, frame)
     '''
-    for termination in terminations:
-        term_size = termination['size']
-        # Every reference to a gadget termination (a `ret`, a free branch, ...).
-        # Enumerate *overlapping* occurrences: a multi-byte terminator can start
-        # inside a previous match (e.g. `c2 c2 00 00` is a valid `ret imm16` at
-        # both offset 0 and offset 1). Plain re.finditer skips overlaps and so
-        # misses gadgets and breaks serial/parallel chunk equivalence; a
-        # zero-width lookahead captures them all, as raw_byte_scan does. The
-        # termination patterns contain no capturing groups, so group(1) is the
-        # whole match; ownership stays keyed on the end offset `ref`, which is
-        # unique per hit (fixed-size terminators).
-        probe = re.compile(b'(?=(' + termination['bytes'] + b'))')
-        for match in probe.finditer(opcodes):
-            ref = match.start() + term_size
-            if accept_match is not None and not accept_match(ref):
-                continue
-            # The terminating instruction must itself be aligned.
-            if alignment > 1 and (base_vaddr + match.start()) % alignment != 0:
-                continue
-            # Walk backward from the termination, growing the candidate one
-            # length at a time up to `depth` bytes.
-            for length in range(term_size, depth + 1):
-                start = ref - length
-                # Do not walk past the start of the buffer
-                if start < 0:
-                    continue
-                vaddr = base_vaddr + start
-                # Gadgets may only start on an aligned boundary.
-                if alignment > 1 and vaddr % alignment != 0:
-                    continue
-                raw = opcodes[start:ref]
-                if accept_candidate is not None and not accept_candidate(vaddr, raw):
-                    continue
-                # Decode the candidate once, building the frame mask in the same
-                # pass: an instruction is framing if it restores the return
-                # address off the stack; the terminator (set below) always is.
-                decodes = []
-                frame = []
-                for insn in disasm(raw, vaddr):
-                    decodes.append(insn)
-                    frame.append(bool(restores_return_address)
-                                 and restores_return_address(insn))
-                # The decode must consume the candidate exactly: capstone stops at
-                # the first undecodable byte, so a candidate with an undecodable
-                # middle/tail would otherwise be accepted with bytes that its
-                # instructions do not account for (inconsistent byte/instruction
-                # records, wrong dedup counts). Require a contiguous decode ending
-                # at the candidate's end.
-                if sum(insn.size for insn in decodes) != len(raw):
-                    continue
-                if is_valid_gadget(decodes):
-                    frame[-1] = True                # the terminator frames the run
-                    yield vaddr, raw, decodes, tuple(frame)
+    policy = _RopPolicy(is_valid_gadget, restores_return_address, is_return=None)
+    yield from _emit_unaligned(opcodes, base_vaddr, depth, alignment, disasm,
+                               policy, terminations=terminations,
+                               accept_candidate=accept_candidate,
+                               accept_match=accept_match)
 
 
 # Bytes handed to a single `disasm()` call in `_linear_instruction_stream`.
@@ -131,11 +304,12 @@ _SCAN_CHUNK_SIZE = 1 << 20
 
 def _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
     '''
-    Generator core of `linear_instructions`/`aligned_scan`: yields the
-    intended instruction stream in program order, one instruction at a time,
-    without ever materializing the whole section (see `_SCAN_CHUNK_SIZE`).
-    For the resynchronization behavior around undecodable bytes, see
-    `linear_instructions`.
+    Generator core of `aligned_scan`: disassemble `opcodes` as the intended
+    instruction stream, in program order, one instruction at a time, without
+    ever materializing the whole section (see `_SCAN_CHUNK_SIZE`). Capstone
+    stops at the first byte it cannot decode; when that happens the sweep
+    resynchronizes by skipping one aligned unit past the offending byte and
+    resumes.
     '''
     n = len(opcodes)
     step = max(1, alignment)
@@ -169,16 +343,6 @@ def _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
             off += alignment - (off % alignment)
 
 
-def linear_instructions(opcodes, base_vaddr, alignment, disasm):
-    '''
-    Linear sweep: disassemble `opcodes` as the intended instruction stream, in
-    program order. Capstone stops at the first byte it cannot decode; when that
-    happens the sweep resynchronizes by skipping one aligned unit past the
-    offending byte and resumes. Returns the list of decoded instructions.
-    '''
-    return list(_linear_instruction_stream(opcodes, base_vaddr, alignment, disasm))
-
-
 def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
                  is_valid_gadget, restores_return_address=None, is_return=None,
                  accept_candidate=None):
@@ -200,12 +364,12 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     Framing (optional). A frame-establishing return (e.g. RISC-V `ret`, which
     jumps to whatever is in `ra`) only yields a useful gadget if the run first
     reloads the return target from the (attacker-controlled) stack. When
-    `is_return` is given, a return terminator is emitted only once the backward
-    walk has covered a return-address restore (`restores_return_address`); a
-    single boolean carried across the walk records this, so the check is O(1)
-    per candidate. Non-return terminators (indirect JOP branches) carry no such
-    requirement. When `is_return` is omitted the scan degrades to the plain
-    sweep, emitting every contiguous run.
+    `is_return` is given, a return terminator is emitted only once the run
+    contains a return-address restore (`restores_return_address`); `_RopPolicy`
+    checks this per candidate by scanning the run's decodes. Non-return
+    terminators (indirect JOP branches) carry no such requirement. When
+    `is_return` is omitted the scan degrades to the plain sweep, emitting every
+    contiguous run.
 
     Parameters mirror `galileo_scan`, minus the byte-pattern `terminations`
     (termination points are found by disassembly here, not by a byte regex).
@@ -213,7 +377,7 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     restores_return_address : callable(insn) -> bool, optional -- the frame load
         that restores the return target from the stack (RISC-V `ld ra, off(sp)`,
         AArch64 `ldp .. x30, [sp]`). Gates return emission when `is_return` is
-        set, and marks the inline frame mask built during the walk.
+        set, and marks the per-candidate frame mask `_RopPolicy` builds.
     is_return : callable(insn) -> bool, optional -- is the terminator a return
         (so the gadget must establish its frame). Omit for the plain sweep.
 
@@ -222,67 +386,13 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     (vaddr, raw, decodes, frame)
     '''
     # A gadget never reaches back more than `depth` bytes from its terminator,
-    # so only a small trailing window of the (possibly huge, e.g. a >40MB
-    # .text section) instruction stream is ever reachable at once. Consuming
-    # the stream lazily and trimming the window as it advances keeps peak
-    # memory bounded by `depth`/`alignment`, not by section size -- avoiding
-    # materializing every capstone-detail instruction in the whole section
-    # (see `linear_instructions`, still eager, used directly by tests).
-    window = []
-    for terminator in _linear_instruction_stream(opcodes, base_vaddr, alignment, disasm):
-        window.append(terminator)
-        term_end = terminator.address + terminator.size
-        # Trim from the front once out of `depth` reach of the current tail;
-        # a later (further along) terminator's reach only moves forward, so
-        # anything trimmed here is unreachable for it too.
-        while window and term_end - window[0].address > depth:
-            del window[0]
-
-        # A termination is any instruction that is a valid gadget on its own.
-        if not is_valid_gadget([terminator]):
-            continue
-        requires_frame = bool(is_return) and is_return(terminator)
-
-        # Walk backward over the contiguous run of intended instructions,
-        # growing the frame mask at its front to stay parallel to the candidate.
-        frame_loaded = False
-        frame = []
-        n = len(window)
-        idx = n - 1
-        while idx >= 0:
-            insn_j = window[idx]
-            # Stop at a discontinuity (a resync gap): a gadget's bytes must be
-            # a single contiguous run.
-            if idx < n - 1 and insn_j.address + insn_j.size != window[idx + 1].address:
-                break
-            if term_end - insn_j.address > depth:
-                break
-
-            # Prepending insn_j: it is framing if it restores the return
-            # address; once covered, the whole (and every longer) run establishes
-            # its return frame.
-            #
-            # KNOWN LIMITATION: `frame_loaded` is a one-way latch -- it does
-            # not track the specific return-target register, so once any return-
-            # address restore is seen, a *later* instruction that overwrites that
-            # loaded target (e.g. `ldr x30, [sp] ; mov x30, x0 ; ret`) still
-            # yields a "framed" gadget. The symbolic analyzer catches an
-            # unreachable transition at chain-validation time; this scan does not.
-            is_restore = bool(restores_return_address) and restores_return_address(insn_j)
-            if is_restore:
-                frame_loaded = True
-            frame.insert(0, is_restore)
-
-            if frame_loaded or not requires_frame:
-                vaddr = insn_j.address
-                raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
-                if accept_candidate is None or accept_candidate(vaddr, raw):
-                    candidate = window[idx:n]
-                    if is_valid_gadget(candidate):
-                        mask = frame.copy()
-                        mask[-1] = True             # the terminator frames the run
-                        yield vaddr, raw, candidate, tuple(mask)
-            idx -= 1
+    # so the aligned emitter keeps only a small trailing window of the (possibly
+    # huge, e.g. a >40MB .text) instruction stream, bounding peak memory by
+    # `depth`/`alignment` rather than section size. The return-address frame
+    # requirement and inline mask formerly inlined here now live in _RopPolicy.
+    policy = _RopPolicy(is_valid_gadget, restores_return_address, is_return)
+    yield from _emit_aligned(opcodes, base_vaddr, depth, alignment, disasm,
+                             policy, accept_candidate=accept_candidate)
 
 
 def literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
@@ -302,9 +412,10 @@ def literal_scan(opcodes, base_vaddr, alignment, disasm, pattern_len,
     step) applies the actual pattern-equality test; this stays pattern-agnostic
     like the rest of this module.
 
-    Parameters mirror `backward_instructions`, plus `pattern_len` (the number
-    of instructions a candidate window must contain) and `accept_candidate`
-    (bad-char filtering, as in the other scans).
+    Parameters: `opcodes`/`base_vaddr`/`alignment`/`disasm` as elsewhere in
+    this module, plus `pattern_len` (the number of instructions a candidate
+    window must contain) and `accept_candidate` (bad-char filtering, as in the
+    other scans).
 
     Yields
     ------
@@ -454,45 +565,11 @@ def raw_byte_scan(opcodes, base_vaddr, needle, alignment, disasm,
 # --------------------------------------------------------------------------
 
 
-def backward_instructions(opcodes, base_vaddr, alignment, disasm, start=None):
-    '''
-    Arch-aware backward instruction iterator.
-
-    Starting just below `start` (the end of the buffer by default) and stepping
-    toward the front by the instruction `alignment` -- 1 on x86 (every byte, so
-    unintended instructions hidden inside longer ones surface), 2 on compressed
-    RISC-V, 4 on AArch64 / base RISC-V -- decode the single instruction that
-    begins at each aligned offset and yield ``(offset, insn)``. Offsets where
-    nothing decodes are skipped.
-
-    Parameters
-    ----------
-    opcodes : bytes            -- executable bytes to scan.
-    base_vaddr : int           -- virtual address of ``opcodes[0]``.
-    alignment : int            -- instruction alignment in bytes.
-    disasm : callable(raw, vaddr) -> iterable  -- e.g. capstone ``Cs.disasm``.
-    start : int, optional      -- byte offset to begin below (default: len).
-
-    Yields
-    ------
-    (offset, insn)
-    '''
-    hi = len(opcodes) if start is None else min(start, len(opcodes))
-    off = hi - 1
-    if off >= 0 and alignment > 1:
-        off -= (base_vaddr + off) % alignment           # align the first offset
-    while off >= 0:
-        insn = next(iter(disasm(opcodes[off:off + _MAX_INSN_BYTES],
-                                base_vaddr + off)), None)
-        if insn is not None:
-            yield off, insn
-        off -= alignment
-
-
 def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
                             is_terminator, branch_reg, is_prologue, clobbers,
                             is_frame=None, splits=None, accept_candidate=None,
-                            accept_decodes=None):
+                            accept_decodes=None, terminations=None,
+                            accept_match=None):
     '''
     Backward framed ("ropblock") gadget search.
 
@@ -504,9 +581,10 @@ def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
     single instruction is both prologue and epilogue (``branch_reg`` returns
     ``None`` and the frame is satisfied with no separate prologue).
 
-    Using `backward_instructions` to find each terminator, the search walks back
-    over the contiguous runs that end at that terminator (growing one length at a
-    time up to `depth` bytes) and emits a run once it is *framed*: it contains,
+    Using a byte-regex over `terminations` to find each terminator, the search
+    walks back over the contiguous runs that end at that terminator (growing one
+    length at a time up to `depth` bytes) and emits a run once it is *framed*: it
+    contains,
     before the terminator, a prologue that loads the terminator's branch register
     with no intervening clobber of that register. Longer runs that still contain
     the frame keep being emitted.
@@ -537,49 +615,63 @@ def backwards_framed_search(opcodes, base_vaddr, depth, alignment, disasm,
           conditional-branch rejection) that this search's terminator/frame
           logic does not itself cover; a candidate it rejects is dropped.
           Default: no such check.
+      terminations : iterable of {'bytes': <byte regex>, 'size': <int>}
+          -- terminators are located with a single C-level overlapping
+          byte-regex (as `galileo_scan` does). The patterns need only match a
+          terminator's *trailing* bytes: the per-length backward walk re-decodes
+          each candidate and the `is_terminator(last)` re-check guarantees the
+          decoded tail is a genuine pc-reg-write, so prefixed forms (e.g. REX
+          `jmp r8`) are surfaced by the walk even though the pattern anchors only
+          on the unprefixed opcode. A fixed-width ISA with a single canonical
+          instruction stream (AArch64) uses the linear-pass
+          `framed_linear_search` instead of this per-offset search.
+      accept_match(ref) -> bool, optional -- filter on a terminator's end
+          offset, used to partition parallel chunks (mirrors `galileo_scan`).
+          Default: no such check.
 
     Yields
     ------
     (vaddr, raw, decodes, frame)
     '''
-    for t_off, term in backward_instructions(opcodes, base_vaddr, alignment, disasm):
-        if not is_terminator(term):
-            continue
-        term_end = t_off + term.size
-        # Grow the candidate backward from the terminator, one length at a time.
-        for length in range(term.size, depth + 1):
-            q = term_end - length
-            if q < 0:
-                break
-            if alignment > 1 and (base_vaddr + q) % alignment != 0:
-                continue
-            raw = opcodes[q:term_end]
-            if accept_candidate is not None and not accept_candidate(base_vaddr + q, raw):
-                continue
-            decodes = list(disasm(raw, base_vaddr + q))
-            # The run must decode cleanly and still end on the terminator.
-            if not decodes:
-                continue
-            last = decodes[-1]
-            if last.address + last.size != base_vaddr + term_end:
-                continue
-            if not is_terminator(last):
-                continue
-            # No control-flow transfer before the terminator: a branch/return
-            # anywhere ahead of it ends the gadget early, including at position 0
-            # (a leading `ret` makes the rest dead -- "no prologue after
-            # prologue"). The trailing terminator itself is exempt; a bare `ret`
-            # (nothing before it) stays valid. Matches is_valid_*_gadget.
-            if splits is not None and any(splits(insn) for insn in decodes[:-1]):
-                continue
-            prologue = _ropblock_prologue_index(decodes, branch_reg(last),
-                                                is_prologue, clobbers)
-            if prologue is None:
-                continue                        # not framed
-            if accept_decodes is not None and not accept_decodes(decodes):
-                continue                        # supplementary body filter
-            frame = _frame_mask(decodes, prologue, is_frame)
-            yield base_vaddr + q, raw, decodes, frame
+    policy = _RopblockPolicy(is_terminator, branch_reg, is_prologue, clobbers,
+                             is_frame=is_frame, splits=splits,
+                             accept_decodes=accept_decodes)
+    yield from _emit_unaligned(opcodes, base_vaddr, depth, alignment, disasm,
+                               policy, terminations=terminations,
+                               accept_candidate=accept_candidate,
+                               accept_match=accept_match)
+
+
+def framed_linear_search(opcodes, base_vaddr, depth, alignment, disasm,
+                         is_terminator, branch_reg, is_prologue, clobbers,
+                         is_frame=None, splits=None, accept_candidate=None,
+                         accept_decodes=None):
+    '''
+    Linear-pass abstract-gadget ("ropblock") search for a fixed-width, fully
+    naturally-aligned ISA (AArch64).
+
+    Equivalent to `backwards_framed_search` but, where that re-decodes each
+    candidate from every offset, this disassembles the section once as an
+    intended instruction stream (`_linear_instruction_stream`) and reuses the
+    decoded instruction objects from a sliding window -- exactly as
+    `aligned_scan` does for the ordinary framed sweep. On an ISA whose
+    instructions are all one `alignment`-wide, naturally-aligned unit, every
+    aligned offset is a canonical instruction start, so the per-offset backward
+    walk and this single pass enumerate the *same* contiguous runs (there are no
+    unintended instructions hiding inside longer ones). This is **not** valid on
+    a variable-length ISA (x86) or one with mixed widths at sub-instruction
+    alignment (RISC-V + C extension), which must keep `backwards_framed_search`.
+
+    The framing/validation (prologue data-flow, `splits`, `accept_decodes`,
+    frame mask) is identical to `backwards_framed_search`; only terminator
+    discovery and candidate decoding differ. Yields ``(vaddr, raw, decodes,
+    frame)``.
+    '''
+    policy = _RopblockPolicy(is_terminator, branch_reg, is_prologue, clobbers,
+                             is_frame=is_frame, splits=splits,
+                             accept_decodes=accept_decodes)
+    yield from _emit_aligned(opcodes, base_vaddr, depth, alignment, disasm,
+                             policy, accept_candidate=accept_candidate)
 
 
 def _ropblock_prologue_index(decodes, reg, is_prologue, clobbers):

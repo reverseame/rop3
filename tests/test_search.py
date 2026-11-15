@@ -18,8 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import pytest
 
-from rop3.search import (galileo_scan, aligned_scan, linear_instructions,
-                         backward_instructions, backwards_framed_search,
+from rop3.search import (galileo_scan, aligned_scan, backwards_framed_search,
                          literal_scan, aligned_literal_scan,
                          raw_byte_scan, assemble)
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
@@ -131,27 +130,6 @@ def test_aligned_respects_byte_depth():
 def test_aligned_resyncs_past_undecodable_tail():
     # ret then a lone 0xb8 (truncated mov) which cannot decode.
     assert _aligned(b'\xc3\xb8', 0x1000, depth=4) == {0x1000: {'ret'}}
-
-
-def test_linear_instructions_is_program_order():
-    insns = list(linear_instructions(UNINTENDED, 0x1000, 1, _x86_md().disasm))
-    assert [i.mnemonic for i in insns] == ['mov', 'ret']
-    assert [i.address for i in insns] == [0x1000, 0x1005]
-
-
-@pytest.mark.parametrize('chunk_size', [1, 2, 3, 4, 5, 6, 7])
-def test_linear_instructions_unaffected_by_scan_chunk_size(monkeypatch, chunk_size):
-    ''' `_linear_instruction_stream` decodes in bounded `_SCAN_CHUNK_SIZE`
-        pieces (see its docstring) purely to bound capstone's native
-        allocation on huge sections -- it must still yield the exact same
-        instruction stream as one big call, including across a forced chunk
-        boundary that lands mid-buffer or right at the "unintended" ret
-        byte's offset. '''
-    import rop3.search as search_mod
-    monkeypatch.setattr(search_mod, '_SCAN_CHUNK_SIZE', chunk_size)
-    insns = list(linear_instructions(UNINTENDED, 0x1000, 1, _x86_md().disasm))
-    assert [i.mnemonic for i in insns] == ['mov', 'ret']
-    assert [i.address for i in insns] == [0x1000, 0x1005]
 
 
 @pytest.mark.parametrize('chunk_size', [4, 8, 12])
@@ -459,29 +437,9 @@ def _backwards_framed(opcodes, base, depth=8):
     for vaddr, raw, decodes, _frame in backwards_framed_search(
             opcodes, base, depth, arch.alignment, md.disasm,
             arch.is_pc_reg_write, arch.ropblock_branch_reg,
-            arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address):
+            arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address,
+            terminations=arch.get_ropblock_terminations()):
         yield vaddr, raw, decodes
-
-
-def test_backward_instructions_steps_backward_by_alignment():
-    md = _x86_md()
-    code = b'\x90\x5f\xc3'                 # nop ; pop rdi ; ret
-    pairs = list(backward_instructions(code, 0x1000, 1, md.disasm))
-    assert [off for off, _ in pairs] == [2, 1, 0]        # high -> low, every byte
-    seen = {off: insn.mnemonic for off, insn in pairs}
-    assert (seen[2], seen[1], seen[0]) == ('ret', 'pop', 'nop')
-
-
-@_riscv
-def test_backward_instructions_alignment_skips_bytes():
-    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM) \
-        if hasattr(capstone, 'CS_ARCH_ARM64') else None
-    if md is None:
-        pytest.skip('capstone build without ARM64 support')
-    md.detail = True
-    code = bytes.fromhex('e0031faa') + bytes.fromhex('c0035fd6')  # mov x0,xzr ; ret
-    offs = [off for off, _ in backward_instructions(code, 0x1000, 4, md.disasm)]
-    assert offs == [4, 0]                                # 4-byte aligned steps only
 
 
 def test_backwards_framed_ret_is_self_framing():
@@ -515,7 +473,8 @@ def test_backwards_framed_marks_prologue_body_epilogue():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x58\x48\x89\xf7\xff\xe0', 0x1000, 8, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address,
+                terminations=arch.get_ropblock_terminations())}
     assert runs[('pop', 'mov', 'jmp')] == (True, False, True)
 
 
@@ -529,7 +488,8 @@ def test_backwards_framed_sp_pivot_is_not_framed():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x58\x48\x83\xc4\x08\xff\xe0', 0x1000, 12, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address,
+                terminations=arch.get_ropblock_terminations())}
     assert runs[('pop', 'add', 'jmp')] == (True, False, True)
 
 
@@ -542,7 +502,8 @@ def test_backwards_framed_leading_sp_pivot_is_body():
             for _v, _r, decodes, frame in backwards_framed_search(
                 b'\x48\x83\xc4\x08\xc3', 0x1000, 12, arch.alignment, md.disasm,
                 arch.is_pc_reg_write, arch.ropblock_branch_reg,
-                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address)}
+                arch.is_stack_load, arch.clobbers_reg, arch.restores_return_address,
+                terminations=arch.get_ropblock_terminations())}
     assert runs[('add', 'ret')] == (False, True)
 
 

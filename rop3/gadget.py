@@ -58,19 +58,40 @@ class Gadget:
     # Display form of the same two operand slot.
     disp_op1: str = field(init=False, default=None)
     disp_op2: str = field(init=False, default=None)
+    # Lazily-built cache: normalized register NAMES written by each decode
+    # (parallel to `decodes`). capstone's regs_access() is a comparatively
+    # expensive C call and the same instruction's write set is queried many
+    # times per gadget (side effects, writes_reg per chain-assembly DFS visit,
+    # result/input clobber checks per match), so compute it once. None until
+    # first use; see _written_names.
+    _wnames: list = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self):
         self.text_repr = ' ; '.join([f'{d.mnemonic} {d.op_str}' if d.op_str else \
                 d.mnemonic for d in self.decodes])
+
+    def _written_names(self, index: int) -> frozenset:
+        ''' Normalized register names written by ``self.decodes[index]``,
+            memoized per gadget. Equivalent to
+            ``{arch.normalize_reg(d.reg_name(r)) for r in
+            arch.written_registers(d)}`` but computed once per instruction. '''
+        cache = self._wnames
+        if cache is None:
+            arch = arch_singleton.arch
+            cache = self._wnames = [
+                frozenset(arch.normalize_reg(d.reg_name(r))
+                          for r in arch.written_registers(d))
+                for d in self.decodes
+            ]
+        return cache[index]
 
     def calculate_side_effects(self) -> None:
         arch = arch_singleton.arch
         excluded = {arch.normalize_reg(arch.sp)}
         excluded |= {arch.normalize_reg(r) for r in (self.dst or ())}
 
-        for decode in self.decodes:
-            for reg in arch.written_registers(decode):
-                normalized = arch.normalize_reg(decode.reg_name(reg))
+        for i in range(len(self.decodes)):
+            for normalized in self._written_names(i):
                 if normalized not in excluded:
                     self.side_regs.add(normalized)
 
@@ -105,12 +126,8 @@ class Gadget:
 
     def writes_reg(self, normalized_reg: str) -> bool:
         ''' Whether the gadget explicitly or implicitly writes normalized_reg. '''
-        arch = arch_singleton.arch
-        for decode in self.decodes:
-            for reg in arch.written_registers(decode):
-                if arch.normalize_reg(decode.reg_name(reg)) == normalized_reg:
-                    return True
-        return False
+        return any(normalized_reg in self._written_names(i)
+                   for i in range(len(self.decodes)))
 
     def result_clobbered(self, matched_indices, dst_regs) -> bool:
         ''' Whether an instruction between the operation and the terminator
@@ -130,11 +147,7 @@ class Gadget:
 
         arch = arch_singleton.arch
 
-        def writes(insn):
-            return {arch.normalize_reg(insn.reg_name(r))
-                    for r in arch.written_registers(insn)}
-
-        produced = {reg for i in matched_indices for reg in writes(self.decodes[i])}
+        produced = {reg for i in matched_indices for reg in self._written_names(i)}
         # The stack pointer is never guarded. It is the control/exit register and
         # is *expected* to keep moving after the operation -- the ret's own pop,
         # and, for a stack pivot, the frame-restore writeback that follows the
@@ -146,7 +159,8 @@ class Gadget:
             return False
 
         last = max(matched_indices)
-        clobbered = {reg for insn in self.decodes[last + 1:-1] for reg in writes(insn)}
+        clobbered = {reg for i in range(last + 1, len(self.decodes) - 1)
+                     for reg in self._written_names(i)}
         return bool(guarded & clobbered)
 
     def input_clobbered(self, matched_indices, src_regs) -> bool:
@@ -169,16 +183,13 @@ class Gadget:
 
         arch = arch_singleton.arch
 
-        def writes(insn):
-            return {arch.normalize_reg(insn.reg_name(r))
-                    for r in arch.written_registers(insn)}
-
         guarded = set(src_regs) - {arch.normalize_reg(arch.sp)}
         if not guarded:
             return False
 
         first = min(matched_indices)
-        clobbered = {reg for insn in self.decodes[:first] for reg in writes(insn)}
+        clobbered = {reg for i in range(first)
+                     for reg in self._written_names(i)}
         return bool(guarded & clobbered)
 
     def subsumes(self, rhs) -> bool:
