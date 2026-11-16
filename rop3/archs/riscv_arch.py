@@ -18,7 +18,7 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 import capstone
 import capstone.riscv_const as riscv_const
 from rop3.arch import Architecture
-from rop3.search import aligned_scan
+from rop3.search import galileo_scan
 
 # ABI register names capstone prints for the integer file (x0 is the hardwired
 # zero register and is not a usable destination, so it is excluded).
@@ -76,29 +76,32 @@ LOAD_MNEMONICS: frozenset[str] = frozenset({
     'c.ldsp', 'c.lwsp', 'c.ld', 'c.lw',
 })
 
+# These compressed instructions fuse rd and rs1 into their first operand.
+_COMPRESSED_READ_MODIFY_WRITE = frozenset({
+    'c.addi', 'c.addiw', 'c.addi16sp', 'c.slli', 'c.srli', 'c.srai',
+    'c.andi', 'c.sub', 'c.subw', 'c.xor', 'c.or', 'c.and', 'c.add', 'c.addw',
+})
+
 
 class RISCV_Architecture(Architecture):
     '''
-    RISC-V (RV64I) architecture. `compressed` reflects the presence of the C
-    (compressed) extension in the binary (ELF `e_flags & EF_RISCV_RVC`): it
-    both enables capstone's 16-bit decoding and relaxes the instruction
-    alignment from 4 to 2 bytes.
+    RISC-V RV64, with compressed decoding and 2-byte candidate starts by
+    default. ELF loaders explicitly select compression from EF_RISCV_RVC.
     '''
 
-    def __init__(self, compressed: bool = False):
+    def __init__(self, compressed: bool = True):
         self._compressed = bool(compressed)
 
     def scan_name(self, ropblock=False, framed=True) -> str:
-        # Mirror `scan`: --ropblock -> abstract-gadget search; otherwise the
-        # aligned linear sweep, gated on the return-address frame (`ret` jumps
-        # through ra) unless --no-frame drops it to a plain aligned sweep.
+        # Every aligned candidate start is tried, including starts inside a
+        # 32-bit instruction when the compressed extension is enabled.
         if ropblock:
             return 'ropblock'
-        return 'framed aligned' if framed else 'aligned'
+        return 'framed galileo' if framed else 'galileo'
 
     @property
     def parallelizable(self) -> bool:
-        # The linear sweep is single-pass and not chunkable by byte offset.
+        # Framed scans run serially; worker framing is not part of this API.
         return False
 
     @property
@@ -111,25 +114,26 @@ class RISCV_Architecture(Architecture):
     def scan(self, opcodes, base_vaddr, depth, disasm, is_valid_gadget,
              terminations=None, accept_candidate=None, accept_match=None,
              framed=True, ropblock=False, accept_decodes=None):
-        # `ret` jumps through ra, so a useful ROP gadget must first restore ra
-        # from the stack: the aligned sweep gated on that frame load (the
-        # default). `--no-frame` drops the requirement (plain aligned sweep).
-        # Byte `terminations`/`accept_match` (Galileo-only) are unused here.
-        # Yields (vaddr, raw, decodes, frame).
+        # Mixed-width instructions can hide gadgets at halfword starts inside
+        # the intended stream. Anchor on byte patterns and try every legal start.
         if ropblock:
             yield from self._ropblock_scan(opcodes, base_vaddr, depth, disasm,
                                            accept_candidate=accept_candidate,
                                            accept_decodes=accept_decodes)
             return
-        yield from aligned_scan(
-            opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
+        if terminations is None:
+            terminations = self.get_rop_terminations() + self.get_jop_terminations()
+        yield from galileo_scan(
+            opcodes, base_vaddr, terminations, depth, self.alignment, disasm,
+            is_valid_gadget, accept_match=accept_match,
             restores_return_address=self.restores_return_address,
             is_return=self.is_return if framed else None,
+            return_prologue=self.return_prologue_index,
             accept_candidate=accept_candidate)
 
     @property
     def compressed(self) -> bool:
-        ''' Whether the binary advertises the C (compressed) extension. '''
+        ''' Whether C-extension instruction decoding is enabled. '''
         return self._compressed
 
     @property
@@ -269,26 +273,45 @@ class RISCV_Architecture(Architecture):
                 return True
         return False
 
-    # TODO: RISC-V also needs an explicit `read_registers` override. The
-    # base Architecture.read_registers relies on capstone's regs_access(), which
-    # raises CsError for RISC-V, so it returns an incomplete/empty read set here
-    # (e.g. `addi a5, a5, 8` and `ld a5, 8(sp)` report no reads). `clobbers_reg`
-    # already sidesteps this via the encoding-based `_reads_reg`, but tuple
-    # output and gadget read-sets are still wrong. A proper override would mirror
-    # `written_registers`/`_reads_reg`: rd is operand 0 (a source only for the
-    # non-writing forms); memory bases and the remaining register operands are
-    # sources, including the compressed and implicit-link (`jalr`) forms.
     def written_registers(self, insn) -> set:
-        # capstone implements neither regs_access() nor per-operand access
-        # flags for RISC-V, so derive the destination from the encoding: rd is
-        # always the first operand and is written by every instruction except
-        # stores, branches and register-reading jumps.
-        if self.base_mnemonic(insn.mnemonic) in NON_WRITING_MNEMONICS:
+        # Capstone omits the implicit link destination of `jalr rs1` and
+        # `c.jalr rs1`. Read encoded rd for full-width jump/call aliases.
+        mnemonic = self.base_mnemonic(insn.mnemonic)
+        word = int.from_bytes(insn.bytes, 'little')
+        opcode = word & 0x7f
+        if insn.size == 4 and opcode in (0x67, 0x6f):
+            rd = (word >> 7) & 31
+            return {getattr(riscv_const, f'RISCV_REG_X{rd}')} if rd else set()
+        if mnemonic in ('c.jalr', 'c.jal'):
+            return {riscv_const.RISCV_REG_RA}
+        if mnemonic in NON_WRITING_MNEMONICS:
             return set()
         ops = insn.operands
         if ops and ops[0].type == self.op_reg:
-            return {ops[0].reg}
+            return {ops[0].reg} - {riscv_const.RISCV_REG_ZERO}
         return set()
+
+    def read_registers(self, insn) -> set:
+        ''' Explicit sources, memory bases, compressed accumulators and the
+            implicit sources hidden by Capstone's jump/return aliases. '''
+        mnemonic = self.base_mnemonic(insn.mnemonic)
+        word = int.from_bytes(insn.bytes, 'little')
+        opcode = word & 0x7f
+        if insn.size == 4 and opcode in (0x67, 0x6f):
+            rs1 = (word >> 15) & 31 if opcode == 0x67 else 0
+            return {getattr(riscv_const, f'RISCV_REG_X{rs1}')} if rs1 else set()
+        if mnemonic == 'ret':
+            return {riscv_const.RISCV_REG_RA}
+        ops = insn.operands
+        reads = set()
+        for index, operand in enumerate(ops):
+            if operand.type == self.op_mem:
+                reads.add(operand.mem.base)
+            elif operand.type == self.op_reg and (
+                    index > 0 or mnemonic in NON_WRITING_MNEMONICS
+                    or mnemonic in _COMPRESSED_READ_MODIFY_WRITE):
+                reads.add(operand.reg)
+        return reads - {0, riscv_const.RISCV_REG_ZERO}
 
     # --- ropblock (abstract-gadget) predicates ------------------------------
 
@@ -356,11 +379,5 @@ class RISCV_Architecture(Architecture):
         return False
 
     def _reads_reg(self, insn, reg) -> bool:
-        ''' Whether `insn` reads register `reg`. rd is the first operand and is
-            written (not read) for the ordinary forms; every other register
-            operand is a source, and for the non-writing forms (stores, branches,
-            register jumps) the first operand is a source too. '''
-        reg_ops = [op for op in insn.operands if op.type == self.op_reg]
-        if self.base_mnemonic(insn.mnemonic) not in NON_WRITING_MNEMONICS:
-            reg_ops = reg_ops[1:]
-        return any(insn.reg_name(op.reg) == reg for op in reg_ops)
+        ''' Whether `insn` reads register `reg`, including compressed sources. '''
+        return any(insn.reg_name(rid) == reg for rid in self.read_registers(insn))

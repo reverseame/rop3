@@ -11,11 +11,11 @@ ltc:
           op2: op2
 
   arm:
-    # TODO: Change to subs?
     - steps:
-        - operation: sub
+        - mnemonic: subs
           op1: op1
-          op2: op2
+          op2: op1
+          op3: op2
 
   riscv:
     available: false

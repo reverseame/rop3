@@ -44,12 +44,17 @@ def test_raw_detects_aarch64():
 
 
 def test_raw_detects_riscv64_uncompressed():
-    arch = rawmod.Raw(TEXT, None, 'riscv64').get_arch()
+    arch = rawmod.Raw(TEXT, None, 'riscv64i').get_arch()
     assert isinstance(arch, RISCV_Architecture) and arch.alignment == 4
 
 
 def test_raw_detects_riscv64_compressed():
     arch = rawmod.Raw(TEXT, None, 'riscv64c').get_arch()
+    assert isinstance(arch, RISCV_Architecture) and arch.alignment == 2
+
+
+def test_raw_riscv64_defaults_to_compressed():
+    arch = rawmod.Raw(TEXT, None, 'riscv64').get_arch()
     assert isinstance(arch, RISCV_Architecture) and arch.alignment == 2
 
 

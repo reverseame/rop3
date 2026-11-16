@@ -257,13 +257,9 @@ def _inline_operation_def(set_):
 
 
 def _primary_operands(defn, binding):
-    ''' The two operand-slot values of a primitive under `binding`: the primary
-        destination operand (op1) and the primary non-accumulator source operand
-        (op2). Unbound operands are None (matches any register). '''
-    op1 = binding.get(defn.dst_roles[0]) if defn.dst_roles else None
-    op2_name = next((r for r in defn.src_roles if r not in defn.dst_roles), None)
-    op2 = binding.get(op2_name) if op2_name is not None else None
-    return op1, op2
+    ''' Preserve positional slots independently of their read/write roles.
+        A comparison writes flags but still takes op1 and op2 as inputs. '''
+    return binding.get('op1'), binding.get('op2')
 
 
 def _format(op, op1, op2) -> str:
@@ -736,6 +732,9 @@ class Operand:
         # A wildcard matches any operand and binds nothing.
         if self.wildcard:
             return (True, None)
+
+        if not arch.operand_is_unmodified(operand):
+            return (False, None)
 
         # A generic register operand may match an immediate (reg -> imm subst),
         # but never a memory operand (a load address is not an immediate) and

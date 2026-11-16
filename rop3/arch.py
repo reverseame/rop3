@@ -19,7 +19,8 @@ from abc import ABC, abstractmethod
 
 import capstone
 
-from rop3.search import galileo_scan, backwards_framed_search
+from rop3.search import (galileo_scan, backwards_framed_search,
+                         _ropblock_prologue_index)
 
 class Architecture(ABC):
     """Abstract base class for all architectures"""
@@ -43,8 +44,9 @@ class Architecture(ABC):
 
             Returned unconditionally (retf / ret-imm are *not* gated here);
             GadFinder._ropblock_body_ok applies the --retf / --ret-imm filtering
-            downstream, so the scan stays byte-identical to the former per-offset
-            decode. Default None: fixed-width ISAs keep per-offset discovery. '''
+            downstream. Default None: discover terminators by decoding every
+            legal offset; fixed-width ISAs can instead override _ropblock_scan
+            with a linear sweep. '''
         return None
 
     # --- Mnemonic classification (data supplied by each architecture) -------
@@ -346,6 +348,10 @@ class Architecture(ABC):
         """
         return self.normalize_reg(a) == self.normalize_reg(b)
 
+    def operand_is_unmodified(self, operand) -> bool:
+        ''' Whether an operand has the plain value a ROPLang token denotes. '''
+        return True
+
     @abstractmethod
     def is_valid_abstract_reg(self, name: str | int) -> bool:
         """
@@ -436,6 +442,13 @@ class Architecture(ABC):
         """
         return False
 
+    def return_prologue_index(self, decodes):
+        ''' Stack load feeding the actual return register without a subsequent
+            clobber. Also handles explicit AArch64 `ret Xn` operands. '''
+        return _ropblock_prologue_index(
+            decodes, self.ropblock_branch_reg(decodes[-1]),
+            self.is_stack_load, self.clobbers_reg)
+
     def written_registers(self, insn) -> set:
         """
         Capstone register ids written by `insn`, explicit and implicit. The
@@ -458,9 +471,7 @@ class Architecture(ABC):
         (implicit-only) detail array where capstone does not implement it. Used
         for the read set of a gadget's tuple representation.
 
-        TODO: capstone's regs_access() raises CsError for RISC-V, so this
-        returns an incomplete read set there; RISC-V should override this with an
-        encoding-based accessor (see the TODO on RISCV_Architecture.written_registers).
+        Architectures without regs_access(), such as RISC-V, override this.
         """
         try:
             reads, _ = insn.regs_access()

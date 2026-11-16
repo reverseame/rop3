@@ -48,7 +48,7 @@ class ArgumentParser:
         self.argparser.add_argument('--badchar-bytes', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget opcode bytes')
         self.argparser.add_argument('--keep-canary-address', action='store_true', default=False, help='do not prefer canary-free addresses (0x00, 0x0a, 0x0d, 0xff) when discarding duplicate gadgets')
         self.argparser.add_argument('--base', type=str, metavar='<hex>', nargs='+', help='specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary')
-        self.argparser.add_argument('--arch', type=str, metavar='<name>', default=None, help='select the architecture: the slice of a fat Mach-O binary, or (with --raw) the architecture of a formatless dump (x86, x86_64, aarch64, riscv64, riscv64c)')
+        self.argparser.add_argument('--arch', type=str, metavar='<name>', default=None, help='select the architecture: the slice of a fat Mach-O binary, or (with --raw) the architecture of a formatless dump (x86, x86_64, aarch64, riscv64, riscv64c, riscv64i); riscv64 defaults to compressed decoding')
         self.argparser.add_argument('--raw', action='store_true', default=False, help='treat the input as a formatless raw code dump (no ELF/PE/Mach-O header); requires --arch to set the architecture and uses --base as the load address (default 0)')
         self.argparser.add_argument('--symbols', action='store_true', default=False, help='annotate gadgets with the nearest symbol (when the binary is not stripped)')
         self.argparser.add_argument('--output', choices=['text', 'json', 'csv'], default='text', help='output format (default: text)')
@@ -165,7 +165,7 @@ class ArgumentParser:
             debug.error('You need to provide a binary (--binary or --help)')
 
         if args.raw and not args.arch:
-            debug.error('--raw requires --arch (choose from x86, x86_64, aarch64, riscv64, riscv64c)')
+            debug.error('--raw requires --arch (choose from x86, x86_64, aarch64, riscv64, riscv64c, riscv64i)')
 
         # --tuple is a text-only rendering; it must not silently discard a
         # structured --output (json/csv).

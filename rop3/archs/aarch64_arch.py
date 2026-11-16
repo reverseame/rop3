@@ -92,6 +92,7 @@ class AArch64_Architecture(Architecture):
             opcodes, base_vaddr, depth, self.alignment, disasm, is_valid_gadget,
             restores_return_address=self.restores_return_address,
             is_return=self.is_return if framed else None,
+            return_prologue=self.return_prologue_index,
             accept_candidate=accept_candidate)
 
     def _ropblock_scan(self, opcodes, base_vaddr, depth, disasm,
@@ -255,6 +256,16 @@ class AArch64_Architecture(Architecture):
         if self._is_w_view(a) != self._is_w_view(b):
             return False
         return self.normalize_reg(a) == self.normalize_reg(b)
+
+    def operand_is_unmodified(self, operand) -> bool:
+        # Memory addressing deliberately matches by base alone. Register and
+        # immediate tokens, however, must denote their unshifted value. UXTX
+        # and SXTX are identity extensions of a full 64-bit register.
+        if operand.type == self.op_mem:
+            return True
+        return (operand.shift.value == 0 and operand.ext in (
+            arm64_const.ARM64_EXT_INVALID,
+            arm64_const.ARM64_EXT_UXTX, arm64_const.ARM64_EXT_SXTX))
 
     def is_pc_reg_write(self, insn) -> bool:
         # `ret` (branches through x30) and `br Xn`; `blr` is a call and excluded.

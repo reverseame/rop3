@@ -93,6 +93,7 @@ def _s(op, f3, rs1, rs2, imm):
 # instruction(s), wrapped by the architecture's terminator/frame at test time.
 
 X86_PRIMITIVES = {
+    'ltc': (['eax', 'ebx'], b'\x29\xd8'),
     'add': (['eax', 'ebx'], b'\x01\xd8'),     # add eax, ebx
     'sub': (['eax', 'ebx'], b'\x29\xd8'),     # sub eax, ebx
     'and': (['eax', 'ebx'], b'\x21\xd8'),     # and eax, ebx
@@ -108,6 +109,7 @@ X86_PRIMITIVES = {
 }
 
 X64_PRIMITIVES = {
+    'ltc': (['rax', 'rbx'], b'\x48\x29\xd8'),
     'add': (['rax', 'rbx'], b'\x48\x01\xd8'),   # add rax, rbx
     'sub': (['rax', 'rbx'], b'\x48\x29\xd8'),   # sub rax, rbx
     'and': (['rax', 'rbx'], b'\x48\x21\xd8'),   # and rax, rbx
@@ -123,6 +125,7 @@ X64_PRIMITIVES = {
 }
 
 AARCH64_PRIMITIVES = {
+    'ltc': (['x0', 'x1'], bytes.fromhex('000001eb')),
     'add': (['x0', 'x1'], bytes.fromhex('0000018b')),   # add x0, x0, x1
     'sub': (['x0', 'x1'], bytes.fromhex('000001cb')),   # sub x0, x0, x1
     'and': (['x0', 'x1'], bytes.fromhex('0000018a')),   # and x0, x0, x1

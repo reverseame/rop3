@@ -605,7 +605,7 @@ _COMPOUND_ARCHES = {
         'operands': {'op1': 'rax', 'op2': 'rbx', 'op3': 'rcx'},
         'chains': {
             'eqc': {('sub(rax, rbx)', 'neg(rax)')},
-            'ltc': {('sub(rax, rbx)',)},
+            'ltc': {('ltc(rax, rbx)',)},
             'lsd': {('lc(TMP_REG)', 'neg(rax)', 'and(rax, TMP_REG)')},
             'gsp': {('mov(rax, rsp)',)},
             'spa': {('add(rsp, rax)',)},
@@ -635,7 +635,7 @@ _COMPOUND_ARCHES = {
         'operands': {'op1': 'x0', 'op2': 'x1', 'op3': 'x2'},
         'chains': {
             'eqc': {('sub(x0, x1)', 'negs(x0)')},
-            'ltc': {('sub(x0, x1)',)},
+            'ltc': {('ltc(x0, x1)',)},
             'lsd': {('lc(TMP_REG)', 'neg(x0)', 'and(x0, TMP_REG)')},
             'gsp': {('mov(x0, sp)',)},
             'spa': {('add(sp, x0)',)},

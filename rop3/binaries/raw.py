@@ -23,15 +23,15 @@ from rop3.archs.aarch64_arch import AArch64_Architecture
 
 # Architecture name (as given to --arch) -> factory returning an Architecture.
 # A raw dump carries no header, so the architecture cannot be detected and must
-# come from --arch. Common aliases are accepted; RISC-V compression (which
-# relaxes instruction alignment from 4 to 2 bytes) is undetectable in a
-# formatless blob, so it is selected explicitly via the 'riscv64c' name.
+# come from --arch. RV64 defaults to compressed decoding with 2-byte starts;
+# riscv64i explicitly selects the base ISA with 4-byte instruction alignment.
 SUPPORTED_ARCHS = {
     'x86': X86_Architecture, 'i386': X86_Architecture, 'x86_32': X86_Architecture,
     'x86_64': X64_Architecture, 'x64': X64_Architecture, 'amd64': X64_Architecture,
     'aarch64': AArch64_Architecture, 'arm64': AArch64_Architecture,
-    'riscv64': lambda: RISCV_Architecture(compressed=False),
+    'riscv64': RISCV_Architecture,
     'riscv64c': lambda: RISCV_Architecture(compressed=True),
+    'riscv64i': lambda: RISCV_Architecture(compressed=False),
 }
 
 

@@ -50,11 +50,11 @@ def test_scan_name_and_parallelism_are_architecture_dependent():
     # parallelizable gates chunked scanning.
     assert X86_Architecture().scan_name() == 'galileo'
     assert X64_Architecture().scan_name() == 'galileo'
-    assert RISCV_Architecture(compressed=True).scan_name() == 'framed aligned'
+    assert RISCV_Architecture(compressed=True).scan_name() == 'framed galileo'
     assert AArch64_Architecture().scan_name() == 'framed aligned'
     # --no-frame drops the aligned sweeps to a plain aligned scan.
     assert AArch64_Architecture().scan_name(framed=False) == 'aligned'
-    assert RISCV_Architecture().scan_name(framed=False) == 'aligned'
+    assert RISCV_Architecture().scan_name(framed=False) == 'galileo'
     # --ropblock selects the abstract-gadget search on every architecture.
     assert X64_Architecture().scan_name(ropblock=True) == 'ropblock'
     assert AArch64_Architecture().scan_name(ropblock=True) == 'ropblock'
@@ -168,7 +168,7 @@ def test_galileo_frame_marks_only_the_terminator():
 @_riscv
 def test_aligned_equals_galileo_on_fixed_width():
     from rop3.archs.riscv_arch import RISCV_Architecture
-    arch = RISCV_Architecture()                  # non-compressed: 4-byte aligned
+    arch = RISCV_Architecture(compressed=False)  # base ISA: 4-byte aligned
     md = capstone.Cs(capstone.CS_ARCH_RISCV, capstone.CS_MODE_RISCV64)
     md.detail = True
     code = b'\x33\x85\xc5\x00' + b'\x93\x06\x07\x00' + b'\x67\x80\x00\x00'  # add;mv;ret

@@ -579,6 +579,7 @@ class GadFinder:
 
             def slow_candidates(opcodes, vaddr):
                 scan = (search.literal_scan if arch_obj.alignment == 1
+                        or getattr(arch_obj, 'compressed', False)
                         else search.aligned_literal_scan)
                 return scan(opcodes, vaddr, arch_obj.alignment, md.disasm,
                             pattern_len, accept_candidate=accept_candidate)

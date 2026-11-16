@@ -88,7 +88,7 @@ def test_elf_riscv32_not_supported():
 # --- Architecture descriptors --------------------------------------------
 
 def test_riscv_rop_terminations():
-    assert [t['bytes'] for t in RISCV_Architecture().get_rop_terminations()] == [RET]
+    assert [t['bytes'] for t in RISCV_Architecture(compressed=False).get_rop_terminations()] == [RET]
     compressed = RISCV_Architecture(compressed=True).get_rop_terminations()
     assert {t['size'] for t in compressed} == {4, 2}
 
@@ -418,7 +418,7 @@ def test_riscv_jmp_is_a_stack_pivot(tmp_path):
     from rop3 import Rop3
     from rop3.arch import arch_singleton
     arch_singleton.reset()
-    arch_singleton.initialize(RISCV_Architecture())
+    arch_singleton.initialize(RISCV_Architecture(compressed=False))
 
     # Realization 0: a compound reusing mov(REG_SP -> sp, op1).
     jmp = parser.Parser().get_op('jmp')
